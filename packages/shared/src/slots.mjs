@@ -102,7 +102,7 @@ export class ImplSlot {
   }
 
   #assertReadAllowed(caller) {
-    if (!caller || this.#decl.policy === 'public') return;
+    if (!caller) return;
     this.#authorizer()?.authorize(caller, { kind: 'read', slot: this.#decl.name });
   }
 

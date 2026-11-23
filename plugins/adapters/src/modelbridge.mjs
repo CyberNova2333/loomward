@@ -13,13 +13,18 @@ const SNAPSHOT_CACHE_TTL_MS = 5_000;
 const SECRET_FIELD_HINT =
   /(token|secret|password|passphrase|api[_-]?key|private[_-]?key|access[_-]?key|authorization|cookie|credential|jwt|bearer|session[_-]?id)/i;
 const INLINE_SECRET_RE = /\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{8,}/gi;
+const INLINE_KEY_PREFIX_RE = /\b(?:sk|rk|pk|mb|ghp|gho|ghs|ghu|ghr|github_pat)_[A-Za-z0-9_-]{12,}\b/g;
+const PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 function sanitizeTelemetryValue(value, depth = 0) {
   if (depth > 3 || value === null || value === undefined) return null;
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (typeof value === 'boolean') return value;
   if (typeof value === 'string') {
-    return value.replace(INLINE_SECRET_RE, '$1 [REDACTED]').slice(0, 120);
+    return value
+      .replace(INLINE_SECRET_RE, '$1 [REDACTED]')
+      .replace(INLINE_KEY_PREFIX_RE, '[REDACTED_KEY]')
+      .slice(0, 120);
   }
   if (Array.isArray(value)) {
     return value.slice(0, 16).map(item => sanitizeTelemetryValue(item, depth + 1));
@@ -27,7 +32,7 @@ function sanitizeTelemetryValue(value, depth = 0) {
   if (typeof value === 'object') {
     const out = {};
     for (const [key, item] of Object.entries(value)) {
-      if (SECRET_FIELD_HINT.test(key)) continue;
+      if (PROTO_KEYS.has(key) || SECRET_FIELD_HINT.test(key)) continue;
       out[key] = sanitizeTelemetryValue(item, depth + 1);
     }
     return out;

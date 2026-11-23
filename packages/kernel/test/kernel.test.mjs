@@ -430,7 +430,10 @@ test('KernelGuard blocks Cordis context escapes (ctx.root/reflect/registry/event
   // 3. Mounted extension facade hides root/reflect/registry/events, blocks null-proto escape & cordis.original, and blocks after unmount.
   let extCtx;
   let extProviderSlot;
+  let extPanelSlot;
   let extService;
+  let interceptedCtx;
+  let isolatedCtx;
   await control.mountExtensionUnit({
     contract: {
       schemaVersion: 1,
@@ -438,8 +441,13 @@ test('KernelGuard blocks Cordis context escapes (ctx.root/reflect/registry/event
       kind: 'extension-plugin',
       version: '3.0.0-alpha.0',
       executionBoundary: 'out-of-process',
-      consumes: ['tool:provider@1', 'demo:service'],
+      consumes: ['tool:provider@1', 'console:panel@1', 'demo:service'],
       registers: [{ slot: 'tool:provider@1', name: 'probe-prov' }],
+      writes: {
+        hooks: [],
+        intercepts: ['demo:service'],
+        isolateProvides: ['ext:local'],
+      },
     },
     trust: { autoApproveTrusted: true },
     serviceMethods: {
@@ -452,7 +460,11 @@ test('KernelGuard blocks Cordis context escapes (ctx.root/reflect/registry/event
       apply(ctx) {
         extCtx = ctx;
         extProviderSlot = ctx.get('tool:provider@1');
+        extPanelSlot = ctx.get('console:panel@1');
         extService = ctx.get('demo:service');
+        interceptedCtx = ctx.intercept('demo:service', {});
+        isolatedCtx = ctx.isolate(['ext:local']);
+        isolatedCtx.provide('ext:local', { ok: true });
       },
     }),
   });
@@ -463,15 +475,50 @@ test('KernelGuard blocks Cordis context escapes (ctx.root/reflect/registry/event
   assert.equal(extCtx.events, undefined);
   assert.equal(Object.getPrototypeOf(extCtx), null);
   assert.deepEqual(Object.getOwnPropertySymbols(extCtx), []);
+  // R2-C1: ctx.intercept() and ctx.isolate() return restricted null-prototype facades, NEVER raw Cordis Context!
+  assert.ok(interceptedCtx);
+  assert.equal(interceptedCtx.root, undefined);
+  assert.equal(Object.getPrototypeOf(interceptedCtx), null);
+  assert.throws(() => interceptedCtx.get(VAULT_SLOT), SlotError);
+  assert.ok(isolatedCtx);
+  assert.equal(isolatedCtx.root, undefined);
+  assert.equal(Object.getPrototypeOf(isolatedCtx), null);
+  assert.throws(() => extCtx.isolate(['undeclared:svc']), SlotError);
   assert.equal(extProviderSlot[Symbol.for('cordis.original')], undefined);
   assert.equal(extProviderSlot.registerBuiltin, undefined);
   assert.equal(extProviderSlot.entries, undefined);
+  // R2-H1: public slot console:panel@1 also hides entries/current from extensions so other plugins' closures are isolated.
+  assert.equal(extPanelSlot.entries, undefined);
+  assert.equal(extPanelSlot.current, undefined);
   assert.equal(extService[Symbol.for('cordis.original')], undefined);
   assert.throws(() => extCtx.on('internal/service', () => {}), SlotError);
   assert.throws(() => extCtx.get('sandbox:docker'), SlotError);
+  assert.throws(() => extCtx.get('console:loopback'), SlotError);
+  assert.throws(() => extCtx.get('host:vault'), SlotError);
   // Unlisted method on demo:service fails closed.
   assert.throws(() => extService.syncDanger(), SlotError);
   assert.equal(extService.readInfo(), 'ok');
+
+  // R2-H2: serviceMethods referencing a service not in contract.consumes is rejected at evaluateGuard time.
+  await assert.rejects(
+    () => control.mountExtensionUnit({
+      contract: {
+        schemaVersion: 1,
+        id: 'undeclared-svc-ext',
+        kind: 'extension-plugin',
+        version: '3.0.0-alpha.0',
+        executionBoundary: 'out-of-process',
+        consumes: [],
+      },
+      serviceMethods: {
+        'demo:service': {
+          readInfo: { policy: 'public', mode: 'read' },
+        },
+      },
+      load: () => ({ name: 'undeclared-svc-ext', apply() {} }),
+    }),
+    err => err instanceof StartupRejectedError && err.code === REJECT_CODES.GUARD_SLOT_UNDECLARED,
+  );
 
   // After unmount, captured service proxy & context fail closed.
   await control.unmountExtensionUnit('escape-probe-ext');

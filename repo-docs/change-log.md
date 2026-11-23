@@ -289,3 +289,19 @@ Synced through f52606d（含 Phase 4 工作树改动）
 - 验证范围与边界：本机（Linux x86_64）完成 `pnpm run build:console`、`pnpm run check`、`pnpm run layering`、`pnpm run test:ci`（176 项测试：160 通过、0 失败、16 项按平台/Docker 跳过）、`validate_repo_docs.py`、`pnpm --dir docs-site run docs:build`、`repo_maintenance_guard.py pre-commit` 与 `sync_assets_licenses.py --check --dry-run`。
 
 Synced through 3b7e919（含全栈基座四路代码审查与深度加固工作树改动）
+
+## 2026-11-23（二轮对抗性代码审查与深层逃逸封堵）：`ctx.intercept` 原始 Context 逃逸修复、`console:panel@1` 闭包隔离、默认 DNS SSRF 校验与异步会话复验
+
+- 触发：用户在完成首轮 42 项基座加固（`d88bd6e`）后要求「再次进行一次代码审查」；对微内核、宿主调度管线、双源控制台与进程外四插件执行二轮逐行对抗性复审，发现并修复 `1 Critical` 与 `7 High` 深层边界问题；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 微内核与共享原语（[packages/kernel/src/guard.mjs](../packages/kernel/src/guard.mjs)、[packages/kernel/src/boot.mjs](../packages/kernel/src/boot.mjs)、[packages/kernel/src/rules.mjs](../packages/kernel/src/rules.mjs)、[packages/kernel/src/policy-tree.mjs](../packages/kernel/src/policy-tree.mjs)、[packages/shared/src/guard-types.mjs](../packages/shared/src/guard-types.mjs)、[packages/shared/src/slots.mjs](../packages/shared/src/slots.mjs)）：
+  - **Critical `R2-C1`（`ctx.intercept` 返回原始 Cordis `Context` 逃逸）**：Cordis 4 的 `rawCtx.intercept(name, config)` 返回带 `.root` 的子 `Context` 对象而非清理函数，旧实现因 `typeof dispose === 'function'` 为假直接将原始 `Context` 返回给扩展插件；现统一将其包装为受限零原型门面 `createRestrictedFacade`，并新增受 `writes.isolateProvides` 白名单约束的 `ctx.isolate(names)`。
+  - **High `R2-H1`（`console:panel@1` 跨插件闭包隔离与根专属服务扩充）**：从扩展插件的 `ImplSlot` 门面移除 `entries()` / `current()` 并在 `ImplSlot.#assertReadAllowed` 中对所有受追踪扩展调用方强制鉴权，防止扩展插件经 `ctx.get('console:panel@1').entries()` 读取其他插件的 `getSnapshot` 闭包；将 `console:loopback`、`host:vault`、`host:approval-ledger` 纳入 `ROOT_ONLY_SERVICES`，且 `wrapService` 在未配置 `serviceMethods` 时同样包裹活跃态与符号剥离代理。
+  - **High `R2-H2`（扩展挂载 `fiber.state === 2` 与未声明 `serviceMethods` 拦截）**：`mountExtensionUnit` 在 `await fiber` 后强制校验 `fiber.state === 2`；`slotDeclarationRule` 与 `compileUnitGrant` 拒绝未在 `contract.consumes` 中声明的 `serviceMethods` 目标（`GUARD_SLOT_UNDECLARED`）。
+- 宿主调度管线与双入口（[packages/host/src/pipeline.mjs](../packages/host/src/pipeline.mjs)、[packages/host/src/ingress-relay.mjs](../packages/host/src/ingress-relay.mjs)、[packages/host/src/ingress-local.mjs](../packages/host/src/ingress-local.mjs)）：
+  - **High `R2-H3` & `R2-H4`**：`isValidJsonRpcReply` 强制校核响应 `id` 与请求 `id` 一致；免批工具在触发 `forceApproval: true` 并获批后同步登记内存 `controlReceipts` 与持久化 `effectiveReceipts`；`ingress-relay.mjs` 将 `lastPong` 初始化为连接建立时刻并引入 `receivedPong` 标志，避免首个 20s 心跳周期误断连；`ingress-local.mjs` 增加 `startEpoch` 防止 `start()` 等待期间调用 `stop()` 被反向置回 `running = true`。
+- 进程外扩展插件与双源控制台（[plugins/antileak](../plugins/antileak/engine/check.py)、[plugins/decisions](../plugins/decisions/src/service-manager.mjs)、[plugins/adapters](../plugins/adapters/src/network.mjs)、[packages/console](../packages/console/src/console-server.mjs)）：
+  - **High `R2-H5` & `R2-H6`**：修复 `check.py` `load_cache()` 在非普通文件/超限分支提前返回导致的 `fd` 泄漏，并对 `POLICY_PATH` 启用 `O_NOFOLLOW` + `1 MiB` 校验；`extractInspectablePayload` 支持提取 `Uint8Array` / `ArrayBufferView` 载荷；`network.mjs` `fetchBounded` 在使用默认 `globalThis.fetch` 时自动启用 `dns.promises.lookup` 防 DNS 重绑定 SSRF；`cloudforge.mjs` 强制要求 RFC 8414 `issuer` 字段存在且匹配；`modelbridge.mjs` 过滤原型键并脱敏常见 API Key 前缀；`decisions` `httpJsonRequest` 严格锁定路径不脱离回环 `origin`。
+  - **High `R2-H7`**：`console-server.mjs` 在 `GET /api/status`、`GET /api/panels` 与 `GET /api/panels/:id` 异步采集面板完成后二次复验会话有效性（防并发吊销泄露在途快照）；`trust-server.mjs` 在审批拒绝时校核 `nlink === 1` 并在会话策略切换时清理其它旧会话；`connectControlSocket` 在 POSIX 上校验 `0600` 权限与当前用户 UID。
+- 验证范围与边界：本机（Linux x86_64）运行 `pnpm run check`、`pnpm run layering`、`pnpm run test:ci`（176 项测试：160 通过、0 失败、16 跳过）、`validate_repo_docs.py`、`pnpm --dir docs-site run docs:build`、`repo_maintenance_guard.py pre-commit` 与 `sync_assets_licenses.py --check --dry-run`。
+
+Synced through d88bd6e（含二轮对抗性代码审查与深层逃逸封堵工作树改动）

@@ -292,12 +292,18 @@ export async function createConsoleOriginServer({
           refreshSnapshot({ force: false }),
           panelCollector.collectAll({ originRole: 'console' }),
         ]);
+        if (!broker.authenticateConsoleSession(req, loadCurrentAuthRecord(), false)) {
+          return sendJson(res, 401, { error: 'Console session was revoked.', code: 'CONSOLE_AUTH_REQUIRED' });
+        }
         return sendJson(res, 200, enrichSnapshot(snap, panels));
       }
 
       if (req.method === 'GET' && reqUrl.pathname === '/api/panels') {
         if (!verifyFetchSiteSameOriginOrNone(req, false)) return sendJson(res, 403, { error: 'Cross-site request rejected.' });
         const panels = await panelCollector.collectAll({ originRole: 'console' });
+        if (!broker.authenticateConsoleSession(req, loadCurrentAuthRecord(), false)) {
+          return sendJson(res, 401, { error: 'Console session was revoked.', code: 'CONSOLE_AUTH_REQUIRED' });
+        }
         return sendJson(res, 200, { ok: true, panels });
       }
 
@@ -308,6 +314,9 @@ export async function createConsoleOriginServer({
           return sendJson(res, 400, { error: 'Invalid panel ID.' });
         }
         const panel = await panelCollector.collectById(panelId, { originRole: 'console' });
+        if (!broker.authenticateConsoleSession(req, loadCurrentAuthRecord(), false)) {
+          return sendJson(res, 401, { error: 'Console session was revoked.', code: 'CONSOLE_AUTH_REQUIRED' });
+        }
         if (!panel) return sendJson(res, 404, { error: 'Console panel not found.' });
         return sendJson(res, 200, { ok: true, panel });
       }

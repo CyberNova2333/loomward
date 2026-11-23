@@ -29,6 +29,9 @@ function assertLoopbackUrl(rawUrl) {
   if (parsed.protocol !== 'http:') {
     throw new Error('Decisions ledger client only permits loopback http:// endpoints.');
   }
+  if (parsed.username || parsed.password || (parsed.pathname && parsed.pathname !== '/') || parsed.search || parsed.hash) {
+    throw new Error('Decisions ledger baseUrl must be a bare loopback origin without credentials or path.');
+  }
   assertLoopbackHost(parsed.hostname);
   return parsed.origin;
 }
@@ -65,7 +68,13 @@ function normalizeTimeoutMs(raw, fallback = 10000) {
 
 function httpJsonRequest(baseUrl, pathname, { method = 'GET', body, timeoutMs = 10000, signal } = {}) {
   const origin = assertLoopbackUrl(baseUrl);
+  if (typeof pathname !== 'string' || !pathname.startsWith('/') || pathname.startsWith('//')) {
+    throw new Error('Invalid decisions loopback request path.');
+  }
   const parsed = new URL(pathname, origin);
+  if (parsed.origin !== origin) {
+    throw new Error('Decisions loopback request path cannot escape service origin.');
+  }
   const effectiveTimeout = normalizeTimeoutMs(timeoutMs, 10000);
   const payloadBuf = body !== undefined ? Buffer.from(JSON.stringify(body), 'utf8') : null;
   const headers = {

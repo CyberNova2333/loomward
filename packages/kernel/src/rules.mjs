@@ -121,6 +121,9 @@ export const slotDeclarationRule = Object.freeze({
         ctx.trustedActions.push(formatActionNode({ kind: 'service.isolate-provide', target: svcName }));
       }
       for (const [svcName, rules] of Object.entries(ctx.serviceMethods ?? {})) {
+        if (!contract.consumes.includes(svcName)) {
+          return REJECT_CODES.GUARD_SLOT_UNDECLARED;
+        }
         if (!rules || typeof rules !== 'object') continue;
         for (const [methodName, rule] of Object.entries(rules)) {
           if (rule?.policy === 'trusted') {

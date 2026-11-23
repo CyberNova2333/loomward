@@ -775,9 +775,9 @@ export async function createTrustOriginServer({
         }
         appendSanitizedConnectorLog(stateDir, 'webui_auth', { outcome: `session_policy_${targetMode}` });
         const snap = await refreshSnapshot({ force: true, broadcast: targetMode !== 'tab' });
+        broker.pruneOtherTrustSessions(session.sid);
         if (targetMode === 'tab') {
           session.tabToken = rotatedTabToken;
-          broker.pruneOtherTrustSessions(session.sid);
           broker.revokeChildConsoleSessions?.(session.sid);
           dropStreamsForSid(null);
         }
@@ -909,12 +909,12 @@ export async function createTrustOriginServer({
           const approvedPath = path.join(approvalsDir, `${body.id}.approved.json`);
           const apStat = fs.lstatSync(approvedPath, { throwIfNoEntry: false });
           if (apStat) {
-            if (apStat.isSymbolicLink() || !apStat.isFile()) return sendJson(res, 400, { error: 'Invalid approval marker file.' });
+            if (apStat.isSymbolicLink() || !apStat.isFile() || apStat.nlink !== 1) return sendJson(res, 400, { error: 'Invalid approval marker file.' });
             try { fs.unlinkSync(approvedPath); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
           }
           const reqPath = path.join(approvalsDir, `${body.id}.request.json`);
           const st = fs.lstatSync(reqPath);
-          if (st.isSymbolicLink() || !st.isFile()) return sendJson(res, 400, { error: 'Invalid approval file.' });
+          if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) return sendJson(res, 400, { error: 'Invalid approval file.' });
           let loggedTool = 'unknown';
           try {
             const fd = fs.openSync(reqPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));

@@ -171,6 +171,14 @@ export function connectControlSocket(socketPath, { onEvent = () => {} } = {}) {
   if (st.isSymbolicLink() || !st.isSocket()) {
     throw new Error('Target control path is not a regular Unix domain socket.');
   }
+  if (process.platform !== 'win32') {
+    if ((st.mode & 0o077) !== 0) {
+      throw new Error('Target control socket must not be group or world accessible (0600 required).');
+    }
+    if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
+      throw new Error('Target control socket is not owned by the current user.');
+    }
+  }
   const client = net.createConnection(resolved);
   let buf = '';
   client.on('data', chunk => {

@@ -14,16 +14,21 @@ export function createLocalMcpIngress({
   }
 
   let running = false;
+  let startEpoch = 0;
   const activeControllers = new Set();
 
   return Object.freeze({
     id: 'local-mcp-direct',
     kind: 'local-direct',
     async start() {
+      const epoch = ++startEpoch;
       await pipeline.ready();
-      running = true;
+      if (epoch === startEpoch) {
+        running = true;
+      }
     },
     async stop() {
+      startEpoch += 1;
       running = false;
       for (const ctrl of [...activeControllers]) {
         ctrl.abort();

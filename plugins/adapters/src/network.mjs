@@ -301,11 +301,12 @@ export async function fetchBounded(
     err.code = 'UPSTREAM_ABORTED';
     throw err;
   }
-  if (dnsLookup) {
+  const effectiveDnsLookup = dnsLookup ?? (fetchImpl === globalThis.fetch ? dns.promises.lookup : null);
+  if (effectiveDnsLookup) {
     await assertSafeResolvedHostname(url, {
       allowLoopbackHttp,
       allowPrivateNetwork,
-      dnsLookup,
+      dnsLookup: effectiveDnsLookup,
     });
   }
   const controller = new AbortController();

@@ -223,16 +223,6 @@ export class KernelGuard {
         guard.#assertUnitActive(state, `impl.names:${rawSlot.name}`);
         return rawSlot.names();
       };
-      if (rawSlot.decl.policy === 'public') {
-        facade.entries = () => {
-          guard.#assertUnitActive(state, `impl.entries:${rawSlot.name}`);
-          return boundSlot.entries();
-        };
-        facade.current = () => {
-          guard.#assertUnitActive(state, `impl.current:${rawSlot.name}`);
-          return boundSlot.current();
-        };
-      }
       return Object.freeze(facade);
     }
 
@@ -290,7 +280,8 @@ export class KernelGuard {
 
     methods.effect = (fn, label) => {
       guard.#assertUnitActive(state, 'ctx.effect');
-      return rawCtx.effect(fn, label);
+      const dispose = rawCtx.effect(fn, label);
+      return typeof dispose === 'function' ? () => { dispose(); } : undefined;
     };
 
     methods.on = (event, listener) => {
@@ -298,7 +289,8 @@ export class KernelGuard {
       if (event !== 'dispose') {
         throw new SlotError(`Extension unit ${state.unitId} may only listen to "dispose" lifecycle events.`);
       }
-      return rawCtx.on('dispose', listener);
+      const dispose = rawCtx.on('dispose', listener);
+      return typeof dispose === 'function' ? () => { dispose(); } : undefined;
     };
 
     methods.intercept = (name, config) => {
@@ -313,7 +305,7 @@ export class KernelGuard {
       recordRuntimeWrite(state, { kind: 'intercept', target: name, action });
       const audited = state.grant.trustedActionNodes.includes(action);
       if (audited) state.onAudit(AUDIT_CODES.AUDIT_TRUSTED_WRITE_ON, name, action);
-      const dispose = rawCtx.intercept(name, config);
+      const childOrDispose = rawCtx.intercept(name, config);
       if (audited) {
         let offEmitted = false;
         const emitOff = () => {
@@ -323,7 +315,28 @@ export class KernelGuard {
         };
         rawCtx.effect(() => () => emitOff(), `audit:intercept:${name}`);
       }
-      return typeof dispose === 'function' ? () => dispose() : dispose;
+      if (typeof childOrDispose === 'function') {
+        return () => { childOrDispose(); };
+      }
+      if (childOrDispose && typeof childOrDispose === 'object') {
+        return guard.createRestrictedFacade(childOrDispose, base, state);
+      }
+      return undefined;
+    };
+
+    methods.isolate = names => {
+      guard.#assertUnitActive(state, 'ctx.isolate');
+      const list = Array.isArray(names) ? names : [names];
+      if (list.length === 0 || list.some(n => typeof n !== 'string' || !n)) {
+        throw new SlotError(`Unit ${state.unitId} ctx.isolate requires a non-empty list of service names.`);
+      }
+      for (const n of list) {
+        if (guard.#closedSlots.has(n) || guard.#rootOnlyServices.has(n) || !state.manifest.writes.isolateProvides.includes(n)) {
+          throw new SlotError(`Unit ${state.unitId} is not allowed to isolate service: ${n}.`);
+        }
+      }
+      const isoCtx = rawCtx.isolate(list);
+      return guard.createRestrictedFacade(isoCtx, base, state);
     };
 
     methods.provide = (name, value, check) => {
@@ -370,7 +383,7 @@ export class KernelGuard {
         return false;
       },
       ownKeys() {
-        return ['get', 'effect', 'on', 'intercept', 'provide'];
+        return ['get', 'effect', 'on', 'intercept', 'isolate', 'provide'];
       },
       get(_target, prop) {
         if (typeof prop === 'symbol') return undefined;
@@ -474,8 +487,7 @@ export class KernelGuard {
   wrapService(serviceName, value, state) {
     if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return value;
     if (value[GUARD_WRAPPED] === true) return value;
-    const methodRules = state.grant.serviceMethods?.[serviceName];
-    if (!methodRules) return value;
+    const methodRules = state.grant.serviceMethods?.[serviceName] ?? null;
 
     let byObj = this.#proxyCache.get(state);
     if (!byObj) {
@@ -497,8 +509,15 @@ export class KernelGuard {
         if (BLOCKED_SYMBOLS.has(prop)) return undefined;
         return Reflect.get(target, prop, target);
       }
+      guard.#assertUnitActive(state, `service.get:${serviceName}#${String(prop)}`);
       const raw = Reflect.get(target, prop, target);
       if (typeof raw !== 'function') return raw;
+      if (!methodRules) {
+        return function activeCheckedMethod(...args) {
+          guard.#assertUnitActive(state, `service.invoke:${serviceName}#${String(prop)}`);
+          return Reflect.apply(raw, target, args);
+        };
+      }
       const rule = resolveMethodRule(methodRules, prop);
       return function guardedMethod(...args) {
         return guard.#invokeGuardedMethod(
@@ -513,10 +532,14 @@ export class KernelGuard {
 
     let wrapped;
     if (typeof value === 'function') {
-      const callRule = resolveMethodRule(methodRules, '$');
+      const callRule = methodRules ? resolveMethodRule(methodRules, '$') : null;
       wrapped = new Proxy(value, {
         get: wrapMethodAccess,
         apply(target, thisArg, args) {
+          if (!methodRules) {
+            guard.#assertUnitActive(state, `service.invoke:${serviceName}#$`);
+            return Reflect.apply(target, thisArg, args);
+          }
           return guard.#invokeGuardedMethod(state, serviceName, '$', callRule, () => Reflect.apply(target, thisArg, args));
         },
         construct() {

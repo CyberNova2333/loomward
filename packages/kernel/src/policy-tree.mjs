@@ -212,8 +212,9 @@ export function compileUnitGrant(
   }
 
   const normalizedServiceMethods = Object.create(null);
+  const declaredConsumes = new Set(contract.consumes ?? []);
   for (const [svcName, rules] of Object.entries(serviceMethods ?? {})) {
-    if (PROTO_KEYS.has(svcName) || !rules || typeof rules !== 'object' || Array.isArray(rules)) continue;
+    if (PROTO_KEYS.has(svcName) || !declaredConsumes.has(svcName) || !rules || typeof rules !== 'object' || Array.isArray(rules)) continue;
     const frozenRules = Object.create(null);
     for (const [methodName, rule] of Object.entries(rules)) {
       if (PROTO_KEYS.has(methodName) || !rule || typeof rule !== 'object' || Array.isArray(rule)) continue;

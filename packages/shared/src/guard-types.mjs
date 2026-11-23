@@ -8,7 +8,10 @@ export const ROOT_ONLY_SERVICES = Object.freeze([
   'sandbox:docker',
   'host:dispatch',
   'host:platform',
+  'host:vault',
+  'host:approval-ledger',
   'console:trust-origin',
+  'console:loopback',
 ]);
 
 export const AUDIT_CODES = Object.freeze({

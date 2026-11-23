@@ -42,10 +42,24 @@ POLICY_PATH = (
     or os.environ.get('GUARD_POLICY')
     or ('/root/.claude/policy/policy.json' if os.path.exists('/root/.claude/policy/policy.json') else os.path.join(_ENGINE_DIR, 'policy.json'))
 )
+_pfd = None
 try:
-    with open(POLICY_PATH, encoding='utf-8') as _pf:
+    _pflags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+    _pfd = os.open(POLICY_PATH, _pflags)
+    _pst = os.fstat(_pfd)
+    if not stat.S_ISREG(_pst.st_mode) or _pst.st_size > 1024 * 1024:
+        os.close(_pfd)
+        _pfd = None
+        raise ValueError('invalid policy file')
+    with os.fdopen(_pfd, 'r', encoding='utf-8') as _pf:
+        _pfd = None
         POLICY = json.load(_pf)
 except Exception:
+    if _pfd is not None:
+        try:
+            os.close(_pfd)
+        except Exception:
+            pass
     print('error')
     print('  ✘ 无法读取策略文件(fail-closed)', file=sys.stderr)
     sys.exit(0)
@@ -140,6 +154,8 @@ def load_cache():
         fd = os.open(CACHE, flags)
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > 4 * 1024 * 1024:
+            os.close(fd)
+            fd = None
             return None
         with os.fdopen(fd, 'r', encoding='utf-8') as f:
             fd = None

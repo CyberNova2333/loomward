@@ -42,9 +42,10 @@ function deepFreezeClone(value) {
   return visit(cloned);
 }
 
-function isValidJsonRpcReply(outcome) {
+function isValidJsonRpcReply(outcome, expectedId) {
   if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) return false;
   if (outcome.jsonrpc !== '2.0') return false;
+  if (expectedId !== undefined && outcome.id !== expectedId) return false;
   const hasResult = Object.hasOwn(outcome, 'result');
   const hasError = Object.hasOwn(outcome, 'error');
   return hasResult !== hasError;
@@ -426,9 +427,19 @@ export function createToolDispatchPipeline({
             ));
           }
           controller.signal.throwIfAborted();
-          const claim = (persistent || (!stopping && effectiveReceipts))
-            ? await effectiveReceipts.claim(message)
-            : (stopping ? stopReceipts : controlReceipts).claim(message);
+          let claim;
+          if (persistent) {
+            claim = await effectiveReceipts.claim(message);
+          } else {
+            const memClaim = (stopping ? stopReceipts : controlReceipts).claim(message);
+            if (!memClaim.acquired) {
+              claim = memClaim;
+            } else if (!stopping && effectiveReceipts) {
+              claim = await effectiveReceipts.claim(message);
+            } else {
+              claim = memClaim;
+            }
+          }
           if (!claim.acquired) {
             throw new ControlReplySignal(makeRpcError(
               authorized.body.id,
@@ -476,7 +487,7 @@ export function createToolDispatchPipeline({
           rule: outcome.rule || null,
         });
       }
-      if (!isValidJsonRpcReply(outcome)) {
+      if (!isValidJsonRpcReply(outcome, authorized.body.id ?? null)) {
         throw new Error('Invalid JSON-RPC response returned by tool invocation pipeline.');
       }
 

@@ -272,8 +272,8 @@ export function createCloudForgeClient({
     if (!authServer || typeof authServer !== 'object') {
       throw new Error('CloudForge OAuth authorization server metadata unavailable.');
     }
-    // RFC 8414 §3.3 issuer mix-up defense
-    if (authServer.issuer && normalizeIssuer(authServer.issuer) !== normalizeIssuer(issuerRaw)) {
+    // RFC 8414 §2 & §3.3 mandatory issuer validation and mix-up defense
+    if (typeof authServer.issuer !== 'string' || normalizeIssuer(authServer.issuer) !== normalizeIssuer(issuerRaw)) {
       throw new Error('CloudForge OAuth authorization server issuer mismatch.');
     }
     const methods = Array.isArray(authServer.code_challenge_methods_supported)

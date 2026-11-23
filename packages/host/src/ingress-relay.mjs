@@ -73,11 +73,13 @@ export function createCloudflareRelayIngress({
         followRedirects: false,
       });
       activeSocket = socket;
-      let lastPong = 0;
+      let lastPong = Date.now();
+      let receivedPong = false;
       let beat = null;
 
       socket.on('open', () => {
         if (!running || activeSocket !== socket) { socket.terminate(); return; }
+        lastPong = Date.now();
         safeRecord('connected', { route: candidate ? 'proxy' : 'direct', ingress: 'cloudflare-wss' });
         safeStatus(false, { force: true });
         try { socket.send('{"type":"ping"}'); } catch {}
@@ -86,7 +88,7 @@ export function createCloudflareRelayIngress({
           if (socket.readyState === WebSocket.OPEN) {
             try { socket.send(JSON.stringify({ type: 'ping' })); } catch {}
           }
-          safeStatus(Date.now() - lastPong <= HEARTBEAT_MAX_AGE_MS);
+          safeStatus(receivedPong && Date.now() - lastPong <= HEARTBEAT_MAX_AGE_MS);
         }, HEARTBEAT_INTERVAL_MS);
         beat.unref?.();
       });
@@ -109,6 +111,7 @@ export function createCloudflareRelayIngress({
         }
         if (message.type === 'pong') {
           retries = 0;
+          receivedPong = true;
           lastPong = Date.now();
           safeStatus(true);
           return;

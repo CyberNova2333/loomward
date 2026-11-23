@@ -274,6 +274,9 @@ export async function createLoomWardKernel({ rpm, roots = [], expectedTarget = n
         if (stopped) {
           throw new StartupRejectedError(REJECT_CODES.GUARD_INDETERMINATE, contract.id, 'Kernel stopped during extension mount.');
         }
+        if (fiber.state !== 2) {
+          throw new StartupRejectedError(REJECT_CODES.GUARD_INDETERMINATE, contract.id, 'Extension plugin did not reach ACTIVE state.');
+        }
       } catch (error) {
         guard.unregisterUnit(contract.id);
         if (fiber) {

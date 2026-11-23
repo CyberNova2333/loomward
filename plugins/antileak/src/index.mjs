@@ -64,6 +64,15 @@ export function extractInspectablePayload(_toolName, args) {
     if (typeof value === 'number' || typeof value === 'boolean') {
       return;
     }
+    if (value instanceof Uint8Array || ArrayBuffer.isView(value)) {
+      if (value.byteLength > MAX_INPUT_BYTES) {
+        overflow = true;
+        overflowReason = 'ANTILEAK-INPUT-TOO-LARGE';
+        return;
+      }
+      pushString(Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('utf8'));
+      return;
+    }
     if (!value || typeof value !== 'object') return;
     if (seen.has(value)) return;
     seen.add(value);
