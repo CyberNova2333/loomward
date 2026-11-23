@@ -305,3 +305,14 @@ Synced through 3b7e919（含全栈基座四路代码审查与深度加固工作�
 - 验证范围与边界：本机（Linux x86_64）运行 `pnpm run check`、`pnpm run layering`、`pnpm run test:ci`（176 项测试：160 通过、0 失败、16 跳过）、`validate_repo_docs.py`、`pnpm --dir docs-site run docs:build`、`repo_maintenance_guard.py pre-commit` 与 `sync_assets_licenses.py --check --dry-run`。
 
 Synced through d88bd6e（含二轮对抗性代码审查与深层逃逸封堵工作树改动）
+
+## 2026-11-23（三轮收官代码审查与原子权限/协议收口）：防泄漏动态缓存 `0600` 原子写、`initialize` 控制路由收口与 `deepFreezeClone` 防环优化
+
+- 触发：用户要求「最后进行一次代码审查」；对尚未逐行复读的辅助脚本、Python 缓存刷新器、控制 RPC 分发分支与静态分层测试做最终收官排查，修复 `4 High/Medium` 边界问题；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 防泄漏缓存刷新与句柄安全（[plugins/antileak/engine/refresh-private.py](../plugins/antileak/engine/refresh-private.py)、[plugins/antileak/engine/resolve-private.py](../plugins/antileak/engine/resolve-private.py)、[plugins/antileak/engine/check.py](../plugins/antileak/engine/check.py)）：
+  - **High `R3-H1` & `R3-H2`**：`refresh-private.py` 与 `resolve-private.py` 写 `private-repos.json` 与 `.resolve.json` 时改为 `0700` 目录 + `O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW` `0600` 带 PID 临时文件，并在 `with os.fdopen(...)` 显式关闭句柄后再执行 `os.replace`，防止私有仓名/R4 业务标识缓存以默认 `0644` 权限落盘或因未关闭句柄在 Windows 下替换失败；统一 `SEED`、`CNB_TOKEN_FILE`、`msgfile` 与 `extra` 的 `with open(...)` 上下文管理。
+- 宿主调度控制路由与分层守卫（[packages/host/src/pipeline.mjs](../packages/host/src/pipeline.mjs)、[packages/shared/src/panel-schema.mjs](../packages/shared/src/panel-schema.mjs)、[packages/kernel/test/layering.test.mjs](../packages/kernel/test/layering.test.mjs)）：
+  - **High `R3-H3` & `R3-H4`**：移除 `handleControlRpc` 中将 `initialize` / `ping` 抢先转发给 `sandbox-docker.handleRpc` 的冗余分支，确保 `initialize` 始终返回 LoomWard 规范 `serverInfo: { name: 'loomward', version: '3.0.0-alpha.0' }`；`deepFreezeClone` 增加 `Object.isFrozen(node)` 短路并在单次 `tools/call` 中复用 `frozenBody` / `frozenAuth`；`panel-schema.mjs` 在 `tables: []` 为空数组时仍回退保留有效 `table`；`layering.test.mjs` 机械禁止 `@loomward/{shared,kernel,cloud-relay}` 出现越出 `packages/` 的相对导入。
+- 验证范围与边界：本机（Linux x86_64）运行 `pnpm run check`、`pnpm run layering`、工作区与插件测试、`validate_repo_docs.py` 与 `repo_maintenance_guard.py pre-commit`。
+
+Synced through bd32c2e（含三轮收官代码审查修复工作树改动）

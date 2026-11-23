@@ -354,8 +354,9 @@ def cmd_content(text):
 
 
 def cmd_commit(msgfile=None, cwd=None):
-    if msgfile and os.path.exists(msgfile):
-        msg = open(msgfile, encoding='utf-8', errors='replace').read()
+    if msgfile and os.path.isfile(msgfile):
+        with open(msgfile, encoding='utf-8', errors='replace') as _mf:
+            msg = _mf.read()
     else:
         msg = read_stdin()
     # git 会在 commit-msg 之后才剥掉注释行；这里先剥，避免状态注释里的文件名误伤
@@ -564,7 +565,11 @@ def main(argv):
     extra = args[1] if len(args) > 1 else ''
     try:
         if mode == 'content':
-            text = open(extra, encoding='utf-8', errors='replace').read() if extra and os.path.exists(extra) else read_stdin()
+            if extra and os.path.isfile(extra):
+                with open(extra, encoding='utf-8', errors='replace') as _ef:
+                    text = _ef.read()
+            else:
+                text = read_stdin()
             res, note = cmd_content(text)
         elif mode == 'commit':
             res, note = cmd_commit(extra or None)

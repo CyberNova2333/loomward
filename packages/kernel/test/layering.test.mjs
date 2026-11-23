@@ -128,6 +128,9 @@ test('layering: non-kernel packages and plugins never import cordis at runtime o
             if (groupName === 'plugins' && ownName !== 'mcp-hub' && parts[0] !== 'plugins') {
               violations.push(`${rel(file)} -> ${imp.spec} (plugin relative import outside plugin boundary)`);
             }
+            if (groupName === 'packages' && ['shared', 'kernel', 'cloud-relay'].includes(ownName) && parts[0] !== 'packages') {
+              violations.push(`${rel(file)} -> ${imp.spec} (core package relative import outside packages/)`);
+            }
           }
           if (groupName === 'plugins') {
             if (

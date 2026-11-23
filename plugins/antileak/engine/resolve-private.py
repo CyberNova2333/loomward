@@ -43,7 +43,8 @@ CNB_TOKEN_FILE = POLICY.get('cnb_token_file', '/root/.cnb-auth-token')
 
 def load(path):
     try:
-        return json.load(open(path, encoding='utf-8'))
+        with open(path, encoding='utf-8') as _f:
+            return json.load(_f)
     except Exception:
         return {}
 
@@ -65,7 +66,8 @@ def cnb_token():
     if t:
         return t
     if os.path.isfile(CNB_TOKEN_FILE):
-        m = re.search(r'(?m)^Token:[ \t]*(\S+)', open(CNB_TOKEN_FILE, encoding='utf-8').read())
+        with open(CNB_TOKEN_FILE, encoding='utf-8') as _cf:
+            m = re.search(r'(?m)^Token:[ \t]*(\S+)', _cf.read())
         if m:
             return m.group(1)
     return None
@@ -221,7 +223,12 @@ def main(names):
             neg[key] = {'status': r['status'], 'owner': r.get('owner', ''), 'ts': now}
     try:
         neg = {k: v for k, v in neg.items() if now - v.get('ts', 0) < NEG_TTL}
-        tmp = NEG + '.tmp'; json.dump(neg, open(tmp, 'w', encoding='utf-8')); os.replace(tmp, NEG)
+        tmp = '%s.%d.tmp' % (NEG, os.getpid())
+        _tflags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0)
+        _tfd = os.open(tmp, _tflags, 0o600)
+        with os.fdopen(_tfd, 'w', encoding='utf-8') as _tf:
+            json.dump(neg, _tf)
+        os.replace(tmp, NEG)
     except Exception:
         pass
     print(json.dumps(out, ensure_ascii=False))

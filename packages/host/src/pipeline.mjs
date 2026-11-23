@@ -32,7 +32,7 @@ function makeRpcError(rpcId, message, data, code = -32001) {
 function deepFreezeClone(value) {
   const cloned = structuredClone(value);
   const visit = node => {
-    if (!node || typeof node !== 'object') return node;
+    if (!node || typeof node !== 'object' || Object.isFrozen(node)) return node;
     Object.freeze(node);
     for (const child of Object.values(node)) {
       visit(child);
@@ -220,15 +220,6 @@ export function createToolDispatchPipeline({
       return { jsonrpc: '2.0', id: body.id ?? null, result: { tools } };
     }
 
-    const sandboxEntry = slots.toolProvider.entries().find(e => e.name === 'sandbox-docker');
-    if (sandboxEntry && typeof sandboxEntry.impl?.handleRpc === 'function' && sandboxEntry.impl.health?.()?.status === 'ready') {
-      return sandboxEntry.impl.handleRpc(body, {
-        signal,
-        authorization: authorized.authorization,
-        requestId,
-      });
-    }
-
     if (body.method === 'initialize') {
       const requested = body.params?.protocolVersion;
       return {
@@ -304,14 +295,21 @@ export function createToolDispatchPipeline({
       controller.signal.throwIfAborted();
 
       let ownerEntry = null;
+      let frozenBody = null;
+      let frozenAuth = null;
       if (authorized.body.method === 'tools/call') {
         const calledName = authorized.body.params?.name;
         ownerEntry = findOwningProvider(calledName);
+        frozenBody = deepFreezeClone(authorized.body);
+        frozenAuth = Object.freeze({
+          ...authorized.authorization,
+          scope: Object.freeze([...(authorized.authorization.scope ?? [])]),
+        });
         const evalCtx = Object.freeze({
           requestId: message.id,
           toolName: calledName,
-          body: deepFreezeClone(authorized.body),
-          authorization: Object.freeze({ ...authorized.authorization }),
+          body: frozenBody,
+          authorization: frozenAuth,
           provider: ownerEntry?.impl ?? null,
           providerName: ownerEntry?.name ?? null,
           signal: controller.signal,
@@ -373,11 +371,6 @@ export function createToolDispatchPipeline({
       }
 
       const calledName = authorized.body.params.name;
-      const frozenBody = deepFreezeClone(authorized.body);
-      const frozenAuth = Object.freeze({
-        ...authorized.authorization,
-        scope: Object.freeze([...(authorized.authorization.scope ?? [])]),
-      });
       const invocation = Object.freeze({
         requestId: message.id,
         toolName: calledName,

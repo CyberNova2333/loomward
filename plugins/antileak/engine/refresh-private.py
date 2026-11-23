@@ -178,7 +178,8 @@ def collect(items):
 # 1) 私有种子(本机文件；没有文件则看环境变量)
 seed_text = None
 if os.path.isfile(SEED):
-    seed_text = open(SEED, encoding='utf-8').read()
+    with open(SEED, encoding='utf-8') as _sf:
+        seed_text = _sf.read()
 elif os.environ.get('GUARD_SEED_B64', '').strip():
     import base64
     try:
@@ -257,7 +258,8 @@ def cnb_token():
     if t:
         return t
     if os.path.isfile(CNB_TOKEN_FILE):
-        m = re.search(r'(?m)^Token:[ \t]*(\S+)', open(CNB_TOKEN_FILE, encoding='utf-8').read())
+        with open(CNB_TOKEN_FILE, encoding='utf-8') as _cf:
+            m = re.search(r'(?m)^Token:[ \t]*(\S+)', _cf.read())
         if m:
             return m.group(1)
     return None
@@ -370,12 +372,15 @@ if not EXPECTED and not priv:
          '不回写(否则会写出空名单，R1 会静默放行一切)。请配置 expected_owners，或在私有种子里列出 owners/private')
 
 now = time.time()
-os.makedirs(os.path.dirname(CACHE), exist_ok=True)
-tmp = CACHE + '.tmp'
-json.dump({'generated_at': now, 'expires_at': now + TTL, 'status': 'fresh',
-           'sources': sources, 'covered_owners': sorted(covered),
-           'private': sorted(priv), 'owners': sorted(owners), 'patterns': patterns, 'token_owners': token_owners,
-           'cnb_groups': cnb_groups},
-          open(tmp, 'w', encoding='utf-8'), ensure_ascii=False, indent=0)
+os.makedirs(os.path.dirname(CACHE), mode=0o700, exist_ok=True)
+tmp = '%s.%d.tmp' % (CACHE, os.getpid())
+_tflags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0)
+_tfd = os.open(tmp, _tflags, 0o600)
+with os.fdopen(_tfd, 'w', encoding='utf-8') as _tf:
+    json.dump({'generated_at': now, 'expires_at': now + TTL, 'status': 'fresh',
+               'sources': sources, 'covered_owners': sorted(covered),
+               'private': sorted(priv), 'owners': sorted(owners), 'patterns': patterns, 'token_owners': token_owners,
+               'cnb_groups': cnb_groups},
+              _tf, ensure_ascii=False, indent=0)
 os.replace(tmp, CACHE)                                   # 原子替换，check.py 不会读到半截文件
 print('private=%d owners=%d patterns=%d sources=%s ttl=%ds' % (len(priv), len(owners), len(patterns), '+'.join(sources), TTL))

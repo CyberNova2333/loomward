@@ -136,7 +136,15 @@ test('startLoomWardDaemon boots frozen workspace RPM, mounts mcp-hub out-of-proc
   assert.deepEqual(daemon.control.slots.toolProvider.names().sort(), ['mcp-hub', 'sandbox-docker']);
   assert.deepEqual(daemon.control.slots.vaultBackend.names(), ['host-vault']);
 
-  // tools/list aggregates both sandbox-docker and out-of-process mcp-hub.
+  // initialize returns canonical LoomWard serverInfo, and tools/list aggregates both sandbox-docker and out-of-process mcp-hub.
+  const initReply = await daemon.localIngress.dispatchRpc({
+    jsonrpc: '2.0',
+    id: 0,
+    method: 'initialize',
+    params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test', version: '1.0' } },
+  });
+  assert.equal(initReply.result?.serverInfo?.name, 'loomward');
+
   const listed = await daemon.localIngress.dispatchRpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
   const toolNames = listed.result.tools.map(tool => tool.name);
   assert.ok(toolNames.includes('read_file'));

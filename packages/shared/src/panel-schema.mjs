@@ -129,7 +129,8 @@ export function sanitizeConsolePanelSnapshot(panelDecl, rawSnapshot, { execution
       const sanitized = sanitizeTable(rawTable);
       if (sanitized) tables.push(sanitized);
     }
-  } else if (rawSnapshot?.table) {
+  }
+  if (tables.length === 0 && rawSnapshot?.table) {
     const sanitized = sanitizeTable(rawSnapshot.table);
     if (sanitized) tables.push(sanitized);
   }
