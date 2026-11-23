@@ -750,3 +750,19 @@ test('Cordis kernel + Dual-Origin Console host an isolated standalone-style LLM 
     { label: '已阻断', value: '1', tone: 'err' },
   ]);
 });
+
+test('control-channel refuses to overwrite an existing regular file at socketPath', { skip: process.platform === 'win32' }, async t => {
+  const { createControlChannel } = await import('../src/control-channel.mjs');
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lw-sock-'));
+  await fs.chmod(tmpDir, 0o700);
+  t.after(() => fs.rm(tmpDir, { recursive: true, force: true }));
+
+  const sentinel = path.join(tmpDir, 'control.sock');
+  await fs.writeFile(sentinel, 'do-not-delete', { mode: 0o600 });
+
+  const channel = createControlChannel({ socketPath: sentinel });
+  t.after(() => channel.close());
+
+  await assert.rejects(() => channel.startSocketServer(), /non-socket/i);
+  assert.equal(await fs.readFile(sentinel, 'utf8'), 'do-not-delete');
+});

@@ -25,23 +25,41 @@ export function createAntileakAdapterDescriptor() {
   });
 }
 
+const MAX_EXTRACT_DEPTH = 32;
+const MAX_EXTRACT_CHARS = 1024 * 1024;
+
 export function extractInspectableText(toolName, args) {
   if (!args || typeof args !== 'object') return '';
   const parts = [];
-  const collect = value => {
+  const seen = new WeakSet();
+  let totalChars = 0;
+  const collect = (value, depth) => {
+    if (depth > MAX_EXTRACT_DEPTH || totalChars >= MAX_EXTRACT_CHARS) return;
     if (typeof value === 'string') {
-      if (value.trim()) parts.push(value);
+      if (value.trim()) {
+        const remaining = MAX_EXTRACT_CHARS - totalChars;
+        const slice = value.length > remaining ? value.slice(0, remaining) : value;
+        parts.push(slice);
+        totalChars += slice.length;
+      }
       return;
     }
+    if (!value || typeof value !== 'object') return;
+    if (seen.has(value)) return;
+    seen.add(value);
     if (Array.isArray(value)) {
-      for (const item of value) collect(item);
+      for (const item of value) {
+        if (totalChars >= MAX_EXTRACT_CHARS) break;
+        collect(item, depth + 1);
+      }
       return;
     }
-    if (value && typeof value === 'object') {
-      for (const v of Object.values(value)) collect(v);
+    for (const v of Object.values(value)) {
+      if (totalChars >= MAX_EXTRACT_CHARS) break;
+      collect(v, depth + 1);
     }
   };
-  collect(args);
+  collect(args, 0);
   return parts.join('\n');
 }
 

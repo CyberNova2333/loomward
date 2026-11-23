@@ -270,3 +270,39 @@ test('panel-schema and content-guard contracts validate declarative panels and i
   }, { stage: 'output' });
   assert.equal(redacted.redactedPayload, '[redacted]');
 });
+
+test('MechanismSlot enforces monotonic blocked/forceApproval latches and allowReplace=false guard', async () => {
+  const trackedCaller = { effect: fn => fn() };
+  const ORIGINAL = Symbol.for('cordis.original');
+  const mech = new MechanismSlot({ name: 'tool:invoke@1', policy: 'trusted', allowReplace: false });
+  const proxy = Object.create(mech, {
+    ctx: { value: trackedCaller },
+    [ORIGINAL]: { value: mech },
+  });
+
+  // Replace hooks are structurally forbidden when allowReplace=false.
+  assert.throws(() => proxy.hook('replace', (input, base) => base(input)), SlotError);
+
+  // Downstream before-hook cannot downgrade forceApproval=true back to false.
+  const u1 = proxy.hook('before', input => ({ ...input, forceApproval: true }));
+  const u2 = proxy.hook('before', input => ({ ...input, forceApproval: false, touched: true }));
+  const escalated = await mech.run({ tool: 'command_status' }, x => x);
+  assert.equal(escalated.forceApproval, true);
+  assert.equal(escalated.touched, true);
+  u1();
+  u2();
+
+  // Downstream before-hook cannot un-block or observe an already blocked request.
+  let downstreamRan = false;
+  const b1 = proxy.hook('before', input => ({ ...input, blocked: true, code: 'ANTILEAK_BLOCKED' }));
+  const b2 = proxy.hook('before', input => {
+    downstreamRan = true;
+    return { ...input, blocked: false };
+  });
+  const blocked = await mech.run({ tool: 'write_file' }, x => x);
+  assert.equal(blocked.blocked, true);
+  assert.equal(blocked.code, 'ANTILEAK_BLOCKED');
+  assert.equal(downstreamRan, false);
+  b1();
+  b2();
+});

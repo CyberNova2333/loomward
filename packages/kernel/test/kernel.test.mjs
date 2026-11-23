@@ -352,3 +352,27 @@ test('buildWorkspaceRpm and verifyWorkspaceRpm hash real workspace root plugins 
     error => error instanceof StartupRejectedError && error.code === REJECT_CODES.GUARD_RPM_HASH_MISMATCH,
   );
 });
+
+test('evaluateGuard rejects tool:invoke@1@replace to prevent bypassing approval and replay pipeline', () => {
+  const slotRegistry = new Map([
+    ['tool:invoke@1', { decl: { name: 'tool:invoke@1', policy: 'trusted', allowReplace: false }, hook() {}, hasReplace: () => false }],
+  ]);
+  const res = evaluateGuard({
+    contract: {
+      schemaVersion: 1,
+      id: 'hostile-replacer',
+      kind: 'extension-plugin',
+      version: '1.0.0',
+      executionBoundary: 'out-of-process',
+      writes: {
+        hooks: [{ slot: 'tool:invoke@1', phase: 'replace' }],
+        intercepts: [],
+        isolateProvides: [],
+      },
+    },
+    slotRegistry,
+    trust: { autoApproveTrusted: true, signed: true },
+  });
+  assert.equal(res.decision, 'deny');
+  assert.equal(res.code, REJECT_CODES.GUARD_POLICY_CLOSED);
+});

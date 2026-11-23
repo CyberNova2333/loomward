@@ -10,4 +10,14 @@ export const contract = validateContractDecl({
   executionBoundary: 'out-of-process',
   provides: ['adapter:cloudforge', 'adapter:modelbridge'],
   consumes: ['tool:provider@1', 'console:panel@1'],
+  registers: [
+    { slot: 'tool:provider@1', name: 'cloudforge' },
+    { slot: 'console:panel@1', name: 'cloudforge' },
+    { slot: 'console:panel@1', name: 'modelbridge' },
+  ],
+  writes: {
+    hooks: [],
+    intercepts: [],
+    isolateProvides: [],
+  },
 });

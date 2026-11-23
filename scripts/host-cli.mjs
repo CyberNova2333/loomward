@@ -189,8 +189,9 @@ function inspectDockerInstallation(dockerPath, context, image) {
 function copyTreeFilteredSync(sourceDir, targetDir, { skipDirs = new Set() } = {}) {
   fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 });
   for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
-    if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+    if (entry.name === 'node_modules' || entry.name === '__pycache__' || entry.name.startsWith('.')) continue;
     if (entry.isDirectory() && skipDirs.has(entry.name)) continue;
+    if (entry.isFile() && entry.name.endsWith('.pyc')) continue;
     const src = path.join(sourceDir, entry.name);
     const dst = path.join(targetDir, entry.name);
     if (entry.isSymbolicLink()) throw new Error(`Refusing symbolic link in runtime source tree: ${src}`);
@@ -204,26 +205,8 @@ function copyTreeFilteredSync(sourceDir, targetDir, { skipDirs = new Set() } = {
 }
 
 async function generateWorkspaceRpmForRelease(sourceRoot, destination) {
-  const { pathToFileURL } = await import('node:url');
-  const { createFrozenRpm, sha256Tagged, validateContractDecl } = await import(
-    pathToFileURL(path.join(sourceRoot, 'packages', 'shared', 'src', 'index.mjs')).href
-  );
-  const rootIds = ['cloud-relay', 'sandbox', 'host', 'console'];
-  const rootPlugins = [];
-  for (const id of rootIds) {
-    const contractFile = path.join(sourceRoot, 'packages', id, 'src', 'contract.mjs');
-    const entryFile = path.join(destination, 'packages', id, 'src', 'index.mjs');
-    const mod = await import(pathToFileURL(contractFile).href);
-    const contract = validateContractDecl(mod.contract);
-    const entryHash = await sha256Tagged(fs.readFileSync(entryFile));
-    rootPlugins.push({
-      id: contract.id,
-      version: contract.version,
-      entryHash,
-      provides: [...contract.provides],
-    });
-  }
-  return createFrozenRpm({ target: 'runtime', rootPlugins });
+  const { buildReleaseRpm } = await import('./generate-rpm.mjs');
+  return buildReleaseRpm({ sourceRoot, destinationRoot: destination });
 }
 
 function collectReleaseHashes(releaseDir) {

@@ -139,6 +139,9 @@ export class MechanismSlot {
     if (typeof handler !== 'function') throw new SlotError('Hook handler must be a function.');
     const caller = this.ctx;
     const self = own(this);
+    if (phase === 'replace' && self.#decl.allowReplace === false) {
+      throw new SlotError(`MechanismSlot ${self.#decl.name} forbids replace hooks to protect core invariants.`);
+    }
     if (!caller || typeof caller.effect !== 'function') {
       throw new SlotError('MechanismSlot.hook requires a tracked Cordis caller context.');
     }
@@ -162,12 +165,24 @@ export class MechanismSlot {
   async run(input, baseAction) {
     const self = own(this);
     let currentInput = input;
+    let forcedApproval = Boolean(input && typeof input === 'object' && input.forceApproval === true);
     for (const item of [...self.#hooks.before]) {
       const next = await item.handler(currentInput);
-      if (next !== undefined) currentInput = next;
+      if (next !== undefined) {
+        if (next && typeof next === 'object') {
+          if (next.forceApproval === true) forcedApproval = true;
+          currentInput = forcedApproval && next.forceApproval !== true
+            ? { ...next, forceApproval: true }
+            : next;
+          // Monotonic deny latch: once any before-hook blocks, later hooks cannot inspect or un-block it.
+          if (currentInput.blocked === true) break;
+        } else {
+          currentInput = next;
+        }
+      }
     }
     let output;
-    if (self.#hooks.replace.length > 0) {
+    if (self.#decl.allowReplace !== false && self.#hooks.replace.length > 0) {
       const replacer = self.#hooks.replace[self.#hooks.replace.length - 1];
       output = await replacer.handler(currentInput, baseAction);
     } else {

@@ -250,3 +250,20 @@ Synced through 32ab5c1（含 Phase 2 工作树改动）
 - 验证范围与边界：本机（Linux x86_64）运行 `pnpm install --frozen-lockfile`、`pnpm run check`（含 Python `py_compile`）、`pnpm run layering`、`pnpm run test:ci`（覆盖既有 162 项 + 新增真实 Python 子进程 `antileak.test.mjs` 与真实 SQLite 回环服务 `decisions.test.mjs`）、`validate_repo_docs.py`、`docs-site` 构建、`repo_maintenance_guard.py status` 与 `sync_assets_licenses.py --check --dry-run`；不改动本机运行中的 `~/.agentdock-bridge` 副本或远端部署。
 
 Synced through c3d1cd2（含 Phase 3 工作树改动）
+
+## 2026-11-23（Phase 4）：独立外部项目适配、Windows 受保护安装对齐与终轮对抗安全加固
+
+- 触发：完成分阶段实施计划最终阶段（Phase 4），补齐 `@loomward/plugin-adapters`、对齐 Windows `Install-Hardened.ps1` 的 monorepo/RPM 安装契约，并针对双源边界、微内核插槽、前置钩子链与网络 SSRF 执行终轮对抗性安全审查；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- `@loomward/plugin-adapters`（[plugins/adapters](../plugins/adapters/src/index.mjs)）：
+  - 在不改动独立仓库 `CloudForge` 与 `ModelBridge` 源码本体的前提下，以严格 `out-of-process` 扩展落地双适配器与共享网络边界守卫（[network.mjs](../plugins/adapters/src/network.mjs)：强制远端 HTTPS、拒绝内嵌凭据/元数据 IP/默认私网与回环 SSRF、禁用 HTTP 重定向降级与有界响应读取）。
+  - [cloudforge.mjs](../plugins/adapters/src/cloudforge.mjs) 支持 `/.well-known/cloudforge` 匿名元数据探针、RFC 9728/8414 OAuth 2.1 + PKCE `S256` 发现与令牌流、JSON/SSE Streamable HTTP `/mcp` 工具聚合（`mcp__cloudforge__*`，标注读/写风险并全量经由本机逐参人工审批与 24h 防重放账本），并注册只读 `console:panel@1`。
+  - [modelbridge.mjs](../plugins/adapters/src/modelbridge.mjs) 提供 `/api/auth/status`、`/api/usage/summary`（递归剥离敏感键）与可选 `/v1/models` 只读观测，硬上限 `12,000ms` 对齐 ModelBridge 超时预算与四态密钥隔离，并注册只读 `console:panel@1`（绝不接触或回显密钥）。
+- Windows 受保护安装对齐（[scripts/generate-rpm.mjs](../scripts/generate-rpm.mjs)、[scripts/Install-Hardened.ps1](../scripts/Install-Hardened.ps1)、[scripts/host-cli.mjs](../scripts/host-cli.mjs)）：
+  - 抽取跨平台冻结 `rpm.json` 生成脚本，使 Windows `Install-Hardened.ps1` 与 POSIX `host-cli.mjs` 统一复制 `pnpm-workspace.yaml`、`packages/`、`plugins/`（跳过 `test/`、`node_modules/`、`__pycache__/`、`*.pyc`）并在 `installation.json` 中记录 `rpmManifestHash` 与全树 SHA-256。
+- 终轮对抗性安全审查与加固：
+  - **高危加固 1（`tool:invoke@1` 禁止 `replace` 钩子）**：[packages/kernel/src/boot.mjs](../packages/kernel/src/boot.mjs)、[packages/kernel/src/rules.mjs](../packages/kernel/src/rules.mjs) 与 [packages/shared/src/slots.mjs](../packages/shared/src/slots.mjs) 为 `tool:invoke@1` 锁定 `allowReplace: false`，从结构上杜绝扩展插件替换核心 `LocalApprovals` + 24h `RequestReceipts` 调度主链。
+  - **高危加固 2（前置钩子单调阻断与单调强制审批锁存）**：`MechanismSlot.run` 在任一 `before` 钩子返回 `blocked: true` 时立即短路且禁止后续钩子解除阻断或观测受阻载荷；任一 `before` 钩子返回 `forceApproval: true` 时单调锁存，后续钩子无法降级为免审批。
+  - **中危加固 3（回环 HTTPS SSRF、防泄漏深层递归与 `control.sock` 误删防护）**：[network.mjs](../plugins/adapters/src/network.mjs) 默认阻止 `https://127.0.0.1` / `https://localhost.` 回环 SSRF；[plugins/antileak/src/index.mjs](../plugins/antileak/src/index.mjs) 为 `extractInspectableText` 增加深度（32）、循环引用与 1 MiB 字符上限；[packages/console/src/control-channel.mjs](../packages/console/src/control-channel.mjs) 拒绝覆盖或删除已存在的非 socket 普通文件或目录。
+- 验证范围与边界：本机（Linux x86_64）在最终改动后执行 `pnpm install --frozen-lockfile`、`pnpm run build:console`、`pnpm run check`、`pnpm run layering`、`pnpm run test:ci`（覆盖既有 166 项 + 新增 `adapters.test.mjs` 与终轮安全加固回归测试）、`scripts/generate-rpm.mjs` CLI 实测、`validate_repo_docs.py`、`pnpm --dir docs-site run docs:build`、`repo_maintenance_guard.py status` 与 `sync_assets_licenses.py --check --dry-run`；Windows PowerShell 与真实 Docker 专属用例在非对应环境按条件跳过，未触碰本机 `~/.agentdock-bridge` 运行副本与独立仓 `cloudforge`/`modelbridge`。
+
+Synced through f52606d（含 Phase 4 工作树改动）

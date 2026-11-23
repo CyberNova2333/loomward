@@ -7,12 +7,14 @@
   "description": "Out-of-process integration interfaces for standalone projects (CloudForge OAuth MCP and ModelBridge gateway status)",
   "exports": {
     ".": "./src/index.mjs",
-    "./contract": "./src/contract.mjs"
+    "./contract": "./src/contract.mjs",
+    "./cloudforge": "./src/cloudforge.mjs",
+    "./modelbridge": "./src/modelbridge.mjs"
   },
   "dependencies": {
     "@loomward/shared": "workspace:*"
   },
   "scripts": {
-    "check": "node --check src/index.mjs && node --check src/contract.mjs"
+    "check": "node --check src/index.mjs && node --check src/contract.mjs && node --check src/network.mjs && node --check src/cloudforge.mjs && node --check src/modelbridge.mjs"
   }
 }

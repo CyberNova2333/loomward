@@ -41,27 +41,27 @@
   },
   "highlights": {
     "zh": [
-      "以 Cordis 4 + 冻结根插件清单（RPM）+ PolicyTree 为安全内核，机械守卫包间分层，第三方与跨语言扩展严格运行在进程外边界",
-      "完整保留单次精确审批、24 小时防重放账本、只读 Linux Docker 容器沙箱及 Windows/macOS/Linux 受保护宿主运行时与回环 PassKey 控制台",
-      "采用 monorepo 架构整合远程桥接、R1–R7 防泄漏护栏与人机决策台账，并为 CloudForge 与 ModelBridge 预留独立外部适配接口"
+      "以 Cordis 4 + 冻结根插件清单（RPM）+ KernelGuard + PolicyTree 为安全微内核，机械守卫包间分层，锁定 tool:invoke@1 单调阻断与不可替换不变量，全部扩展运行于进程外边界",
+      "物理拆分 Ring 2 独立信任面（18798 PassKey/强密码、逐参两步审批、能力熔断）与 Ring 3 只读控制台（18797 观测/SSE 与零 JS 注入声明式 console:panel@1），并预留零耦合 ContentInspect v1 审查契约",
+      "整合远程桥接、R1–R7 离线防泄漏护栏（@loomward/plugin-antileak）与人机决策台账（@loomward/plugin-decisions），并通过 @loomward/plugin-adapters 无侵入对接独立仓 CloudForge 与 ModelBridge"
     ],
     "en": [
-      "Powered by a Cordis 4 microkernel with frozen Root Plugin Manifests (RPM), PolicyTree guards, mechanical layering checks, and strict out-of-process extension boundaries",
-      "Preserves exact per-request local approval, 24h replay ledgers, disposable read-only Linux Docker sandboxes, cross-platform credential vaults, and PassKey-authenticated loopback WebUI",
-      "Consolidates remote bridge, R1–R7 anti-leak guardrails, and decision ledger in a pnpm monorepo while keeping CloudForge and ModelBridge standalone via adapter interfaces"
+      "Powered by a Cordis 4 microkernel with frozen Root Plugin Manifests (RPM), KernelGuard, PolicyTree, mechanical layering checks, monotonic tool:invoke@1 safety latches, and strict out-of-process extension boundaries",
+      "Physically separates Ring 2 Trust Origin (18798 PassKey/password, two-step approval, kill switches) from Ring 3 read-only Console Origin (18797 telemetry/SSE + zero-JS declarative console:panel@1) alongside a zero-coupling ContentInspect v1 contract",
+      "Consolidates remote bridge, offline R1–R7 anti-leak guardrails (@loomward/plugin-antileak), and decision ledger (@loomward/plugin-decisions) while integrating standalone CloudForge and ModelBridge via @loomward/plugin-adapters"
     ]
   },
   "quickStart": [
     "pnpm install --frozen-lockfile",
-    "pnpm run check",
+    "pnpm run build:console && pnpm run check && pnpm run layering",
     "pnpm test"
   ],
   "roadmap": {
-    "stage": "架构重构",
-    "stageEn": "Re-architecting",
+    "stage": "持续演进",
+    "stageEn": "Active Evolution",
     "milestone": {
-      "zh": "已完成旧项目双端归档（archive/*）、更名为 LoomWard · 织盾，并落地 pnpm workspace monorepo 与 Cordis 4 微内核骨架。",
-      "en": "Archived predecessor repos into archive/* branches, renamed to LoomWard, and established the pnpm workspace monorepo and Cordis 4 microkernel skeleton."
+      "zh": "已完成四阶段 Cordis 4 monorepo 重构：微内核守卫与冻结 RPM、双源物理隔离控制台、进程外防泄漏护栏与决策台账插件、独立仓 CloudForge/ModelBridge 适配及终轮对抗安全加固。",
+      "en": "Completed all 4 phases of the Cordis 4 monorepo architecture: KernelGuard & frozen RPM, physical Dual-Origin Console, out-of-process antileak & decisions plugins, standalone CloudForge/ModelBridge adapters, and adversarial security hardening."
     }
   },
   "additionalTermsConsent": {

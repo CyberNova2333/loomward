@@ -37,21 +37,36 @@ if($LASTEXITCODE -ne 0 -or $imageId -notmatch '^sha256:[a-f0-9]{64}$'){throw 'Bu
 $release='runtime-'+[DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')+'-'+[Guid]::NewGuid().ToString('N').Substring(0,8)
 $destination=Join-Path $statePath $release
 New-Item -ItemType Directory -Path $destination | Out-Null
-function Copy-FilteredTree([string]$src,[string]$dst){
+function Copy-FilteredTree([string]$src,[string]$dst,[string[]]$skipDirs=@()){
   New-Item -ItemType Directory -Path $dst -Force | Out-Null
   foreach($item in Get-ChildItem -LiteralPath $src -Force){
-    if($item.Name.StartsWith('.')){continue}
+    if($item.Name.StartsWith('.') -or $item.Name -eq 'node_modules' -or $item.Name -eq '__pycache__'){continue}
+    if($item.PSIsContainer -and ($skipDirs -contains $item.Name)){continue}
+    if(-not $item.PSIsContainer -and $item.Name.EndsWith('.pyc',[StringComparison]::OrdinalIgnoreCase)){continue}
     if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Runtime source must not contain symbolic links or junctions.'}
     $target=Join-Path $dst $item.Name
-    if($item.PSIsContainer){Copy-FilteredTree $item.FullName $target}
+    if($item.PSIsContainer){Copy-FilteredTree $item.FullName $target $skipDirs}
     else{Copy-Item -LiteralPath $item.FullName -Destination $target}
   }
 }
 foreach($folder in @('local','scripts')){Copy-FilteredTree (Join-Path $source $folder) (Join-Path $destination $folder)}
-foreach($file in @('package.json','pnpm-lock.yaml')){
-  $item=Get-Item -LiteralPath (Join-Path $source $file) -Force
+foreach($folder in @('packages','plugins')){
+  $srcFolder=Join-Path $source $folder
+  if(Test-Path -LiteralPath $srcFolder){Copy-FilteredTree $srcFolder (Join-Path $destination $folder) @('test')}
+}
+foreach($file in @('package.json','pnpm-lock.yaml','pnpm-workspace.yaml')){
+  $srcFile=Join-Path $source $file
+  if(-not(Test-Path -LiteralPath $srcFile)){continue}
+  $item=Get-Item -LiteralPath $srcFile -Force
   if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Runtime manifest must not be a link.'}
   Copy-Item -LiteralPath $item.FullName -Destination $destination
+}
+$rpmManifestHash=$null
+$rpmGenerator=Join-Path $source 'scripts\generate-rpm.mjs'
+if((Test-Path -LiteralPath $rpmGenerator) -and (Test-Path -LiteralPath (Join-Path $destination 'packages\shared\src\index.mjs'))){
+  $rpmOut=(& $node $rpmGenerator --source $source --dest $destination | Out-String).Trim()
+  if($LASTEXITCODE -ne 0){throw 'Protected runtime RPM manifest generation failed.'}
+  $rpmManifestHash=($rpmOut | ConvertFrom-Json).manifestHash
 }
 Push-Location $destination
 try {
@@ -81,11 +96,11 @@ if(Test-Path -LiteralPath (Join-Path $destination 'scripts\Approve.ps1')) {
   $approve='@echo off'+"`r`n"+'setlocal DisableDelayedExpansion'+"`r`n"+'chcp 65001 >nul'+"`r`n"+'"'+$powershell+'" -NoProfile -ExecutionPolicy RemoteSigned -File "'+(Join-Path $destination 'scripts\Approve.ps1').Replace('%','%%')+'" -StateDir "'+$statePath.Replace('%','%%')+'"'+"`r`n"
   [IO.File]::WriteAllText((Join-Path $statePath 'Approve.cmd'),$approve,[Text.UTF8Encoding]::new($false))
 }
-$manifest=@{installedAt=[DateTime]::UtcNow.ToString('o');runtime=$destination;workspace=$workspacePath;image=$imageId;sha256=@{}}
-Get-ChildItem -LiteralPath $destination -File -Recurse | Where-Object {$_.FullName -notlike '*\node_modules\*'} | ForEach-Object {$manifest.sha256[$_.FullName.Substring($destination.Length+1)]=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
+$manifest=@{installedAt=[DateTime]::UtcNow.ToString('o');runtime=$destination;workspace=$workspacePath;image=$imageId;rpmManifestHash=$rpmManifestHash;sha256=@{}}
+Get-ChildItem -LiteralPath $destination -File -Recurse | Where-Object {$_.FullName -notlike '*\node_modules\*' -and $_.FullName -notlike '*\__pycache__\*' -and -not $_.Name.EndsWith('.pyc',[StringComparison]::OrdinalIgnoreCase)} | ForEach-Object {$manifest.sha256[$_.FullName.Substring($destination.Length+1)]=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
 $tmpManifest=Join-Path $statePath ('installation-'+[Guid]::NewGuid().ToString('N')+'.tmp')
 try {
   [IO.File]::WriteAllText($tmpManifest,($manifest|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
   Move-Item -LiteralPath $tmpManifest -Destination (Join-Path $statePath 'installation.json') -Force
 } finally { if(Test-Path -LiteralPath $tmpManifest){Remove-Item -LiteralPath $tmpManifest -Force -ErrorAction SilentlyContinue} }
-[pscustomobject]@{runtime=$destination;workspace=$workspacePath;image=$imageId;context=$Context;allowOutbound=[bool]$AllowOutbound;started=$false}|ConvertTo-Json
+[pscustomobject]@{runtime=$destination;workspace=$workspacePath;image=$imageId;context=$Context;allowOutbound=[bool]$AllowOutbound;rpmManifestHash=$rpmManifestHash;started=$false}|ConvertTo-Json

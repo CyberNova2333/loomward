@@ -84,6 +84,9 @@ export const slotDeclarationRule = Object.freeze({
         return REJECT_CODES.GUARD_POLICY_CLOSED;
       }
       if (hook.phase === 'replace') {
+        if (slot.decl?.allowReplace === false) {
+          return REJECT_CODES.GUARD_POLICY_CLOSED;
+        }
         if ((typeof slot.hasReplace === 'function' && slot.hasReplace()) || replaceSlots.has(hook.slot)) {
           return REJECT_CODES.GUARD_SLOT_REPLACE_TAKEN;
         }

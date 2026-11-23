@@ -21,7 +21,7 @@ import { evaluateGuard } from './rules.mjs';
 export const PLATFORM_SLOTS = Object.freeze({
   vaultBackend: Object.freeze({ name: VAULT_SLOT, cardinality: 'single', policy: 'closed' }),
   toolProvider: Object.freeze({ name: 'tool:provider@1', cardinality: 'multi', policy: 'trusted' }),
-  toolInvoke: Object.freeze({ name: 'tool:invoke@1', policy: 'trusted' }),
+  toolInvoke: Object.freeze({ name: 'tool:invoke@1', policy: 'trusted', allowReplace: false }),
   policyRule: Object.freeze({ name: 'policy:rule@1', cardinality: 'multi', policy: 'trusted' }),
   approvalChannel: Object.freeze({ name: 'approval:channel@1', cardinality: 'single', policy: 'trusted' }),
   gatewayIngress: Object.freeze({ name: 'gateway:ingress@1', cardinality: 'multi', policy: 'trusted' }),

@@ -77,7 +77,9 @@ export function createControlChannel({ socketPath = null } = {}) {
     }
     const existing = fs.lstatSync(resolved, { throwIfNoEntry: false });
     if (existing) {
-      if (existing.isSymbolicLink()) throw new Error('Control socket path must not be a symbolic link.');
+      if (existing.isSymbolicLink() || !existing.isSocket()) {
+        throw new Error('Control socket path must not overwrite an existing non-socket file, directory, or symlink.');
+      }
       fs.rmSync(resolved, { force: true });
     }
 

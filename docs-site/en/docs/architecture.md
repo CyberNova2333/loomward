@@ -48,6 +48,14 @@ To ensure a saturated control receipt cache or failed `docker rm -f` never preve
 
 `approval-store.mjs` validates compact UTF-8 size (`1,200,000 B`) before temp-file creation; `/authorize` merges rather than overwrites zero-script CSP headers; `Install-NodeRuntime.ps1` and `local/node-toolchains.mjs` pin Node `24.22.1` (SHA-256 + platform signature checks) inside permission-verified private toolchains; `windows-acl.mjs` refuses atomic Linux `rename` over files with custom explicit NTFS DACLs.
 
+### ADR-05: Cordis 4 Microkernel Guard, Physical Dual-Origin Console & Zero-Coupling Out-of-Process Extensions
+
+To consolidate anti-leak guardrails, the decision ledger, third-party MCP aggregation, standalone project adapters (`CloudForge` / `ModelBridge`), and future independently deliverable external plugins (such as standalone LLM content moderation) without weakening host security:
+
+- `@loomward/kernel` enforces frozen Root Plugin Manifests (`rpm.json`, generated identically across POSIX and Windows installers via `scripts/generate-rpm.mjs`), blocks non-root access to closed `vault:backend@1`, enforces mechanical package layering (`pnpm run layering`), forbids `replace` hooks on `tool:invoke@1`, and applies monotonic `blocked` / `forceApproval` latches across `before` hooks.
+- `@loomward/console` physically splits **Ring 2 Trust Origin (`127.0.0.1:18798`, zero extension scripts/panels)** from **Ring 3 read-only Console Origin (`127.0.0.1:18797`, telemetry, SSE, and zero-JS declarative `console:panel@1`)**, linked by single-use 60s handoff tickets, cascading Trust-logout revocation, and a private `0600` `control.sock` metadata bus.
+- Every extension in `plugins/*` declares `executionBoundary: "out-of-process"`; future external moderation plugins bind only to minimal versioned JSON contracts (`ContentInspect v1` + `console:panel@1`) with zero edits to `@loomward/console` or `@loomward/host`.
+
 ### Upgrade Checklist
 
 1. Run `pnpm install --frozen-lockfile && pnpm run check && pnpm test` in the updated checkout.

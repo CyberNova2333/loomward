@@ -23,16 +23,16 @@
 
 | 工作区包 / 分支 | 包名 / 角色 | 边界与来源说明 |
 | --- | --- | --- |
-| `packages/shared` | `@loomward/shared` | 零宿主、零运行时依赖的共享契约、RPM 摘要、60 秒 `BootRun` 回滚与插槽原语 |
-| `packages/kernel` | `@loomward/kernel` | Cordis 4 微内核启动校验、`PolicyTree` 策略树与静态机械分层守卫（`pnpm run layering`） |
+| `packages/shared` | `@loomward/shared` | 零宿主、零运行时依赖的共享契约、声明式 `console:panel@1` 与低耦合 `ContentInspect v1` 审查协议、RPM 摘要、60 秒 `BootRun` 回滚与单调安全插槽原语 |
+| `packages/kernel` | `@loomward/kernel` | Cordis 4 微内核启动校验、`KernelGuard` AOP 守卫（闭锁 `vault:backend@1`、禁止 `tool:invoke@1@replace`）、`PolicyTree` 策略树与静态机械分层守卫（`pnpm run layering`） |
 | `packages/cloud-relay` | `@loomward/cloud-relay` | Cloudflare Workers OAuth 2.1 + `BridgeRelay` 边缘中继根包（承接 `cloud/`） |
 | `packages/sandbox` | `@loomward/sandbox` | 只读 Linux Docker 沙箱、`file-worker` 与 Windows ACL 守卫根包（承接 `container/` 与沙箱模块） |
-| `packages/host` | `@loomward/host` | 跨平台受保护宿主运行时、凭据保管库、审批状态机与 24h 防重放账本（承接 `local/` 与 `scripts/`） |
-| `packages/console` | `@loomward/console` | 双源回环控制台（Console Origin + 独立 Trust Origin PassKey/审批页，承接 `local/webui*.mjs`） |
-| `plugins/antileak` | `@loomward/plugin-antileak` | 进程外 R1–R7 防泄漏护栏插件（整合自存档分支 `archive/claude-code-antileak-hooks`） |
-| `plugins/decisions` | `@loomward/plugin-decisions` | 进程外人机决策台账与上下文导出插件（整合自存档分支 `archive/agent-decisions-dashboard`） |
+| `packages/host` | `@loomward/host` | 跨平台受保护宿主运行时、凭据保管库、统一 `ToolDispatchPipeline`、审批状态机与 24h 防重放账本（承接 `local/` 与 `scripts/`） |
+| `packages/console` | `@loomward/console` | 双源物理隔离回环控制台（Ring 2 Trust Origin `18798` 零扩展面板 + Ring 3 Console Origin `18797` 只读观测/SSE + `0600` `control.sock` 与离线 `esbuild` 构建前端） |
+| `plugins/antileak` | `@loomward/plugin-antileak` | 进程外 R1–R7 离线防泄漏护栏插件（整合自 `archive/claude-code-antileak-hooks`，`ContentInspect v1` 前置 fail-closed 阻断 + 只读健康面板） |
+| `plugins/decisions` | `@loomward/plugin-decisions` | 进程外人机决策台账与上下文导出插件（整合自 `archive/agent-decisions-dashboard`，回环 Python+SQLite 服务、CAS 乐观锁与幂等写入） |
 | `plugins/mcp-hub` | `@loomward/plugin-mcp-hub` | 进程外 `stdio` / `Streamable HTTP` 第三方 MCP 聚合器（承接 `local/mcp-*.mjs`） |
-| `plugins/adapters` | `@loomward/plugin-adapters` | 外部独立项目接口适配（对接独立维护的 `CloudForge` 与 `ModelBridge`，不动其源码本体） |
+| `plugins/adapters` | `@loomward/plugin-adapters` | 外部独立项目接口适配（OAuth 2.1/Streamable HTTP MCP 对接 `CloudForge`，只读 12s 超时观测对接 `ModelBridge`，不动其源码本体） |
 
 历史单仓完整提交树已双端保留在以下存档分支，随时可检出对照：
 - `archive/agentdock-worker-remote`（本仓库原 v2 桥接完整快照）
