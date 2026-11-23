@@ -50,7 +50,7 @@ export const apiSpecZh: ApiCatalogSpec = {
       auth: 'healthz 公开 · bridge Bearer BRIDGE_TOKEN',
       stability: '网关基石',
       summary:
-        '/healthz 检查网关与连接器实时在线状态（心跳超 65 秒判离线）；/bridge 供 Windows 受保护连接器以至少 32 字符密钥建立单条反向长连接。',
+        '/healthz 检查网关与连接器实时在线状态（心跳超 65 秒判离线）；/bridge 供本地受保护连接器（Windows / macOS / Linux）以至少 32 字符密钥建立单条反向长连接。',
       relatedLink: '/docs/contracts',
       relatedLabel: '查看网关HTTP与心跳契约',
       capabilities: [
@@ -59,7 +59,7 @@ export const apiSpecZh: ApiCatalogSpec = {
       ],
       limitations: [
         '连接器掉线时 /healthz 返回 503；若已存在活跃或宽限期长连接，新 /bridge 建连直接返回 409',
-        '当前生产连接器凭据 loadSecrets 与 ACL 检查严格依赖 Windows x64（DPAPI + NTFS DACL）',
+        '凭据与状态按平台隔离保存：Windows 使用 DPAPI + NTFS ACL；macOS 使用 Keychain（或 0600 文件回退）；Linux 使用 Secret Service / 0600 文件 + 0700 目录与祖先路径校验',
       ],
       params: [
         {
@@ -96,7 +96,7 @@ export const apiSpecZh: ApiCatalogSpec = {
       group: 'oauth',
       kind: 'POST',
       title: 'OAuth 2.1 + PKCE 授权与令牌轮换',
-      signature: 'POST /register · /authorize · POST /oauth/token · /oauth/token/revoke',
+      signature: 'POST /register · /authorize · POST /oauth/token',
       auth: 'PKCE S256 (43 字符) + PBKDF2-SHA256',
       stability: '双 DO 状态一致',
       summary:
@@ -230,7 +230,7 @@ curl -sS -X POST "{{BASE_URL}}/register" \\
       auth: 'computer:read · file-worker (allowExec: false)',
       stability: '4 项只读工具',
       summary:
-        '仅挂载单一受控工程目录 /workspace。除 computer_context 免人工批准外，目录枚举、分段 UTF-8 读取与全文检索均按完整参数计算摘要等待 Approve.cmd 确认。',
+        '仅挂载单一受控工程目录 /workspace。除 computer_context 免人工批准外，目录枚举、分段 UTF-8 读取与全文检索均按完整参数计算摘要等待本机 Approve.cmd / approve 确认。',
       relatedLink: '/docs/contracts',
       relatedLabel: '查看 10 项工具预算明细',
       capabilities: [
@@ -239,7 +239,7 @@ curl -sS -X POST "{{BASE_URL}}/register" \\
       ],
       limitations: [
         'list_directory 与 file-safety 坚决不跟随符号链接或跨设备硬链接（nlink > 1），防目录逃逸',
-        '项目目录本身对已批准的读操作透明，未受审查的代码/注释正文仍需操作者在 Approve.cmd 警惕提示词注入',
+        '项目目录本身对已批准的读操作透明，未受审查的代码/注释正文仍需操作者在 Approve.cmd / approve 警惕提示词注入',
       ],
       params: [
         {
@@ -275,7 +275,9 @@ curl -sS -X POST "{{BASE_URL}}/register" \\
   "path": "package.json",
   "offset": 0,
   "bytes_read": 512,
-  "eof": true,
+  "size": 512,
+  "truncated": false,
+  "next_offset": null,
   "sha256": "e3b0c442..."
 }`,
         },
@@ -289,7 +291,7 @@ curl -sS -X POST "{{BASE_URL}}/register" \\
   "arguments": {
     "query": "AuthCoordinator",
     "path": "cloud",
-    "max_results": 50
+    "limit": 50
   }
 }`,
         },
@@ -301,10 +303,10 @@ curl -sS -X POST "{{BASE_URL}}/register" \\
       kind: 'MCP',
       title: 'CAS 文件写入与受限容器命令 (write / edit / delete / exec / status / stop)',
       signature: 'write_file · edit_file · delete_file · exec_command · command_status · stop_command',
-      auth: 'Approve.cmd 逐参批准（status/stop 除外）',
+      auth: '本机 Approve.cmd / approve 逐参批准（status/stop 除外）',
       stability: '6 项读写执行工具',
       summary:
-        '所有文件修改均携带 CAS sha256 / 唯一字面替换校验并执行 NTFS DACL 与 O_EXCL 原子替换预检；命令运行在只读、断网、UID/GID 1000、2 GiB 内存上限的一次性 Linux 容器内。',
+        '所有文件修改均携带 CAS sha256 / 唯一字面替换校验并执行 NTFS DACL（Windows）与 O_EXCL 原子替换预检；命令运行在只读、断网、非特权 UID/GID（Windows/macOS 为 1000，Linux 映射非 0 宿主 UID/GID）、2 GiB 内存上限的一次性 Linux 容器内。',
       relatedLink: '/docs/contracts',
       relatedLabel: '查看容器加固标志与 ACL 规则',
       capabilities: [
@@ -321,7 +323,7 @@ curl -sS -X POST "{{BASE_URL}}/register" \\
           location: 'body',
           type: 'sha256 hex',
           required: false,
-          description: 'edit_file 必填、write_file / delete_file 可选的乐观并发文件校验摘要。',
+          description: 'edit_file 与 write_file(overwrite=true) / delete_file 可选的乐观并发文件校验摘要。',
         },
         {
           name: 'exec_command.network',
@@ -365,7 +367,7 @@ curl -sS -X POST "{{BASE_URL}}/register" \\
           code: `{
   "name": "exec_command",
   "arguments": {
-    "command": "pnpm test",
+    "cmd": "pnpm test",
     "mode": "sync",
     "timeout_ms": 30000,
     "network": "none"
@@ -427,7 +429,7 @@ export const apiSpecEn: ApiCatalogSpec = {
       auth: 'healthz public · bridge Bearer BRIDGE_TOKEN',
       stability: 'Core Relay',
       summary:
-        '/healthz reports connector liveness against a 65s heartbeat limit; /bridge accepts a single active reverse WebSocket from the hardened local Windows connector.',
+        '/healthz reports connector liveness against a 65s heartbeat limit; /bridge accepts a single active reverse WebSocket from the hardened local connector (Windows, macOS, or Linux).',
       relatedLink: '/en/docs/contracts',
       relatedLabel: 'View HTTP & liveness specs',
       capabilities: [
@@ -436,7 +438,7 @@ export const apiSpecEn: ApiCatalogSpec = {
       ],
       limitations: [
         'Returns 503 when connector is offline and 409 if a live/grace WSS socket already exists',
-        'Production secret decryption (DPAPI) and NTFS ACL guards require Windows x64 (`win32`)',
+        'Secrets use platform-isolated storage: DPAPI + NTFS ACL on Windows; Keychain (or 0600 fallback) on macOS; Secret Service / 0600 file + 0700 state checks on Linux',
       ],
       params: [
         {
@@ -458,7 +460,7 @@ export const apiSpecEn: ApiCatalogSpec = {
       group: 'oauth',
       kind: 'POST',
       title: 'OAuth 2.1 + PKCE Authorization & Password Generations',
-      signature: 'POST /register · /authorize · POST /oauth/token · /oauth/token/revoke',
+      signature: 'POST /register · /authorize · POST /oauth/token',
       auth: 'PKCE S256 (43 chars) + PBKDF2-SHA256',
       stability: 'Dual DO Authority',
       summary:
@@ -562,15 +564,15 @@ export const apiSpecEn: ApiCatalogSpec = {
       ],
       limitations: [
         'Strictly blocks symlink dereferences and multi-hardlink files (nlink !== 1)',
-        'computer_context is exempt from Approve.cmd; directory/file reads require exact argument digest approval',
+        'computer_context is exempt from Approve.cmd / approve; directory/file reads require exact argument digest approval',
       ],
       params: [
         { name: 'list_directory.limit / read_file.max_bytes', location: 'body', type: 'integer', required: false, defaultValue: '200 / 65536', description: 'Up to 1,000 entries or 262,144 bytes per call.' },
       ],
       responses: [
-        { status: '200 Result', tone: 'ok', summary: 'Bounded directory list, UTF-8 slice, or grep hits', example: `{ "path": "package.json", "bytes_read": 512, "eof": true }` },
+        { status: '200 Result', tone: 'ok', summary: 'Bounded directory list, UTF-8 slice, or grep hits', example: `{ "path": "package.json", "offset": 0, "bytes_read": 512, "truncated": false, "next_offset": null }` },
       ],
-      examples: [{ label: 'search_files Args', lang: 'json', code: `{ "name": "search_files", "arguments": { "query": "AuthCoordinator", "max_results": 50 } }` }],
+      examples: [{ label: 'search_files Args', lang: 'json', code: `{ "name": "search_files", "arguments": { "query": "AuthCoordinator", "limit": 50 } }` }],
     },
     {
       id: 'mcp-write-exec-tools',
@@ -578,14 +580,14 @@ export const apiSpecEn: ApiCatalogSpec = {
       kind: 'MCP',
       title: 'CAS File Writes & Hardened Container Execution',
       signature: 'write_file · edit_file · delete_file · exec_command · command_status · stop_command',
-      auth: 'Approve.cmd Exact Digest (status/stop exempt)',
+      auth: 'Local Approve.cmd / approve Exact Digest (status/stop exempt)',
       stability: '6 Write/Exec Tools',
       summary:
-        'Executes CAS-guarded workspace mutations (with Windows NTFS DACL checks) and disposable --read-only Linux container commands guarded by 20s lease heartbeats.',
+        'Executes CAS-guarded workspace mutations (with Windows NTFS DACL checks on win32) and disposable --read-only Linux container commands guarded by 20s lease heartbeats.',
       relatedLink: '/en/docs/contracts',
       relatedLabel: 'Inspect Docker flags & approval ledger',
       capabilities: [
-        'Runs commands under --read-only, --cap-drop ALL (SETUID/SETGID only), UID/GID 1000, 2g RAM, 256 PIDs, and --network none default',
+        'Runs commands under --read-only, --cap-drop ALL (SETUID/SETGID only), non-root UID/GID (1000 on win32/darwin; mapped host UID/GID on Linux), 2g RAM, 256 PIDs, and --network none default',
         'Checks expected_sha256 CAS guards on edits and prevents unconfirmed directory/recursive deletes',
       ],
       limitations: [
@@ -599,7 +601,7 @@ export const apiSpecEn: ApiCatalogSpec = {
         { status: 'Command / Mutation Output', tone: 'ok', summary: 'Exit code, bounded stdout/stderr, or updated file digest', example: `{ "exit_code": 0, "stdout": "14 tests passed", "truncated": false }` },
         { status: '403 / CLOSED_CLEANUP_UNCONFIRMED', tone: 'err', summary: 'Refuses further writes/exec after unconfirmed container teardown' },
       ],
-      examples: [{ label: 'exec_command Args', lang: 'json', code: `{ "name": "exec_command", "arguments": { "command": "pnpm test", "network": "none" } }` }],
+      examples: [{ label: 'exec_command Args', lang: 'json', code: `{ "name": "exec_command", "arguments": { "cmd": "pnpm test", "network": "none" } }` }],
     },
   ],
 }

@@ -20,11 +20,14 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: 检出仓库
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: 安装 pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - name: 配置 Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: pnpm
@@ -35,3 +38,9 @@ jobs:
         run: pnpm run check
       - name: 运行测试套件
         run: node --test --test-concurrency=1 test/*.test.mjs cloud/*.test.mjs
+      - name: 检查维护守卫与同步脚本
+        run: python3 tools/repo_maintenance_guard.py status && python3 .github/scripts/sync_assets_licenses.py --check --dry-run
+      - name: 验证文档站依赖并构建
+        run: |
+          pnpm --dir docs-site install --frozen-lockfile
+          pnpm --dir docs-site run docs:build

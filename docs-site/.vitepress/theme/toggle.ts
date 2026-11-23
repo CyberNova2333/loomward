@@ -173,9 +173,19 @@ export function setupAppearanceToggle() {
     for (const button of buttons()) bind(button)
   }
 
+  let rafId = 0
+  function scheduleBindAll() {
+    if (rafId) return
+    rafId = window.requestAnimationFrame(() => {
+      rafId = 0
+      bindAll()
+    })
+  }
   bindAll()
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindAll, { once: true })
-  new MutationObserver(bindAll).observe(document.documentElement, { childList: true, subtree: true })
+  new MutationObserver((mutations) => {
+    if (mutations.some((m) => m.addedNodes.length > 0)) scheduleBindAll()
+  }).observe(document.documentElement, { childList: true, subtree: true })
   new MutationObserver(() => {
     for (const button of buttons()) {
       const shadow = bindings.get(button)

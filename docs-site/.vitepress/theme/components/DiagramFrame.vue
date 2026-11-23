@@ -43,13 +43,15 @@ const resolvedExpandLabel = computed(() =>
 const standaloneHref = computed(() => withBase(props.src))
 
 const stageHref = computed(() => {
-  const base = standaloneHref.value
-  const sep = base.includes('?') ? '&' : '?'
-  return `${base}${sep}stage=1&theme=${isDark.value ? 'dark' : 'light'}`
+  const raw = standaloneHref.value
+  if (!raw.startsWith('/')) return ''
+  const sep = raw.includes('?') ? '&' : '?'
+  return `${raw}${sep}stage=1`
 })
 
 const anchorRef = ref<HTMLElement | null>(null)
 const cardRef = ref<HTMLElement | null>(null)
+const expandBtnRef = ref<HTMLButtonElement | null>(null)
 const iframeRef = ref<HTMLIFrameElement | null>(null)
 const stageRef = ref<HTMLElement | null>(null)
 const isExpanded = ref(false)
@@ -57,6 +59,7 @@ const containerWidth = ref(720)
 const viewportH = ref(860)
 const detectedRatio = ref<number | null>(null)
 let resizeObserver: ResizeObserver | null = null
+let boundFrameDoc: Document | null = null
 
 function parseAspect(raw: string): number | null {
   if (!raw) return null
@@ -95,6 +98,11 @@ function handleIframeLoad(): void {
   syncTheme()
   try {
     const doc = iframeRef.value?.contentDocument
+    if (doc && doc !== boundFrameDoc) {
+      boundFrameDoc?.removeEventListener('keydown', handleKeydown, true)
+      doc.addEventListener('keydown', handleKeydown, true)
+      boundFrameDoc = doc
+    }
     const svg = doc?.querySelector('svg')
     const vb = svg?.getAttribute('viewBox')
     if (vb) {
@@ -114,6 +122,8 @@ function toggleExpand(): void {
 
 function handleKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape' && isExpanded.value) {
+    event.preventDefault()
+    event.stopPropagation()
     isExpanded.value = false
   }
 }
@@ -133,12 +143,17 @@ watch(isDark, () => {
 watch(isExpanded, (expanded) => {
   if (typeof document === 'undefined') return
   document.documentElement.style.overflow = expanded ? 'hidden' : ''
+  if (expanded) {
+    cardRef.value?.focus?.()
+  } else {
+    expandBtnRef.value?.focus?.()
+  }
 })
 
 onMounted(() => {
   updateViewport()
   window.addEventListener('resize', updateViewport, { passive: true })
-  window.addEventListener('keydown', handleKeydown)
+  window.addEventListener('keydown', handleKeydown, true)
   if (typeof ResizeObserver === 'function' && anchorRef.value) {
     resizeObserver = new ResizeObserver(() => {
       if (!isExpanded.value && anchorRef.value) {
@@ -152,8 +167,10 @@ onMounted(() => {
 onUnmounted(() => {
   if (typeof window !== 'undefined') {
     window.removeEventListener('resize', updateViewport)
-    window.removeEventListener('keydown', handleKeydown)
+    window.removeEventListener('keydown', handleKeydown, true)
   }
+  boundFrameDoc?.removeEventListener('keydown', handleKeydown, true)
+  boundFrameDoc = null
   if (typeof document !== 'undefined') {
     document.documentElement.style.overflow = ''
   }
@@ -173,7 +190,9 @@ onUnmounted(() => {
       ref="cardRef"
       class="archify-diagram-card diagram-frame"
       :class="{ 'is-expanded': isExpanded }"
-      role="region"
+      :role="isExpanded ? 'dialog' : 'region'"
+      :aria-modal="isExpanded ? 'true' : undefined"
+      :tabindex="isExpanded ? -1 : undefined"
       :aria-label="resolvedTitle"
     >
       <div class="diagram-frame__bar">
@@ -183,12 +202,13 @@ onUnmounted(() => {
         </span>
         <div class="diagram-frame__actions">
           <button
+            ref="expandBtnRef"
             type="button"
             class="diagram-frame__btn"
             :aria-pressed="isExpanded"
             @click="toggleExpand"
           >
-            {{ isExpanded ? '✕' : '⛶' }} {{ resolvedExpandLabel }}
+            <span aria-hidden="true">{{ isExpanded ? '✕' : '⛶' }}</span> {{ resolvedExpandLabel }}
           </button>
           <a
             :href="standaloneHref"
@@ -211,7 +231,6 @@ onUnmounted(() => {
           :title="resolvedTitle"
           width="100%"
           height="100%"
-          scrolling="no"
           allowfullscreen
           loading="lazy"
           class="diagram-frame__iframe"

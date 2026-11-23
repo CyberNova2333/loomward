@@ -27,14 +27,14 @@ Remote Client ──(HTTPS OAuth 2.1 + POST /mcp)──▶ Cloudflare Worker
                                                     ├─ AuthCoordinator DO (owner-v2-*, SQLite)
                                                     └─ BridgeRelay DO (primary, WSS /bridge)
                                                            │
-Windows Host (DPAPI + NTFS ACL + Pinned Node) ◀────────────┘
+Local Host (Windows DPAPI+NTFS ACL / POSIX Keychain+SecretService+0700) ◀──┘
   ├─ BridgeConnector (信封二审 + 并发通道 + 心跳)
-  ├─ LocalApprovals + Approve.cmd (5 分钟一次性精确摘要确认)
+  ├─ LocalApprovals + Approve.cmd / approve (5 分钟一次性精确摘要确认)
   ├─ RequestReceipts (24h 持久防重放) / StopReceipts (独立停止栈)
   └─ createSandboxRuntime (windows-acl 前置检查 + Docker CLI)
          │
          ▼
-Linux Container (node:24-trixie-slim, --read-only, UID 1000, --network none|bridge)
+Linux Container (node:24-trixie-slim, --read-only, 非特权 UID, --network none|bridge)
   ├─ runner.mjs (PID 1, 20s 宿主租约监控, /bin/bash 命令执行)
   └─ file-worker.mjs (allowExec=false + file-safety 路径/编码/链接守卫)
 ```
@@ -58,24 +58,24 @@ Linux Container (node:24-trixie-slim, --read-only, UID 1000, --network none|brid
 ### ADR-02：出锁准备 + 乐观版本号提交事务
 
 - **背景问题（R4-03）**：在单实例序列化锁内部等待 HTTP 请求体上传或外部 CIMD/JWKS 拉取，会导致一个慢请求堵死全站授权与令牌刷新。
-- **架构决策**：`cloud/index.mjs` 先通过 `readLimited` 在边缘完整读取上限受控的请求体；`AuthTransactions` 将准备阶段置于 `AuthQueue` 锁外执行，按通道限制并发（如 `authorization: 4`、`mcp: 32`、`stop: 4`），提交前核对 `revision` 是否变化并最多重试 4 轮（总超时 25 秒）。
+- **架构决策**：`cloud/index.mjs` 先通过 `readLimited` 在边缘完整读取上限受控的请求体；`AuthTransactions` 将准备阶段置于 `AuthQueue` 锁外执行，按通道限制并发（如 `authorization: 4`、`mcp: 32`、`stop: 4`、`other: 16`），提交前核对 `revision` 是否变化并最多重试 12 轮（总超时 25 秒）。
 
 ### ADR-03：停止指令专用通道与清理故障安全退守
 
 - **背景问题（R4-04 / FINAL-01）**：普通控制请求占满防重放缓存或单一容器 `docker rm -f` 失败时，若全局锁死全部接口，属主客户端将失去停止失控后台任务的能力。
-- **架构决策**：`AuthTransactions`、`BridgeRelay`、`BridgeConnector` 与 `StopReceipts`（128 条 FIFO 淘汰）为 `stop_command` 贯穿保留独立并发槽；`local/sandbox.mjs` 在 `cleanupConfirmed === false` 置 `closed = true` 时，把属主 `command_status` / `get_command` / `stop_command` 分支放在关闭拦截之前，继续严查 `ownerClient` 并保持汇报 `cleanup_confirmed: false`。
+- **架构决策**：`AuthTransactions`、`BridgeRelay`、`BridgeConnector` 与 `StopReceipts`（128 条 FIFO 淘汰）为 `stop_command` 贯穿保留独立并发槽；`local/sandbox.mjs` 在 `cleanupConfirmed === false` 置 `closed = true` 时，把属主 `command_status` / `stop_command` 分支放在关闭拦截之前，继续严查 `ownerClient` 并保持汇报 `cleanup_confirmed: false`。
 
 ### ADR-04：紧凑字节前置预算、零脚本 CSP 合并与宿主静态加固
 
-- **背景问题（R4-02 / 第五轮修复）**：深层嵌套 JSON 会因 `JSON.stringify(..., 2)` 在落盘后膨胀超出读取上限；外部宿主共享 Node 目录、PowerShell `PSModulePath` 继承及覆盖覆盖头部的 CSP 均带来隐蔽风险。
-- **架构决策**：`approval-store.mjs` 在开临时文件前按紧凑序列化检测 `1,200,000` 字节上限；`showConsent` 合并保留而非覆盖基础零脚本 CSP；`Install-NodeRuntime.ps1`、`Manage.ps1` 与 `connector.mjs` 将运行目录与官方 Node `24.22.1` 隔离到用户私有目录并检查完整祖先路径 ACL、SHA-256 及最小子进程环境；`local/windows-acl.mjs` 前置拦截会丢弃显式 NTFS DACL 的替换请求。
+- **背景问题（R4-02 / 第五轮修复）**：深层嵌套 JSON 会因 `JSON.stringify(..., 2)` 在落盘后膨胀超出读取上限；外部宿主共享 Node 目录、PowerShell `PSModulePath` / 动态链接器继承及覆盖头部的 CSP 均带来隐蔽风险。
+- **架构决策**：`approval-store.mjs` 在开临时文件前按紧凑序列化检测 `1,200,000` 字节上限；`showConsent` 合并保留而非覆盖基础零脚本 CSP；`Install-NodeRuntime.ps1` / `local/node-toolchains.mjs`、`Manage.ps1` / `host-cli.mjs` 与 `connector.mjs` 将运行目录与官方 Node `24.22.1` 隔离到用户私有目录并检查完整祖先路径权限、SHA-256 及最小子进程环境；`local/windows-acl.mjs` 前置拦截会丢弃显式 NTFS DACL 的替换请求。
 
 ### 升级与迁移操作清单
 
 升级仓库源码时，请按顺序同步三个独立运行面：
 1. **源码验证**：在新拉取的目录运行 `pnpm install --frozen-lockfile && pnpm run check && pnpm test`。
-2. **镜像与受保护副本**：先执行 `Stop.cmd`，若有 `container/` 或 `local/` 改动须重新 `docker build` 并重新运行 `.\scripts\Install-Hardened.ps1 -Workspace "<workspace-path>"`（该脚本会保留 `%USERPROFILE%\.agentdock-bridge` 中的 DPAPI 凭据、历史账本与新副本备份，但需要等待重装完成 `installation.json` 清单）。
-3. **云端 Worker**：有 `cloud/` 或 `wrangler.jsonc` 改动时重新执行 `pnpm run deploy`，再启动 `Start.cmd` 并用 `Status.cmd` 核对在线状态。
+2. **镜像与受保护副本**：先运行 `Stop.cmd`（Windows）或 `~/.agentdock-bridge/stop`（Linux/macOS），若有 `container/` 或 `local/` 改动须重新 `docker build` 并重新运行 `.\scripts\Install-Hardened.ps1 -Workspace "<workspace-path>"` 或 `node scripts/host-cli.mjs install --workspace "<workspace-path>"`（该命令会保留 `~/.agentdock-bridge` 中的受保护凭据、历史账本并刷新 `installation.json` 清单）。
+3. **云端 Worker**：有 `cloud/` 或 `wrangler.jsonc` 改动时重新执行 `pnpm run deploy`，再运行 `Start.cmd` / `start` 并用 `Status.cmd` / `status` 核对在线状态。
 
 ---
 

@@ -23,42 +23,42 @@ Configuration is separated cleanly into **Cloudflare Worker configuration** and 
 | Secret `BRIDGE_TOKEN` | Min 32-char URL-safe random secret | Shared bearer token for `WSS /bridge` and IP rate-limit key salt |
 | Secret `OWNER_PASSWORD_HASH` | `pbkdf2-sha256$100000$<salt>$<hash>` | Verifies owner login; SHA-256 shifts `AUTH` generation `owner-v2-<hash>` |
 
-## 2. Protected State Directory (`%USERPROFILE%\.agentdock-bridge`)
+## 2. Protected State Directory (`~/.agentdock-bridge` / `%USERPROFILE%\.agentdock-bridge`)
 
-Protected by NTFS ACLs restricting FullControl to the current Windows user SID and `SYSTEM` (`S-1-5-18`):
+On Windows, NTFS ACLs restrict FullControl to the current user SID and `SYSTEM` (`S-1-5-18`); on Linux and macOS, `local/host-safety.mjs` enforces `0700` ownership and ancestor write protection:
 
-- `secrets.dpapi`: CurrentUser DPAPI ciphertext (entropy `cbnv.agentdock-bridge.secrets.v1`).
+- `secrets.dpapi` (Windows DPAPI) or `secrets.meta.json` + Keychain / Secret Service / `0600` `secrets.json` (POSIX).
 - `config.json`: Connector configuration (see table below).
 - `runtime-<timestamp>-<id>/` & `installation.json`: Isolated copy of `local/`, `scripts/`, `package.json`, `pnpm-lock.yaml`, production deps, and SHA-256 manifest.
-- `Start.cmd`, `Stop.cmd`, `Status.cmd`, `Password.cmd`, `Approve.cmd`: Trusted entrypoints (note root `ShowPassword.cmd` forwards to `%USERPROFILE%\.agentdock-bridge\Password.cmd`).
-- `approvals/` & `request-receipts/`: 5-minute TTL queue files and 24-hour replay receipts.
+- `{Start,Stop,Status,Password,Approve}.cmd` (Windows) or `{start,stop,status,password,approve}` (`0700` POSIX wrappers clearing preload/linker env vars).
+- `approvals/`, `request-receipts/`, and `supervisor.sock` (POSIX single-instance lock).
 
 | `config.json` Field | Writer | Meaning & Constraint |
 | --- | --- | --- |
-| `origin` | `Setup.ps1` | Matches Worker `PUBLIC_ORIGIN` (HTTPS required outside loopback tests) |
-| `roots` / `defaultCwd` | `Install-Hardened.ps1 -Workspace` | Exactly **one** explicit directory mounted at `/workspace` (must not contain `stateDir` or `sourceRoot`) |
-| `sourceRoot` | `Install-Hardened.ps1` | Must equal running script root; blocks launching from unhardened folders |
-| `nodePath` / `nodeRoot` / `nodeSha256` | `Install-NodeRuntime.ps1` | Pinned Node `24.22.1` under `%USERPROFILE%\.agentdock-toolchains`, verified on every start/approval |
-| `allowExec` | `Setup.ps1` (`false`) -> `Install-Hardened.ps1` (`true`) | Enables `exec_command`, `command_status`, `stop_command` on the sandbox (`file-worker.mjs` keeps `false`) |
-| `requireLocalApproval` | `true` | Required by `Manage.ps1 Start` |
-| `sandbox.enabled` / `image` / `dockerPath` / `context` / `allowOutbound` | `Install-Hardened.ps1` | Pinned `sha256:<64-hex>` image, `nlink === 1` `docker.exe`, `desktop-linux` context, outbound toggle (`true`) |
+| `origin` | `Setup.ps1` / `host-cli.mjs setup` | Matches Worker `PUBLIC_ORIGIN` (HTTPS required outside loopback tests) |
+| `roots` / `defaultCwd` | `Install-Hardened.ps1 -Workspace` / `host-cli.mjs install --workspace` | Exactly **one** explicit directory mounted at `/workspace` (must not contain `stateDir` or `sourceRoot`) |
+| `sourceRoot` | `Install-Hardened.ps1` / `host-cli.mjs install` | Must equal running script root; blocks launching from unhardened folders |
+| `nodePath` / `nodeRoot` / `nodeSha256` | `Install-NodeRuntime.ps1` / `node-toolchains.mjs` | Pinned Node `24.22.1` under `~/.agentdock-toolchains`, verified on every start/approval |
+| `allowExec` | `setup` (`false`) -> `install` (`true`) | Enables `exec_command`, `command_status`, `stop_command` on the sandbox (`file-worker.mjs` keeps `false`) |
+| `requireLocalApproval` | `true` | Required by `Manage.ps1` and `host-cli.mjs` before connector start |
+| `sandbox.enabled` / `image` / `dockerPath` / `context` / `allowOutbound` | `Install-Hardened.ps1` / `host-cli.mjs install` | Pinned `sha256:<64-hex>` image, `nlink === 1` `docker`, `desktop-linux` (Win/macOS) or `default` (Linux) context, outbound toggle (`true` by default) |
 
-## 3. Environment Variables, npm/pnpm & PowerShell Scripts
+## 3. Environment Variables, npm/pnpm & Host Scripts
 
 | Variable / Script | Scope & Notes |
 | --- | --- |
-| `HTTPS_PROXY` / `HTTP_PROXY` | Optional proxies probed alongside Windows WinINet registry settings and direct route |
+| `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | Optional proxies (plus bypass list) probed alongside Windows WinINet or macOS `scutil --proxy` and direct route |
 | `AGENTDOCK_DOCKER_TEST` | Enables real container integration tests in `test/sandbox.test.mjs` |
 | `AGENTDOCK_BRIDGE_TOKEN` | Explicitly deleted from `process.env` at connector startup |
 | `NODE_OPTIONS`, `NODE_PATH`, `NODE_TLS_REJECT_UNAUTHORIZED`, `NODE_EXTRA_CA_CERTS` | Cleared by `Clear-NodeOverrides` before launching Node |
 | `pnpm run dev` | Starts `wrangler dev --ip 127.0.0.1 --port 8797` for loopback testing |
 | `pnpm run check` / `pnpm test` | Syntax check across modules & Node test runner (`test/*.test.mjs cloud/*.test.mjs`) |
-| `scripts/Manage.ps1` | `-Action Start\|Stop\|Status\|Run\|Password` using process start-time verification & mutex |
-| `scripts/Rotate-Secrets.ps1` | Two-step rotation (`secrets.next.dpapi` -> `wrangler secret bulk` -> promote to `secrets.dpapi`) while stopped |
+| `scripts/Manage.ps1` / `scripts/host-cli.mjs` | Host lifecycle (`start`, `stop`, `status`, `approve`, `password`, `setup`, `install`) with process start-time anti-PID-reuse checks |
+| `scripts/Rotate-Secrets.ps1` / `host-cli.mjs rotate-secrets` | Two-step rotation (stage `next` -> `wrangler secret bulk` -> promote to `current`) while stopped |
 | `scripts/acceptance-v2.mjs` / `verify-lifecycle.mjs` | Explicit maintainer live verification against public `/healthz` and `/mcp` |
 
 ## 4. Rotating Credentials Safely
 
-1. Run `%USERPROFILE%\.agentdock-bridge\Stop.cmd` and verify both supervisor and connector exited.
-2. Run `.\scripts\Rotate-Secrets.ps1`. If Cloudflare upload fails, `secrets.next.dpapi` remains so retries are idempotent; once committed, old OAuth tokens fail immediately due to the shifted `owner-v2-*` DO generation.
-3. Re-authenticate MCP clients using the new password shown by `Password.cmd`.
+1. Run `Stop.cmd` (Windows) or `~/.agentdock-bridge/stop` (Linux/macOS) and verify both supervisor and connector exited.
+2. Run `.\scripts\Rotate-Secrets.ps1` (Windows) or `node scripts/host-cli.mjs rotate-secrets` (Linux/macOS). If Cloudflare upload fails, staged credentials remain so retries are idempotent; once committed, old OAuth tokens fail immediately due to the shifted `owner-v2-*` DO generation.
+3. Re-authenticate MCP clients using the new password shown by `Password.cmd` or `~/.agentdock-bridge/password`.

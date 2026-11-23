@@ -3,7 +3,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg" alt="License: AGPL-3.0-only" /></a>
   <a href="package.json"><img src="https://img.shields.io/badge/Node-%3E%3D24-339933.svg" alt="Node &gt;= 24" /></a>
-  <a href="wrangler.jsonc.example"><img src="https://img.shields.io/badge/Runtime-CF%20Worker%20%2B%20Win%20x64%20%2B%20Docker-0969da.svg" alt="Runtime" /></a>
+  <a href="wrangler.jsonc.example"><img src="https://img.shields.io/badge/Runtime-CF%20Worker%20%2B%20Win%20%2F%20macOS%20%2F%20Linux%20%2B%20Docker-0969da.svg" alt="Runtime" /></a>
 </p>
 
 <p align="center">
@@ -14,38 +14,40 @@
   <a href="https://agentdock-worker-remote.cbnv.me/en/">Live Documentation</a> · <a href="docs-site/en/index.md">Docs Source</a> · <a href="repo-docs/README.md">Source Walkthrough (ZH)</a>
 </p>
 
-Personal authenticated MCP remote bridge: routes remote MCP clients (such as ChatGPT) through Cloudflare Workers OAuth 2.1 + PKCE, enforces exact per-request manual approval on a hardened Windows connector, and executes workspace file and command tools inside a read-only Linux Docker container. Production host secret protection relies on Windows DPAPI and NTFS ACLs; non-Windows hosts support Worker deployment, image builds, and cross-platform JS/cloud regression tests.
+Personal authenticated MCP remote bridge: routes remote MCP clients (such as ChatGPT) through Cloudflare Workers OAuth 2.1 + PKCE, enforces exact per-request manual approval on a hardened Windows, macOS, or Linux host connector, and executes workspace file and command tools inside a read-only Linux Docker container.
 
 ## Core Capabilities & Flow
 
 - **Edge OAuth 2.1 with Password-Generation Isolation**: Splits `AuthCoordinator` and `BridgeRelay` across two SQLite Durable Objects, requiring PKCE `S256`, zero-script CSP consent HTML, and refresh-token family revocation; rotating the owner password advances the generation prefix and immediately invalidates old grants.
-- **Exact Local Approval & Pre-Execution Replay Ledger**: Except for context/status/stop controls, every tool invocation binds `origin`, client identity, scopes, method, and full arguments into a canonical SHA-256 digest requiring `Approve.cmd` confirmation; retries consume the approval file before claiming a 24-hour durable receipt.
-- **Disposable Linux Container Sandbox & File Policy**: Commands and file operations execute under UID/GID 1000 with `--read-only`, `--cap-drop ALL` (retaining only `SETUID`/`SETGID`), `no-new-privileges`, and `--network none` by default; `file-safety` rejects symlinks, multi-hardlinks, malformed Unicode, and custom Windows DACL replacement.
-- **Fail-Closed Cleanup Guard**: Any unconfirmed `docker rm -f` halts all new file or command operations while keeping `command_status`, `get_command`, and `stop_command` available to the owning client without falsely reporting cleanup success.
-- **Hardened Host Copy & Pinned Toolchain**: Isolates config, secrets, and runtime files into `%USERPROFILE%\.agentdock-bridge`, checks ancestor directory ACLs, DPAPI ciphertexts, and pinned Node 24.22.1 SHA-256 checksums, and clears Node preload/TLS override variables on launch.
+- **Exact Local Approval & Pre-Execution Replay Ledger**: Except for context/status/stop controls, every tool invocation binds `origin`, client identity, scopes, method, and full arguments into a canonical SHA-256 digest for manual review in `Approve.cmd` on Windows, or through `approve` or the authenticated loopback WebUI on Linux and macOS; retries consume the approval file before claiming a 24-hour durable receipt.
+- **Disposable Linux Container Sandbox & File Policy**: Commands and file operations execute under an unprivileged child UID/GID (`1000` on Windows/macOS Docker Desktop, or dynamically matched to the non-root host UID/GID on native Linux) with `--read-only`, `--cap-drop ALL` (retaining only `SETUID`/`SETGID`), `no-new-privileges`, and `--network none` by default; `file-safety` rejects symlinks, multi-hardlinks, malformed Unicode, and custom Windows DACL replacement.
+- **Fail-Closed Cleanup Guard**: Any unconfirmed `docker rm -f` halts all new file or command operations while keeping `command_status` and `stop_command` available to the owning client without falsely reporting cleanup success.
+- **Hardened Host Copy & Pinned Toolchain**: Isolates config, secrets, and runtime files into `~/.agentdock-bridge` (`%USERPROFILE%\.agentdock-bridge` on Windows), verifies ancestor directory permissions, OS credential protection (Windows DPAPI, macOS Keychain, or Linux Secret Service / `0600` file), and pinned Node `24.22.1` SHA-256 checksums, and clears preload/dynamic-linker override variables on launch.
 
 ## Capabilities & Explicit Non-Goals
 
 | Dimension | What AgentDock Bridge Delivers | Explicit Non-Goals & Hard Bounds |
 | --- | --- | --- |
 | Cloud Auth & Relay | OAuth 2.1 + PKCE S256, zero-script CSP consent HTML, generation-based password invalidation, outbound `WSS /bridge` | **No** multi-tenancy (single `owner` only) or SSE response streaming; Cloudflare & upstream AI platforms see payloads |
-| Local Approval | All tools outside `computer_context`, `command_status`, `stop_command` require `Approve.cmd` over canonical SHA-256 args | `5`-minute pending TTL (`64` queue cap); **zero auto-replay** on `504`; production DPAPI/ACL requires Windows x64 |
-| Tools & Sandbox | 10 MCP tools isolated in `--read-only`, `--cap-drop ALL`, UID `1000`, `--network none` Linux containers | `1 MiB` RPC / `2 MiB` reply / `110s` cap; `<= 1 MiB` file mutations; unconfirmed cleanup locks down new tasks |
+| Local Approval | All tools outside `computer_context`, `command_status`, `stop_command` require exact local approval in the terminal or POSIX WebUI | `5`-minute pending TTL (`64` queue cap); **zero auto-replay** on `504`; headless Linux without a keyring uses `0600` file secrets |
+| Tools & Sandbox | 10 MCP tools isolated in `--read-only`, `--cap-drop ALL`, unprivileged UID, `--network none` Linux containers | `1 MiB` RPC / `2 MiB` reply / `110s` cap; `<= 1 MiB` file mutations; unconfirmed cleanup locks down new tasks |
 
 ```mermaid
 flowchart LR
   MCPClient["MCP Client (POST /mcp)"] --> Worker["Cloudflare Worker (OAuth 2.1 + BridgeRelay)"]
   Worker --> Connector["Local Connector (Policy + Queue)"]
-  Connector --> Approve["Approve.cmd Exact Review"]
+  Connector --> Approve["Exact Review in Terminal or POSIX WebUI"]
   Approve --> Ledger["Consume Approval + Claim Receipt"]
   Ledger --> Container["Linux Container Sandbox (/workspace)"]
 ```
 
-Tool responses and heartbeats travel back over the outbound `WSS /bridge` WebSocket initiated by the connector and resolve the pending `/mcp` HTTP call; routine start, stop, status, and password prompts invoke `%USERPROFILE%\.agentdock-bridge\{Start,Stop,Status,Password,Approve}.cmd` (root `.cmd` files simply forward there).
+Tool responses and heartbeats travel back over the outbound `WSS /bridge` WebSocket initiated by the connector and resolve the pending `/mcp` HTTP call; routine start, stop, status, and password prompts invoke the protected launchers in `~/.agentdock-bridge` (`{Start,Stop,Status,Password,Approve}.cmd` on Windows, or `{start,stop,status,password,approve}` on Linux/macOS).
 
 ## Quick Start
 
-Minimal production path on Windows x64 with Cloudflare CLI login and Docker Desktop (`desktop-linux`) ready (connect MCP clients to `https://<PUBLIC_ORIGIN>/mcp`):
+Minimal production path with Cloudflare CLI login and local Docker ready (connect MCP clients to `https://<PUBLIC_ORIGIN>/mcp`):
+
+**Windows (PowerShell)**:
 
 ```powershell
 pnpm install --frozen-lockfile && pnpm run check && pnpm test
@@ -58,15 +60,30 @@ pnpm run deploy
 & "$env:USERPROFILE\.agentdock-bridge\Start.cmd"
 ```
 
+**Linux / macOS (Bash / Zsh)**:
+
+```sh
+pnpm install --frozen-lockfile && pnpm run check && pnpm test
+cp wrangler.jsonc.example wrangler.jsonc          # Set PUBLIC_ORIGIN to your domain
+node scripts/host-cli.mjs setup --roots "<workspace-path>" --origin "https://<your-bridge-domain>"
+node scripts/host-cli.mjs upload-secrets
+docker build -f container/Dockerfile -t agentdock-dev:2026-10-28 .
+node scripts/host-cli.mjs install --workspace "<workspace-path>"
+pnpm run deploy
+~/.agentdock-bridge/start
+```
+
+The protected Linux and macOS installation also includes a loopback WebUI. For first-time setup, run `~/.agentdock-bridge/webui-auth init` in a local interactive terminal to obtain a single-use setup code. If the console is offline, start it with `~/.agentdock-bridge/webui`. Open `http://localhost:18797/` to authenticate and review pending requests in the audit tab.
+
 Other deployment modes and platform guides:
 
 | Scenario / Mode | Scope & Behavior Summary | Detailed Docs |
 | --- | --- | --- |
 | Cloud Worker & Local Dev (`8797`) | `wrangler.jsonc`, `BRIDGE_TOKEN` / `OWNER_PASSWORD_HASH`, `wrangler dev --ip 127.0.0.1 --port 8797` | [Getting Started](docs-site/en/docs/index.md) · [Configuration](docs-site/en/docs/configuration.md) |
-| Hardened Windows Host & Rotation | Protected `%USERPROFILE%\.agentdock-bridge`, pinned Node 24.22.1 SHA-256 verification, two-step rotation | [Configuration Guide](docs-site/en/docs/configuration.md) |
+| Hardened Host & Rotation | Protected `~/.agentdock-bridge`, pinned Node `24.22.1` SHA-256, DPAPI/Keychain/Secret Service & two-step rotation | [Configuration Guide](docs-site/en/docs/configuration.md) |
 | Container Image & Sandbox Contracts | 10 MCP tool limits, `network: "outbound"` opt-in, `file-worker` `allowExec: false` boundary | [Contracts & Boundaries](docs-site/en/docs/contracts.md) |
 | Public & Lifecycle Verification | Explicit CLI runs of `acceptance-v2.mjs` / `verify-lifecycle.mjs` against live `/healthz` and `/mcp` | [Configuration](docs-site/en/docs/configuration.md) · [Security Fixes](SECURITY-FIXES.md) |
-| Linux / macOS Development & Tests | Run `pnpm run check` and `pnpm test` (15 Windows/Docker-specific tests skip automatically) | [Troubleshooting FAQ](docs-site/en/docs/faq.md) · [Source Guide (ZH)](repo-docs/README.md) |
+| Cross-Platform Verification | Run `pnpm run check` and `pnpm test` (platform-specific Windows/POSIX/Docker tests auto-skip when prerequisites are absent) | [Troubleshooting FAQ](docs-site/en/docs/faq.md) · [Source Guide (ZH)](repo-docs/README.md) |
 
 ## Pre-Adoption FAQ
 
@@ -84,11 +101,11 @@ Other deployment modes and platform guides:
 
 - **Does Docker isolation protect secrets stored inside the mounted workspace?**
 
-  No. The workspace mount is intentionally readable and writable inside `/workspace`; approved tools can read project-local files, and prompt injection inside untrusted repository text remains a risk you must review during `Approve.cmd`.
+  No. The workspace mount is intentionally readable and writable inside `/workspace`; approved tools can read project-local files, and prompt injection inside untrusted repository text remains a risk you must review during `Approve.cmd` or `approve`.
 
 - **Can I run the production host connector natively on Linux or macOS?**
 
-  Not out of the box. `loadSecrets`, `windows-acl.mjs`, and `scripts/*.ps1` enforce Windows DPAPI and NTFS ACLs; Linux/macOS currently supports Worker deployment, image builds, and cross-platform unit tests.
+  Yes. Windows uses `scripts/*.ps1` (DPAPI + NTFS ACL + PowerShell 5.1), while Linux and macOS use `scripts/host-cli.mjs` (backed by `local/host-safety.mjs`, `local/host-secrets.mjs`, and `local/node-toolchains.mjs`): macOS stores credentials in the login Keychain by default, desktop Linux uses Secret Service (`secret-tool`), and headless Linux can fall back to `0600` private file storage (`posix-file`), all enforcing `0700` state directory and ancestor write-protection checks.
 
 ## Reading Paths
 

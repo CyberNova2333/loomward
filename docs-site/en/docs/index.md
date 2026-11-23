@@ -16,8 +16,8 @@ AgentDock Bridge is a **single-owner personal remote MCP gateway**. It connects 
 | Layer | Supported Runtime | Key Boundaries |
 | --- | --- | --- |
 | Cloud Edge | Cloudflare Workers + two SQLite Durable Objects (`AuthCoordinator`, `BridgeRelay`) | Production requests require HTTPS (`127.0.0.1` / `localhost` / `[::1]` allowed for local tests) |
-| Production Host | **Windows x64** (PowerShell 5.1, DPAPI `secrets.dpapi`, NTFS ACL checks, Docker Desktop) | `loadSecrets` and `windows-acl.mjs` require `win32`; Linux/macOS supports Worker deploy and JS/cloud tests only |
-| Execution Sandbox | Linux container via `desktop-linux` Docker context (`node:24-trixie-slim`, UID/GID `1000`) | Mounts **one** explicit workspace at `/workspace`; approved tools can read/write project-local files |
+| Production Host | **Windows x64** (`scripts/*.ps1`, DPAPI, NTFS ACL) and **Linux / macOS** (`scripts/host-cli.mjs`, Keychain / Secret Service / `0600`) | Windows additionally guards custom NTFS DACLs before replacement; headless Linux without a keyring uses `0600` `posix-file` |
+| Execution Sandbox | Linux container (`node:24-trixie-slim`, `desktop-linux` UID `1000` on Win/macOS, `default` matching host non-root UID/GID on Linux) | Mounts **one** explicit workspace at `/workspace`; approved tools can read/write project-local files |
 
 > **Trust Notice**: Cloudflare and your upstream AI client platform still observe `/mcp` arguments and results in transit. This bridge guarantees that no local action runs without owner OAuth consent and exact `Approve.cmd` confirmation.
 >
@@ -26,8 +26,8 @@ AgentDock Bridge is a **single-owner personal remote MCP gateway**. It connects 
 ## Prerequisites
 
 1. A Cloudflare account with HTTPS domain routing (`PUBLIC_ORIGIN`) and authenticated `wrangler`.
-2. **Windows x64** with Node.js 24+, `pnpm@12.6.0`, and Docker Desktop (`desktop-linux` context active over `npipe://`).
-3. An explicit workspace directory (`<workspace-path>`) strictly separate from `%USERPROFILE%\.agentdock-bridge` and your source checkout.
+2. **Windows / macOS / Linux** with Node.js 24+, `pnpm@12.6.0`, and local Docker (Docker Desktop `desktop-linux` on Windows/macOS, OrbStack/Colima on macOS, or native Docker Engine `default` on Linux).
+3. An explicit workspace directory (`<workspace-path>`) strictly separate from `~/.agentdock-bridge` (`%USERPROFILE%\.agentdock-bridge` on Windows) and your source checkout.
 
 ## Step-by-Step Deployment Workflow
 
@@ -45,38 +45,59 @@ Set `vars.PUBLIC_ORIGIN` in `wrangler.jsonc` to your deployed HTTPS origin (for 
 ### 2. Initialize Protected Host Secrets & Upload to Cloudflare
 
 ```powershell
+# Windows (PowerShell + DPAPI)
 .\scripts\Setup.ps1 -Roots "<workspace-path>" -Origin "https://<your-bridge-domain>"
 .\scripts\Secrets.ps1 -Action Upload
 ```
 
-`Setup.ps1` generates a 32-byte URL-safe `BRIDGE_TOKEN` and a 24-byte `OWNER_PASSWORD` (stored encrypted via Windows DPAPI in `%USERPROFILE%\.agentdock-bridge\secrets.dpapi`) plus a 100,000-iteration PBKDF2-SHA256 `OWNER_PASSWORD_HASH`. `Secrets.ps1 -Action Upload` pipes only `BRIDGE_TOKEN` and `OWNER_PASSWORD_HASH` into `wrangler secret bulk`.
+```sh
+# Linux / macOS (Keychain, Secret Service, or 0600 posix-file)
+node scripts/host-cli.mjs setup --roots "<workspace-path>" --origin "https://<your-bridge-domain>"
+node scripts/host-cli.mjs upload-secrets
+```
+
+Setup generates a 32-byte URL-safe `BRIDGE_TOKEN`, a 24-byte `OWNER_PASSWORD`, and a 100,000-iteration PBKDF2-SHA256 `OWNER_PASSWORD_HASH`, storing them in DPAPI (`secrets.dpapi` on Windows), macOS Keychain, Linux Secret Service (`secret-tool`), or a `0600` file on headless Linux, and pipes only `BRIDGE_TOKEN` and `OWNER_PASSWORD_HASH` into `wrangler secret bulk`.
 
 ### 3. Build the Pinned Development Image
 
-```powershell
+```sh
 docker build -f container/Dockerfile -t agentdock-dev:2026-10-28 .
 ```
 
 ### 4. Install the Hardened Host Copy & Deploy the Worker
 
 ```powershell
+# Windows
 .\scripts\Install-Hardened.ps1 -Workspace "<workspace-path>"
 pnpm run deploy
 ```
 
-`Install-Hardened.ps1` verifies ancestor ACLs, downloads and verifies pinned Windows x64 Node `24.22.1` (SHA-256 + OpenJS Authenticode signature under `%USERPROFILE%\.agentdock-toolchains`), pins the container `sha256:...` digest, copies `local/` and `scripts/` into a versioned `runtime-*` folder with frozen production dependencies, and generates trusted `.cmd` wrappers under `%USERPROFILE%\.agentdock-bridge`.
+```sh
+# Linux / macOS
+node scripts/host-cli.mjs install --workspace "<workspace-path>"
+pnpm run deploy
+```
+
+The installer verifies ancestor permissions, downloads and checksum-verifies pinned Node `24.22.1` under `~/.agentdock-toolchains` (with Authenticode on Windows / `codesign` on macOS), pins the container `sha256:...` digest, copies `local/` and `scripts/` into a versioned `runtime-*` folder with frozen production dependencies, and generates trusted launchers under `~/.agentdock-bridge`.
 
 ### 5. Start Connector, Connect MCP Client, and Approve Requests
 
 ```powershell
+# Windows
 & "$env:USERPROFILE\.agentdock-bridge\Start.cmd"
 & "$env:USERPROFILE\.agentdock-bridge\Status.cmd"
 ```
 
+```sh
+# Linux / macOS
+~/.agentdock-bridge/start
+~/.agentdock-bridge/status
+```
+
 1. Confirm `/healthz` returns `200` (`{"ok":true,"connectorOnline":true}`).
 2. Add `https://<your-bridge-domain>/mcp` in your remote MCP client.
-3. On the OAuth consent page, verify the client identity and callback URI, then enter the password shown by `%USERPROFILE%\.agentdock-bridge\Password.cmd` (or root `ShowPassword.cmd`).
-4. When a file or command tool returns `LOCAL_APPROVAL_REQUIRED`, run `%USERPROFILE%\.agentdock-bridge\Approve.cmd`, inspect the escaped JSON arguments, type `APPROVE <uuid>`, and retry with identical arguments within 5 minutes.
+3. On the OAuth consent page, verify the client identity and callback URI, then enter the password shown by `Password.cmd` (Windows) or `~/.agentdock-bridge/password` (Linux/macOS).
+4. When a file or command tool returns `LOCAL_APPROVAL_REQUIRED`, run `Approve.cmd` (Windows) or `~/.agentdock-bridge/approve` (Linux/macOS), inspect the escaped JSON arguments, type `APPROVE <uuid>`, and retry with identical arguments within 5 minutes.
 
 ## Next Steps
 

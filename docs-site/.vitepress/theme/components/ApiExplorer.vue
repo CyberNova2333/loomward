@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
+import { withBase } from 'vitepress'
 import type {
   ApiCatalogSpec,
   ApiItemSpec,
@@ -55,9 +56,20 @@ const filteredGroups = computed(() => {
 })
 
 const activeItem = computed<ApiItemSpec | undefined>(() => {
-  const exact = props.spec.items.find((item) => item.id === selectedId.value)
-  if (exact) return exact
-  return filteredGroups.value[0]?.items[0] ?? props.spec.items[0]
+  const visible = filteredGroups.value.flatMap((entry) => entry.items)
+  if (visible.length > 0) {
+    return visible.find((item) => item.id === selectedId.value) ?? visible[0]
+  }
+  return props.spec.items.find((item) => item.id === selectedId.value) ?? props.spec.items[0]
+})
+
+watch(filteredGroups, (groups) => {
+  const visible = groups.flatMap((entry) => entry.items)
+  if (visible.length > 0 && !visible.some((item) => item.id === selectedId.value)) {
+    selectedId.value = visible[0].id
+    exampleTab.value = 0
+    responseTab.value = 0
+  }
 })
 
 const responseSamples = computed(() => {
@@ -97,7 +109,12 @@ function selectItem(item: ApiItemSpec, updateHash = true) {
 
 function syncFromHash() {
   if (typeof window === 'undefined') return
-  const raw = decodeURIComponent(window.location.hash.replace(/^#/, ''))
+  let raw = ''
+  try {
+    raw = decodeURIComponent(window.location.hash.replace(/^#/, ''))
+  } catch {
+    return
+  }
   if (!raw) return
   const match = props.spec.items.find((item) => item.id === raw)
   if (match) {
@@ -113,9 +130,22 @@ function syncFromHash() {
 }
 
 async function copyText(text: string, target: 'code' | 'resp') {
-  if (!text || typeof navigator === 'undefined' || !navigator.clipboard) return
+  if (!text || typeof document === 'undefined') return
   try {
-    await navigator.clipboard.writeText(text)
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const area = document.createElement('textarea')
+      area.value = text
+      area.setAttribute('readonly', '')
+      area.style.position = 'fixed'
+      area.style.opacity = '0'
+      document.body.appendChild(area)
+      area.select()
+      const ok = document.execCommand('copy')
+      document.body.removeChild(area)
+      if (!ok) throw new Error('copy_failed')
+    }
     copiedTarget.value = target
     if (copyTimer) clearTimeout(copyTimer)
     copyTimer = setTimeout(() => {
@@ -228,6 +258,8 @@ onUnmounted(() => {
           <div class="apifox-group-chips" role="tablist">
             <button
               type="button"
+              role="tab"
+              :aria-selected="selectedGroup === 'all'"
               class="apifox-chip"
               :class="{ 'is-active': selectedGroup === 'all' }"
               @click="selectedGroup = 'all'"
@@ -238,6 +270,8 @@ onUnmounted(() => {
               v-for="g in spec.groups"
               :key="g.id"
               type="button"
+              role="tab"
+              :aria-selected="selectedGroup === g.id"
               class="apifox-chip"
               :class="{ 'is-active': selectedGroup === g.id }"
               @click="selectedGroup = g.id"
@@ -283,7 +317,7 @@ onUnmounted(() => {
       </aside>
 
       <!-- Center Specification Pane -->
-      <main v-if="activeItem" class="apifox-detail">
+      <section v-if="activeItem" class="apifox-detail" aria-label="API Specification Detail">
         <section class="apifox-detail-header">
           <div class="apifox-detail-badges">
             <span
@@ -308,7 +342,7 @@ onUnmounted(() => {
 
           <a
             v-if="activeItem.relatedLink"
-            :href="activeItem.relatedLink"
+            :href="withBase(activeItem.relatedLink)"
             class="apifox-related-link"
           >
             {{ activeItem.relatedLabel || spec.labels.deepDocs }} ↗
@@ -383,7 +417,7 @@ onUnmounted(() => {
             </div>
           </div>
         </section>
-      </main>
+      </section>
 
       <!-- Right Invocation & Payload Sample Pane -->
       <aside v-if="activeItem" class="apifox-samples">
@@ -406,8 +440,10 @@ onUnmounted(() => {
           >
             <button
               v-for="(ex, idx) in activeItem.examples"
-              :key="ex.label"
+              :key="`${ex.label}-${idx}`"
               type="button"
+              role="tab"
+              :aria-selected="exampleTab === idx"
               class="apifox-tab"
               :class="{ 'is-active': exampleTab === idx }"
               @click="exampleTab = idx"
@@ -434,8 +470,10 @@ onUnmounted(() => {
           <div class="apifox-tabs" role="tablist">
             <button
               v-for="(resp, idx) in responseSamples"
-              :key="resp.status"
+              :key="`${resp.status}-${idx}`"
               type="button"
+              role="tab"
+              :aria-selected="responseTab === idx"
               class="apifox-tab"
               :class="{ 'is-active': responseTab === idx }"
               @click="responseTab = idx"

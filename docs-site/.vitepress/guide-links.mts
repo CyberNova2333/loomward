@@ -14,7 +14,9 @@ export function guideLinks(pages: Record<string, string>) {
           const href = child.attrGet('href')
           if (!href || /^(?:[a-z]+:|\/|#)/i.test(href)) continue
           const [file, fragment] = href.split('#', 2)
-          const target = posix.normalize(posix.join(posix.dirname(source), decodeURIComponent(file)))
+          let decoded = file
+          try { decoded = decodeURIComponent(file) } catch { /* keep raw relative path */ }
+          const target = posix.normalize(posix.join(posix.dirname(source), decoded))
           if (target.startsWith('repo-docs/')) {
             const route = pages[target.slice('repo-docs/'.length)]
             if (route !== undefined) child.attrSet('href', '/' + route + (fragment ? '#' + fragment : ''))

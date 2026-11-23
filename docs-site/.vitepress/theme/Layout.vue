@@ -3,13 +3,12 @@ import DefaultTheme from "vitepress/theme";
 import { ref, computed, onMounted, watch } from "vue";
 import { useRoute, useData } from 'vitepress';
 import {
-  checkAndApplyLanguageRedirect,
-  setupLanguageSwitcherListener,
+  isEnglishPath,
   syncLanguageOnRoute,
 } from './i18n';
 
 const route = useRoute();
-const { frontmatter, site } = useData();
+const { frontmatter, site, lang } = useData();
 
 const STORAGE_KEY_AUTO_DISABLED = "cbnv_serious_auto_disabled";
 const STORAGE_KEY_MANUAL = "cbnv_serious_manual";
@@ -21,10 +20,61 @@ const hasUndoAction = ref(false);
 let toastTimer = null;
 let previousPathWasHome = true;
 
+function stripBase(rawPath, base = '/') {
+  const cleanBase = base.replace(/^[/\\]+/, '').replace(/[/\\]+$/, '');
+  const normalizedBase = cleanBase ? '/' + cleanBase + '/' : '/';
+  if (rawPath.startsWith(normalizedBase)) return '/' + rawPath.slice(normalizedBase.length);
+  if (cleanBase && rawPath === '/' + cleanBase) return '/';
+  return rawPath;
+}
+
+const isEn = computed(() => {
+  if (String(lang.value || '').toLowerCase().startsWith('en')) return true;
+  return isEnglishPath(stripBase(route.path, site.value?.base || '/'));
+});
+
+const ui = computed(() => isEn.value ? {
+  backHomeToast: 'Back on homepage — rich visual mode restored.',
+  docsToast: 'Reading docs — switched to minimal focus mode.',
+  undoDoneToast: 'Minimal mode disabled — rich visuals will stay on in docs.',
+  manualOnToast: 'Switched to minimal reading mode.',
+  manualOffToast: 'Switched to rich visual mode.',
+  toggleTitleOn: 'Minimal mode: ON (click for rich visual mode)',
+  toggleTitleOff: 'Minimal mode: OFF (click to enable)',
+  toggleAriaToRich: 'Switch to rich visual mode',
+  toggleAriaToMin: 'Switch to minimal mode',
+  labelMin: 'Minimal',
+  labelRich: 'Visual',
+  labelMinMobile: 'Minimal Mode (ON)',
+  labelRichMobile: 'Visual Mode (ON)',
+  undoBtn: 'Undo',
+  closeAria: 'Dismiss notification',
+} : {
+  backHomeToast: '已回到官网首页，为您恢复全效质感呈现。',
+  docsToast: '检测到您正在读文档，已为您减少界面干扰。',
+  undoDoneToast: '已撤销简约模式，后续阅读文档将默认保持质感呈现。',
+  manualOnToast: '已切换为简约模式，界面已精简为克制阅读风格。',
+  manualOffToast: '已切换为质感模式，全站视觉特效已恢复。',
+  toggleTitleOn: '简约模式：已开启（极简阅读风格，点击切换质感模式）',
+  toggleTitleOff: '简约模式：已关闭（点击开启）',
+  toggleAriaToRich: '切换到质感模式',
+  toggleAriaToMin: '切换到简约模式',
+  labelMin: '简约模式',
+  labelRich: '质感模式',
+  labelMinMobile: '简约模式（已开启）',
+  labelRichMobile: '质感模式（已开启）',
+  undoBtn: '点击撤销',
+  closeAria: '关闭提示',
+});
+
 const isHome = computed(() => {
+  const rel = stripBase(route.path, site.value?.base || '/');
   return (
-    route.path === "/" ||
-    route.path === "/index.html" ||
+    rel === "/" ||
+    rel === "/index.html" ||
+    rel === "/en" ||
+    rel === "/en/" ||
+    rel === "/en/index.html" ||
     frontmatter.value?.layout === "home"
   );
 });
@@ -50,11 +100,21 @@ function triggerToast(message, showUndo = false, duration = 6500) {
   }, duration);
 }
 
+function withStorage(kind, action, fallback = null) {
+  try {
+    if (typeof window === "undefined") return fallback;
+    const store = kind === "session" ? window.sessionStorage : window.localStorage;
+    return action(store);
+  } catch {
+    return fallback;
+  }
+}
+
 function evaluateRouteMode(isUserNavigation = false) {
   if (typeof window === "undefined") return;
-  const manual = localStorage.getItem(STORAGE_KEY_MANUAL);
+  const manual = withStorage("local", (s) => s.getItem(STORAGE_KEY_MANUAL));
   const autoDisabled =
-    localStorage.getItem(STORAGE_KEY_AUTO_DISABLED) === "true";
+    withStorage("local", (s) => s.getItem(STORAGE_KEY_AUTO_DISABLED)) === "true";
 
   if (manual === "on") {
     applyMode(true);
@@ -74,22 +134,23 @@ function evaluateRouteMode(isUserNavigation = false) {
     applyMode(false);
     // 从文档部分返回官网首页时，触发向质感模式过渡的反馈
     if (isUserNavigation && !previousPathWasHome && wasSerious) {
-      triggerToast("已回到官网首页，为您恢复全效质感呈现。", false, 4500);
+      triggerToast(ui.value.backHomeToast, false, 4500);
     }
     previousPathWasHome = true;
   } else {
     // 文档部分：自动进入极简克制的简约模式（若未撤销）
-    const previousWasHome = previousPathWasHome;
+    const enteredFromHome = previousPathWasHome;
     previousPathWasHome = false;
     if (!autoDisabled) {
       applyMode(true);
-      // 若当前从官网进入文档部分，或首次进入文档，弹出 Toast
-      if (
-        isUserNavigation ||
-        !sessionStorage.getItem("cbnv_serious_toast_shown")
-      ) {
-        sessionStorage.setItem("cbnv_serious_toast_shown", "true");
-        triggerToast("检测到您正在读文档，已为您减少界面干扰。", true, 7000);
+      const toastShown = withStorage("session", (s) =>
+        s.getItem("cbnv_serious_toast_shown")
+      );
+      if ((isUserNavigation && enteredFromHome && !toastShown) || !toastShown) {
+        withStorage("session", (s) =>
+          s.setItem("cbnv_serious_toast_shown", "true")
+        );
+        triggerToast(ui.value.docsToast, true, 7000);
       }
     } else {
       applyMode(false);
@@ -99,35 +160,35 @@ function evaluateRouteMode(isUserNavigation = false) {
 
 function undoSerious() {
   // 点击撤销：所有项目文档站都不会自动进入简约模式
-  localStorage.setItem(STORAGE_KEY_AUTO_DISABLED, "true");
-  localStorage.removeItem(STORAGE_KEY_MANUAL);
+  withStorage("local", (s) => {
+    s.setItem(STORAGE_KEY_AUTO_DISABLED, "true");
+    s.removeItem(STORAGE_KEY_MANUAL);
+  });
   applyMode(false);
-  triggerToast("已撤销简约模式，后续阅读文档将默认保持质感呈现。", false, 4500);
+  triggerToast(ui.value.undoDoneToast, false, 4500);
 }
 
 function toggleManual() {
   const next = !isSeriousMode.value;
   applyMode(next);
-  localStorage.setItem(STORAGE_KEY_MANUAL, next ? "on" : "off");
+  withStorage("local", (s) => s.setItem(STORAGE_KEY_MANUAL, next ? "on" : "off"));
   if (next) {
-    triggerToast("已切换为简约模式，界面已精简为克制阅读风格。", false, 4500);
+    triggerToast(ui.value.manualOnToast, false, 4500);
   } else {
-    triggerToast("已切换为质感模式，全站视觉特效已恢复。", false, 4500);
+    triggerToast(ui.value.manualOffToast, false, 4500);
   }
 }
 
 onMounted(() => {
   previousPathWasHome = isHome.value;
   evaluateRouteMode(false);
-  setupLanguageSwitcherListener();
-  checkAndApplyLanguageRedirect(site.value?.base || '/');
 });
 
 watch(
   () => route.path,
   (newPath) => {
     evaluateRouteMode(true);
-    syncLanguageOnRoute(newPath);
+    syncLanguageOnRoute(newPath, site.value?.base || '/');
   }
 );
 </script>
@@ -163,12 +224,8 @@ watch(
         type="button"
         class="cbnv-serious-toggle"
         :class="{ 'is-active': isSeriousMode }"
-        :title="
-          isSeriousMode
-            ? '简约模式：已开启（极简阅读风格，点击切换质感模式）'
-            : '简约模式：已关闭（点击开启）'
-        "
-        :aria-label="isSeriousMode ? '切换到质感模式' : '切换到简约模式'"
+        :title="isSeriousMode ? ui.toggleTitleOn : ui.toggleTitleOff"
+        :aria-label="isSeriousMode ? ui.toggleAriaToRich : ui.toggleAriaToMin"
         @click="toggleManual"
       >
         <span class="cbnv-serious-toggle__icon" aria-hidden="true">
@@ -203,7 +260,7 @@ watch(
           </svg>
         </span>
         <span class="cbnv-serious-toggle__label">{{
-          isSeriousMode ? "简约模式" : "质感模式"
+          isSeriousMode ? ui.labelMin : ui.labelRich
         }}</span>
       </button>
     </template>
@@ -214,7 +271,7 @@ watch(
           type="button"
           class="cbnv-serious-toggle cbnv-serious-toggle--mobile"
           :class="{ 'is-active': isSeriousMode }"
-          :aria-label="isSeriousMode ? '切换到质感模式' : '切换到简约模式'"
+          :aria-label="isSeriousMode ? ui.toggleAriaToRich : ui.toggleAriaToMin"
           @click="toggleManual"
         >
           <span class="cbnv-serious-toggle__icon" aria-hidden="true">
@@ -249,7 +306,7 @@ watch(
             </svg>
           </span>
           <span class="cbnv-serious-toggle__label">{{
-            isSeriousMode ? "简约模式（已开启）" : "质感模式（已开启）"
+            isSeriousMode ? ui.labelMinMobile : ui.labelRichMobile
           }}</span>
         </button>
       </div>
@@ -299,19 +356,19 @@ watch(
             </span>
             <span class="cbnv-serious-toast__message">
               {{ toastMessage }}
-              <a
+              <button
                 v-if="hasUndoAction"
-                href="javascript:void(0)"
+                type="button"
                 class="cbnv-serious-toast__undo"
-                @click.prevent="undoSerious"
-                >点击撤销</a
+                @click="undoSerious"
+                >{{ ui.undoBtn }}</button
               >
             </span>
           </div>
           <button
             type="button"
             class="cbnv-serious-toast__close"
-            aria-label="关闭提示"
+            :aria-label="ui.closeAria"
             @click="showToast = false"
           >
             <svg

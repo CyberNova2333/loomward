@@ -188,7 +188,11 @@ export function setupDocsMotion(router: Router, anime: AnimeModule) {
   if (document.readyState === "loading")
     document.addEventListener("DOMContentLoaded", schedule, { once: true });
   else schedule();
-  router.onAfterRouteChanged = schedule;
+  const prevAfter = router.onAfterRouteChanged;
+  router.onAfterRouteChanged = async (to) => {
+    await prevAfter?.(to);
+    schedule();
+  };
 
   // 监听简约模式切换：只在 serious-mode 类名实际变化时重新调度，避免 classList.add('motion-on') 引起无限循环重绘
   let lastSerious =

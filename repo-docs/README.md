@@ -19,7 +19,7 @@
 
 ## 运行与验证
 
-仓库主体运行于 Node.js 24+，使用 `pnpm` 锁定依赖。在开发机上运行静态语法检查与测试套件如下（其中 Windows ACL、DPAPI、安装脚本与真实 Docker 集成测试在缺少对应宿主环境时会自动跳过）：
+仓库主体运行于 Node.js 24+，使用 `pnpm` 锁定依赖。在开发机上运行静态语法检查与测试套件如下（其中平台专属或依赖真实 Docker 守护进程的测试会按宿主条件自动跳过）：
 
 ```sh
 pnpm install --frozen-lockfile
@@ -27,7 +27,7 @@ pnpm run check
 pnpm test
 ```
 
-生产模式把 Windows 受保护状态目录默认放在 `%USERPROFILE%\.agentdock-bridge` 并依赖 DPAPI 与 NTFS 权限校验；使用、安装与部署步骤集中记录在[项目使用与部署总览](../README.md)与[文档站入口](../docs-site/index.md)。源码、受保护运行副本、开发容器镜像和 Cloudflare 云端部署彼此独立更新，结构化文档校验不能代替实机端到端验收；已核验的版本快照另见[修复与验证快照](../SECURITY-FIXES.md)。
+生产模式把受保护状态目录默认放在 `~/.agentdock-bridge`（Windows 为 `%USERPROFILE%\.agentdock-bridge`），按宿主平台分别采用 Windows DPAPI + NTFS ACL、macOS Keychain 或 Linux Secret Service/`0600` 文件与祖先路径写保护校验；使用、安装与部署步骤集中记录在[项目使用与部署总览](../README.md)与[文档站入口](../docs-site/index.md)。源码、受保护运行副本、开发容器镜像和 Cloudflare 云端部署彼此独立更新，结构化文档校验不能代替实机端到端验收；已核验的版本快照另见[修复与验证快照](../SECURITY-FIXES.md)。
 
 ## 文档站与许可
 

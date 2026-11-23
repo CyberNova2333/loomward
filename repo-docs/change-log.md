@@ -92,3 +92,109 @@ Synced through 110e5cd6a1219ea4448d94c3f897b65e92d3d081
 - 实测基线：`pnpm run check` 通过；`pnpm test` 运行 101 项测试（Linux 环境下 86 项通过、0 失败、15 项 Windows/Docker 专属测试按条件跳过）。不把文档刷新视作 Windows 实机或公网再部署验收。
 
 Synced through 56ee943
+
+## 2026-11-20：新增 Linux 与 macOS 宿主支持及跨平台文档同步
+
+- 触发：用户要求完成 Linux 与 macOS 宿主支持改造并触发 `repo-docs` Sync gate；同步决策为 `foreground patch`。
+- 新增 POSIX 宿主安全与管理实现：`local/host-safety.mjs`（`0700`/`0600` 权限、全祖先路径写保护、硬链接与二进制 SHA-256 校验、`/proc` 与 `ps` 防 PID 复用识别及动态链接器环境变量清理）、`local/host-secrets.mjs`（macOS Keychain、Linux Secret Service 与 `0600` `posix-file` 两步轮换）、`local/node-toolchains.mjs`（官方 Node `24.22.1` 多平台 SHA-256 安装校验）与 `scripts/host-cli.mjs`（`setup`/`install`/`start`/`stop`/`status`/`approve`/`password` 与私有 `supervisor.sock` 守护锁）。
+- 跨平台运行时适配：`local/connector.mjs` 在非 Windows 上分派 `exportSecretsSync`、支持大小写代理环境变量与 macOS `scutil --proxy`；`local/sandbox.mjs` 按平台选择默认 Docker context（Linux `default` / Windows 与 macOS `desktop-linux`）、透传 `XDG_RUNTIME_DIR`、在 `darwin` 同步小写化 `fileLocks`、并在原生 Linux 动态映射非 root 宿主 UID/GID 至 `container/runner.mjs`（拒绝 `0`）；同步适配 `scripts/verify-lifecycle.mjs` 与 `test/sandbox.test.mjs`。
+- 验证范围与边界：保留现有 Windows PowerShell 与 DPAPI/ACL 流程；新增 `test/posix-host.test.mjs`（9 项 POSIX 宿主、凭据轮换、UID 传递与守护启停测试在 Linux 工作区全部通过）。本机未获 Docker 守护进程访问权限，亦未在真实 macOS 与 Windows 实机重新跑完整容器与 Keychain/DPAPI 回归。
+
+Synced through 4bff65b（含工作树未提交改造与修复）
+
+## 2026-11-20（全量代码审查修复与二轮复审）：安全边界、并发事务、性能与文档一致性对齐
+
+- 触发：全仓代码审查（云端、沙箱/批准/策略、宿主凭据/生命周期、前端/CI/守卫/测试）发现并全量修复问题，随后在同会话无子 Agent 条件下完成二轮复审与 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 云端网关（`cloud/`）：`BridgeRelay.limit` 改用 DO SQLite `rate_limits` 同步事务与批量过期删除并移除死代码 `/guard`；`AuthStore` 修复非 BMP 字符上界 `\u{10FFFF}`、跳过空提交并新增 `refresh-by-grant:` 索引在 `revokeFamily` 与删 grant 时级联清理 `refresh:*`；`AuthTransactions` 重试次数升至 12 轮、`other` 通道升至 16，并在二轮复审中修复并发 refresh 导致的 `AuthStore` 脏读异常重试竞态；`cloud/index.mjs` 统一 `callDo` 容错与脱敏日志、CORS 非 HTML/已检 Origin/去重 `Vary`、`OPTIONS` 预检、IPv6 `/64` 限流归一化及移除死代码 `/oauth/token/revoke`。
+- 沙箱与本地策略（`container/`、`local/`）：`runner.mjs` 改用单调时钟与 `os.constants.signals` 并与 `file-worker.mjs` 同步提升标准输入上限至 1.4 MB；`LocalApprovals` 先清扫过期记录再判 1024 上限，新增元数据缓存并延续写入前即时过期复核、`approval-cli.mjs` 扩大 `safeText` 转义范围与可读预览；`RequestReceipts` 在满载时先逐条清理过期记录并校验 `lstat`/512 B；`file-safety.mjs` / `tools.mjs` / `sandbox.mjs` 补齐 `darwin` NFC 大小写归一化、`O_NONBLOCK` 读、`--init`、Windows 宿主路径校验、`SandboxUserError` 脱敏、`file-worker` 4 MiB 输出上限与审计日志串行化；`local/connector.mjs` 支持 `fields` 按需导出、`NO_PROXY` 绕过（含 IPv6 `[::1]` 归一化）、`pong` 后重置重试计数与原子 status/log 队列。
+- 宿主脚手架、文档站与维护脚本（`scripts/`、`docs-site/`、`tools/`、`.github/`）：加固 `host-cli.mjs` 锁与进程退出清理、`Secrets.ps1` / `Setup.ps1` / `Manage.ps1` / `Rotate-Secrets.ps1` / `Install-*.ps1` 的原子临时文件与规范路径校验（含修复 `Secrets.ps1 -Action Create` 末尾反斜杠父目录判断）；修复 `docs-site/.vitepress/data/api-spec.ts`、组件可访问性与 i18n 开放重定向；抽取 `.github/scripts/sync_assets_licenses.py` 并收紧 `MIRROR_SLUG_RE` 拦截 `./..` 路径段、`tools/repo_maintenance_guard.py` 扩展敏感路径匹配与分批暂存扫描；同步 `docs-site/`、`README.en.md` 与 `repo-docs/` 契约与证据数字。
+- 验证范围与边界：本机（Linux x86_64）在最终改动后将运行 `pnpm run check`、全量 Node 回归（当前套件共 123 项，Windows/Docker 专属测试共 15 项按平台条件跳过）、`validate_repo_docs.py`、`docs-site` 构建、`repo_maintenance_guard.py status` 与 `sync_assets_licenses.py --check --dry-run`；真实 Windows 实机（DPAPI/PowerShell ACL）、macOS Keychain 与开启 `AGENTDOCK_DOCKER_TEST` 的 Docker 容器集成仍待对应实机验证。
+
+Synced through 4bff65b（含工作树全量审计修复与二轮复审改动）
+
+## 2026-11-21：新增实时文件读写能力开关、本机监控 WebUI 与 systemd 自启动入口
+
+- 触发：按用户要求配置 Linux 开机自启动后台服务，并设计本地 WebUI 实时监控运行情况与动态开关文件读写能力；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 新增[实时能力开关](../local/capabilities.mjs)（`<stateDir>/capabilities.json`，`0600` 损坏闭锁）并接入 `BridgeConnector` 与 `createSandboxRuntime`：`fileRead: false` 拦截文件读取工具与 `exec_command`，`fileWrite: false` 禁用写入工具并将 `exec_command` 容器挂载自动降为 `:readonly`，所有变更在无需重启连接器的情况下立即对后续请求生效。
+- 新增[本机监控 WebUI](../local/webui.mjs)与[界面资源](../local/webui-assets.mjs)：严格仅监听回环接口（默认 `127.0.0.1:18797`），通过 `Host`、`Origin`、`Sec-Fetch-Site`、`SameSite=Strict` Cookie 与 `X-AgentDock-CSRF` 防护 CSRF 与 DNS 重绑定，经 `/api/events` SSE 推送守护/连接器状态、待批计数、活跃容器与脱敏审计流（不暴露凭据、正文与远程代批）。
+- 扩展[POSIX 宿主管理 CLI](../scripts/host-cli.mjs)：安装阶段额外生成受保护的 `0700` `run-service` 与 `webui` 包装脚本，新增 `webui` 与 Linux `service`（管理 `~/.config/systemd/user/{agentdock-bridge,agentdock-webui}.service`）子命令，并同步更新 `package.json` `check` 与 `repo-docs/` 模块文档和代码地图。
+- 验证：新增 [能力与 WebUI 回归](../test/capabilities-webui.test.mjs) 5 项用例（含启用 `AGENTDOCK_DOCKER_TEST=1` 的真实 Docker `:readonly` 挂载验证）；全量静态检查与 `node --test` 在本机完成验证。
+
+## 2026-11-21（安全加固）：WebUI 强制 PassKey / 强密码鉴权与配置文件工作区外隔离
+
+- 触发：按用户安全要求，防止 Agent 从远端或容器访问 WebUI 修改权限，并强制认证及能力配置文件置于挂载工作区之外；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 新增 [WebAuthn / CBOR 校验](../local/webauthn.mjs) 与 [WebUI 认证模块](../local/webui-auth.mjs)：探测宿主（Windows Hello、macOS Touch ID、Linux FIDO2 HID / `fprintd`）与浏览器（UVPA）的 PassKey 能力；机器/浏览器支持或已注册 PassKey 时强制使用 `localhost` WebAuthn（`UP`+`UV`、`signCount` 防重放）并禁止回退密码登录；不支持时强制校验 ≥ 14 位含大小写/数字/符号的 `scrypt` 强密码；初始化须经本机交互终端 `~/.agentdock-bridge/webui-auth init|set-password|reset` 生成单次 setup ticket 或口令，防止未授权请求抢先设置。
+- 强化工作区外隔离：在 [capabilities.mjs](../local/capabilities.mjs)、[webui-auth.mjs](../local/webui-auth.mjs)、[connector.mjs](../local/connector.mjs)、[sandbox.mjs](../local/sandbox.mjs)、[webui.mjs](../local/webui.mjs) 与 [host-cli.mjs](../scripts/host-cli.mjs) 中通过 `assertConfigOutsideWorkspace` 强制校验 `config.json`、`capabilities.json` 与 `webui-auth.json` 的真实路径（含禁止符号链接跨越）均在工作区根目录之外，否则失败关闭。
+- 收紧 [webui.mjs](../local/webui.mjs) 与 [webui-assets.mjs](../local/webui-assets.mjs)：所有状态查询、SSE 事件流、能力开关与服务启停接口在未获认证会话前一律返回 `401`，登录增加 5 次失败指数冷却限流（`429`），切换认证态或登出时同步轮换会话与 CSRF 令牌。
+- 验证：[能力与 WebUI 回归](../test/capabilities-webui.test.mjs) 扩展至 7 项用例（覆盖工作区内部/符号链接拦截、未认证 `401`、强密码 + `429` 限流、ES256 CBOR PassKey 注册/验证/重放拒绝及真 Docker `:readonly` 沙盒），均在本机通过；同步完成系统部署与端到端实测。
+
+## 2026-11-21（WebUI 工具细节检查器、真实审计与标签页隔离认证）
+
+- 触发：按用户要求优化 WebUI 视觉风格（对齐系列项目 VitePress 文档站配色与结构），按用途拆分为「状态与开关 / 实时审计 / 工具说明」分页，在实时审计页展示真实调用参数与输出明细，并将默认会话收紧为**标签页级别（关闭重开须重新 PassKey/密码解锁）且提供配置切换按钮**；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 审计流水与工具契约：在 [request-policy.mjs](../local/request-policy.mjs) 导出 `getToolScopes`，在 [sandbox.mjs](../local/sandbox.mjs) 导出 `buildSandboxTools` 并为 `audit.jsonl` 记录有界工具参数（`args`）与执行结果/标准输出（`result`）；[connector.mjs](../local/connector.mjs) 补充 `target` 提示至拦截/待批日志；[webui.mjs](../local/webui.mjs) 返回 10 项工具的 Schema、权限/审批规则、近 200 条统计计数与可展开的 `auditArgs` / `auditResult`。
+- 标签页级会话控制与多分页 UI：在 [webui-auth.mjs](../local/webui-auth.mjs) 新增持久化配置项 `sessionPersistence`（默认 `'tab'`，可选 `'browser'`）与 `setSessionPersistenceSync`；[webui.mjs](../local/webui.mjs) 新增 `X-AgentDock-Tab-Auth` 逐标签页校验及 `POST /api/auth/settings`；[webui-assets.mjs](../local/webui-assets.mjs) 使用 `sessionStorage` + `fetch()` 流式 SSE 实现关页即锁的标签页级鉴权，并按文档站视觉规范完成三分页交互与配置开关重构。
+- 验证：[能力与 WebUI 回归](../test/capabilities-webui.test.mjs) 完整验证标签页隔离 `401`、配置持久化切换、PassKey 绑定、真 Docker `:readonly` 沙盒与真实审计详情回显，并同步更新 [local-approval-and-replay.md](modules/local-approval-and-replay.md)；在最终改动后完成 `pnpm run check`、含 `AGENTDOCK_DOCKER_TEST=1` 的 `pnpm test`、`validate_repo_docs.py`、`docs-site` 构建与多标签页真实浏览器 E2E 实测。
+
+## 2026-11-21（WebUI 全功能操作台补齐）：PassKey/强密码管理、自启动开关、单工具开关与实时批准
+
+- 触发：按用户要求补齐 WebUI 的 PassKey 管理、开机自启动管理、强密码重置/切换、单 MCP 工具独立开关以及实时待人工批准操作；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 单工具独立开关：[capabilities.mjs](../local/capabilities.mjs) 新增持久化并校验失效关闭的 `tools` 覆写映射；[webui.mjs](../local/webui.mjs) 在 `POST /api/capabilities` 与快照 `effectiveTools[].individuallyDisabled` 中同步单工具开关，[webui-assets.mjs](../local/webui-assets.mjs) 在「状态与开关」与「工具说明」详情页均提供独立开关按钮。
+- PassKey、密码重置与自启动管理：[webui-auth.mjs](../local/webui-auth.mjs) 新增 `deletePasskeySync`（禁止删除最后 1 枚密钥）与 `switchToStrongPasswordSync`（硬件不支持/未强制时允许切回），并脱敏返回 `passkeys` 元数据列表；[webui.mjs](../local/webui.mjs) 在 `POST /api/auth/setup/password` 验证现密码 `currentPassword`、新增 `/api/auth/passkey/delete` 与 `/api/auth/passkey/switch-password`，并在 `/api/service` 新增 `enable-autostart` / `disable-autostart`（禁用自启不带 `--now`，避免中断当前控制台响应）。
+- 实时待人工批准：在[webui.mjs](../local/webui.mjs) 读取已校验待批请求完整参数与 SHA-256 `policyDigest`，新增经 PassKey/强密码与标签页令牌鉴权的 `POST /api/approvals/approve`（复核摘要后复用 `approveRequest` 签发一次性 `.approved.json`）与 `POST /api/approvals/reject`；[webui-assets.mjs](../local/webui-assets.mjs) 在「实时审计」页卡片化呈现参数与批准/拒绝按钮。
+- 验证与部署：在[capabilities-webui.test.mjs](../test/capabilities-webui.test.mjs) 新增 3 项完整单测与 HTTP 集成测试，同步更新 [local-approval-and-replay.md](modules/local-approval-and-replay.md) 与 [code-map.md](code-map.md)；随后将运行 `pnpm run check`、含 `AGENTDOCK_DOCKER_TEST=1` 的 `pnpm test`、无头 Chromium E2E 与指南/站点构建校核，并以非破坏性重装部署至 `~/.agentdock-bridge` 保留已绑定的用户 PassKey。
+
+## 2026-11-21（第三方 MCP 聚合接入与独立配置页面）
+
+- 触发：按用户要求新增额外配置界面并允许 AgentDock 接入第三方 MCP 服务；同时保留工作树已收紧的仅元数据审计遥测与两步弹窗复核审批边界；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 新增 [第三方 MCP 注册表](../local/mcp-registry.mjs) 与 [外部 MCP 客户端](../local/mcp-client.mjs)：在工作区外受保护状态目录维护 `0600` 的 `mcp-servers.json`（强制 `assertConfigOutsideWorkspace`、无符号链接/硬链接、拦截高危环境变量覆写与针对本机 WebUI/网关的自循环 HTTP SSRF、环境变量与请求头密钥仅写入不回显），零外部依赖实现 `stdio`（`shell: false` 与净化环境）与 `Streamable HTTP`（支持 JSON 与 SSE 响应、禁重定向）握手、工具发现与会话池管理，并在 `audit.jsonl` 中仅记录结构化遥测元数据（`tool`、`serverId`、`durationMs`、`outputBytes`）。
+- 接入主链路与 WebUI 配置页：更新 [request-policy.mjs](../local/request-policy.mjs) 与 [connector.mjs](../local/connector.mjs) 聚合 `mcp__<serverId>__<tool>` 工具并强制完整三项 OAuth Scope、实时能力开关检查、精确本机审批及 24 小时防重放账本；在 [webui.mjs](../local/webui.mjs) 新增 `/api/mcp-servers/*`（增改、标准 `mcpServers`/`servers` JSON 导入、服务/单工具开关、实连探测同步、移除）接口；在 [webui-assets.mjs](../local/webui-assets.mjs) 新增独立「第三方 MCP」导航页（表单配置、只写密钥标签管理、标准 JSON 导入、探测同步与逐工具启停）及「工具说明」的「第三方 MCP」筛选。
+- 验证：新增 [external-mcp.test.mjs](../test/external-mcp.test.mjs) 覆盖文件安全、密钥防回显、自循环 SSRF 拦截、真实 `stdio` 与 `Streamable HTTP (SSE)` MCP 服务端到端审批与执行；完成后执行 `pnpm run check`、含 `AGENTDOCK_DOCKER_TEST=1` 与 `AGENTDOCK_TEST_IMAGE=agentdock-dev:2026-10-28` 的 `pnpm test`、无头 Chromium 四分页 E2E、`validate_repo_docs.py`、`docs-site` 构建及受保护副本非破坏性重装。
+
+Synced through 4bff65b（含工作树能力开关、WebUI 强制鉴权、第三方 MCP 接入配置与自启动更新）
+
+## 2026-11-21：补齐 WebUI 完整请求复核与沙箱回归
+
+- 在 Linux、macOS 受保护 WebUI 的待批列表选中请求后，控制台按需显示完整来源、授权范围和参数。签发时重新检查记录、时限和复核摘要。退出登录立即结束对应会话的实时事件流。见[本机批准流程](modules/local-approval-and-replay.md)。
+- 审计日志保留工具、运行策略、耗时、退出码和字节数。查看历史日志时仅选取元数据，WebUI 仅在单条复核响应中返回完整请求。关闭文件写入后，新建文件容器和命令容器均使用只读工作区挂载。见[沙箱策略](modules/container-sandbox-and-file-policy.md)。
+- 三项真实 Docker 测试共用显式镜像选择，在同一 Docker context 解析镜像、执行与核对清理。GitHub 检查任务检出完整历史以核对贡献清单。
+- Linux x86_64 验证使用 Node 26.13.1。常规回归共 134 项，118 通过、16 跳过。指定本机现有镜像摘要并启用 Docker 后，120 通过、14 项按平台跳过。Chromium 使用临时凭据核验长参数末尾、转义字符、批准标记与新标签页重新认证。语法检查、资产清单只读核验和文档站构建通过。指南校验 0 错误、6 条提示，涉及术语表和根目录文档的同步规则。
+- 本轮验收范围为工作树、临时状态目录及本地测试容器。Windows DPAPI/NTFS ACL、macOS Keychain、受保护运行副本和公网部署需分别验收。
+
+Synced through 4bff65b（含本次未提交的工作树修复）
+
+## 2026-11-22：WebUI 控制面与第三方 MCP 三路代码审查全量安全加固与修复
+
+- 触发：用户发起三路并行子 Agent 代码审查（第三方 MCP 运行时安全、WebUI 认证与 API、WebUI 前端与文档），并授权全量修复查出的 `1 Critical`、`13 High` 及关键 `Medium`/`Low` 问题；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 第三方 MCP 执行隔离与协议加固（[request-policy.mjs](../local/request-policy.mjs)、[mcp-registry.mjs](../local/mcp-registry.mjs)、[mcp-client.mjs](../local/mcp-client.mjs)、[connector.mjs](../local/connector.mjs)）：
+  - `stdio` 子进程改用最小 OS 环境变量白名单与默认独立 `0700` 空临时目录（不再继承宿主凭据变量或默认工作区目录），扩展高危环境变量黑名单（含 `LD_AUDIT`、`BASH_ENV`、`PYTHONSTARTUP`、`DBUS_SESSION_BUS_ADDRESS`、`SSH_AUTH_SOCK`、`DOCKER_HOST` 与 `AGENTDOCK_*`），每次 `spawn` 前以 `assertSafeStdioCwd` 复验无符号链接且不与受保护状态目录重叠，并使用独立进程组清理与 `stdin` 异步写错误兜底（防止 `EPIPE` 崩溃）。
+  - `Streamable HTTP` 改用零依赖 `node:http`/`node:https` 自定义 DNS `lookup` 校验拦截 DNS 重绑定、私网/保留/元数据 IP（`0.0.0.0/8`、`10.0.0.0/8`、`100.64.0.0/10`、`169.254.0.0/16`、`172.16.0.0/12`、`192.168.0.0/16`、`fe80::/10`、`fc00::/7`、IPv4 映射/嵌入 IPv6 及非 `127.0.0.1` 回环）与末尾点域名绕过；`BridgeConnector` 默认把回环 WebUI 端口纳入 `blockedOrigins`；实现增量流式 SSE 解析、HTTP `404` 会话失效后标记关闭并在下次调用重建、服务端主动 JSON-RPC 请求应答防 ID 冲突与严格响应校验。
+  - 收紧 `SERVER_ID_RE` 禁止 `__` 及末尾 `_` 消除跨服务工具名歧义；修改 `command`/`args`/`cwd` 或 HTTP `origin` 时禁止静默沿用旧密钥（须显式 `replaceSecrets: true`）；本地探测诊断与 HTTP 失败响应均在截断前执行密钥脱敏，云端工具错误仅返回脱敏状态码/通用错误而不透传原始 `stderr` 或响应正文；`ensureSession` 增加单飞合并与重载校验，`tools/list` 仅返回已缓存/活跃工具并受 `1 MiB` 聚合字节预算约束；外部工具注解一律强制保守（`readOnlyHint: false`、`destructiveHint: true`）；支持原子批量导入 `upsertMcpServersSync` 与 `O_NOFOLLOW` 审计追加。
+- WebUI 认证、API 与状态存储加固（[capabilities.mjs](../local/capabilities.mjs)、[webauthn.mjs](../local/webauthn.mjs)、[webui-auth.mjs](../local/webui-auth.mjs)、[webui.mjs](../local/webui.mjs)）：
+  - 修复 `POST /api/auth/passkey/switch-password` 仅允许活跃 PassKey 会话调用（防止密码登录态绕过现密码核验）；持久化 `hardwarePasskeyEnforced` 防热拔 FIDO2 降级；`webauthn.mjs` 支持带 `ED`（`0x80`）CBOR 扩展字段的真实认证器注册并拒绝 `crossOrigin: true` 与弱 RSA/错配算法；`detectHostPasskeySupport` 增加 60 秒 TTL 缓存避免阻塞事件循环。
+  - 统一 `capabilities.json`、`webui-auth.json`、`mcp-servers.json` 与日志尾部读取为 `O_RDONLY | O_NOFOLLOW` + `fstatSync` 消除 TOCTOU；收紧已认证会话的严格会话 CSRF 校验、分离注册/登录挑战并绑定 `sid`、对错误 `setupToken` 纳入 5 次退避限流、未认证 `/api/auth/state` 脱敏隐藏 PassKey 备注与票据状态；为 `/api/mcp-servers/save` 增加字段白名单防 Mass Assignment、受限并发/截止期探测防中途中删报 `500`；审批拒绝支持移除损坏 `.request.json` 且对 `clientId` 经 `safeText` 转义；服务操作单飞互斥并支持非 Linux 错误码 `400`；`sha256OfSnapshot` 排除易抖动的 `gatewayLatencyMs`，审计事件改用内容哈希稳定 `key`。
+- WebUI 前端与指南同步（[webui-assets.mjs](../local/webui-assets.mjs)、[local-approval-and-replay.md](modules/local-approval-and-replay.md)、[code-map.md](code-map.md)）：
+  - 修复工具说明页分组筛选（`fileRead`/`fileWrite`/`exec`/`execControl`/`context`/`mcp`）与父组总开关禁用逻辑；第三方 MCP 工具详情明确标注「非容器沙盒（宿主 stdio / 外部 HTTP）」与「外部 MCP 契约」；锁屏与退出登录立即清空内存快照、关闭全部弹窗并清除密钥/密码输入 DOM；基于分区签名与错误横幅分离消除 SSE 轮询冲刷焦点/展开态/错误提示；补充删除 6 秒自动回滚与取消按钮、探测失败保留表单、隐藏传输字段禁用与无障碍/对比度优化；同步文档明确第三方 MCP 运行在容器沙盒之外并修正 `notifications/initialized`/`notifications/cancelled` 表述。
+- 验证与部署：在 [external-mcp.test.mjs](../test/external-mcp.test.mjs) 与 [capabilities-webui.test.mjs](../test/capabilities-webui.test.mjs) 补充全面安全与协议回归，在无头 Chromium E2E 补充工具分组筛选、写能力关闭组锁、非容器徽章与登出清空表单断言，并完成对 `~/.agentdock-bridge` 受保护运行副本的非破坏性重装（保留既有用户 PassKey）。
+
+Synced through 4bff65b（含本轮三路代码审查全量修复与验证）
+
+## 2026-11-22（二轮对抗性审查全量修复）：前端冻结修复、CSRF/限流/会话竞态、SSRF 与截断前脱敏
+
+- 触发：用户对一轮修复结果发起第二轮三路对抗性子 Agent 代码审查（WebUI 认证与 API、第三方 MCP 安全与协议、WebUI 前端与指南准确性）并授权全量修复查出的 `1 Critical`、`11 High`、`14 Medium` 及关键 `Low`/文档问题；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- WebUI 前端与交互修复（[webui-assets.mjs](../local/webui-assets.mjs)）：
+  - 修复密码重置与 PassKey 绑定后因 `pendingMutation` 在 `refreshAuthAndBoot()` 期间仍为 `true` 导致仪表盘所有开关/按钮永久冻结的阻断缺陷（`C1`）；统一 `renderInteractiveSections()`，并补齐预设与服务按钮的 `pendingMutation` 防重入保护。
+  - 修复编辑带查询参数或 `#hash` 的 HTTP MCP 服务时界面回填脱敏 URL 导致误覆写原 URL 的缺陷（`H4`），仅在用户实际改动 URL 时提交 `url` 字段，探测失败时保留输入内容；仅在同传输协议下展示 `replaceSecrets` 勾选项。
+  - 新增 1 秒级审批倒计时定时器（离屏清理）与弹窗过期失效守卫（`H5`、`M12`）；区分 `PRE_AUTH_ENDPOINTS` 与 `AUTH_CONFIG_ERROR` 错误码，切换至标签页隔离模式后主动以新 `tabToken` 重连 SSE（`H6`、`H7`、`M13`）；登出与锁屏彻底清空全部 DOM 计数/缓存/弹窗并汇报登出失败（`M10`）；修正 `capabilities.json` 异常时外部 MCP 与豁免工具的父开关状态判断（`M11`）；补齐 WCAG AA 对比度、装饰球层叠顺序、工具名省略、键盘焦点恢复及 `Object.create(null)` 键值解析（`M14`）。
+- WebUI 认证与 API 加固（[webui.mjs](../local/webui.mjs)、[webui-auth.mjs](../local/webui-auth.mjs)、[webauthn.mjs](../local/webauthn.mjs)、[capabilities.mjs](../local/capabilities.mjs)、[package.json](../package.json)）：
+  - 未认证 `GET /api/auth/state` 自动补发 `PRE_AUTH_COOKIE` 与预认证 `csrfToken`，修复会话过期/服务重启/多标签页场景下免刷新重登录触发 `403 CSRF` 的故障（`H1`）；对密码/PassKey 登录端点在读取请求体后二次复核 5 次失败限流并限制请求体 10 秒超时与精确 `Content-Type`（`H2`）；全部已认证 `POST` 路由在读完请求体后通过 `readAuthenticatedJson` 复核会话有效性（`M1`）。
+  - `runBoundedProbe` 改用 `res.on('close')` 在客户端中途断连时及时中止底层探测（`H3`），`/api/mcp-servers/save` 捕获并发探测冲突 `409`/`429` 仍返回已保存配置与最新快照，`/api/mcp-servers/import` 在断连时提前退出并短暂等待探测槽（`M4`）；`refreshAndBroadcast` 改用单飞合并队列且 `broadcast: false` 不吞噬未推送变更（`M3`）；`POST /api/auth/settings` 切回 `tab` 模式时先刷新快照再轮换 `tabToken` 并断开旧 SSE（`H7`）。
+  - Linux `/sys/class/hidraw` 热插拔实时检测（仅缓存 `fprintd-list` 60 秒）消除硬件 PassKey 强制态陈旧窗口（`M2`）；`webauthn.mjs` 拒绝重复 CBOR Map 键、`topOrigin`、认证断言中的 `AT` 标志及错配 EC 曲线，并限制 `authData`/`signature` 上限（`L4`）；补齐静态资源 `CORP: same-origin` 与 `Sec-Fetch-Site` 检查、审批文件 `fstat` 缓存签名、包装脚本 `assertTrustedBinary` / Windows 绝对 `cmd.exe` 校验、`loadWorkspaceRootsFromStateConfig` 符号链接检查，并将剩余 8 个生产 `.mjs` 模块纳入 `pnpm run check`。
+- 第三方 MCP 安全与协议加固（[mcp-registry.mjs](../local/mcp-registry.mjs)、[mcp-client.mjs](../local/mcp-client.mjs)）：
+  - `ensureSession` 单飞连接改为独立每调用方 `AbortSignal` 等待（仅全部等待者取消、配置变更或 `hub.close()` 时中止共享握手，且 `hub.close()` 等待在途连接清理临时目录，`H9`）。
+  - 完整 8×16 位 IPv6 展开与全量 IPv4/IPv6 私网/CGNAT/保留/多播/内嵌地址（`10/8`、`100.64/10`、`172.16/12`、`192.168/16`、`64:ff9b::/96`、`2002::/16`、`::ffff:` 等）拦截，拒绝 `https://localhost` 与末尾点回环；每会话使用独立 `http.Agent`/`https.Agent` 并在关闭时销毁，仅对非 IP 域名设置 TLS SNI `servername`（`H10`、`M6`）。
+  - 所有错误输出、HTTP 响应正文与 `stderr` 均在 8 KiB 窗口内先脱敏（含 URL 查询/片断密钥与剥离 `Bearer` 前缀后的裸令牌）再截断（`H11`）；修改 `cwd` 同样触发 `replaceSecrets` 保护并拒绝 Windows UNC 路径，扩展 `LD_*`/`DYLD_*`/`JAVA_TOOL_OPTIONS`/`PYTHONHOME` 等黑名单（`H8`、`M7`）；修复 `HTTP 404` 会话过期与 `close()` 幂等清理、Windows `taskkill /T /F`、Schema 属性名/枚举清洗与 `array.items` 保留（`M5`、`M8`、`M9`）。
+- 指南与回归同步（[local-approval-and-replay.md](modules/local-approval-and-replay.md)、[code-map.md](code-map.md)、[external-mcp.test.mjs](../test/external-mcp.test.mjs)、[capabilities-webui.test.mjs](../test/capabilities-webui.test.mjs)）：
+  - 修正批准状态机补充第三方 MCP 工具、修正 `code-map.md` 中 `container/runner.mjs` 与 `container/file-worker.mjs` 符号归属、WebUI 回环绑定与默认标签页会话描述及 `approval-cli.mjs` 调用方；新增 2 项二轮专项安全与可靠性回归测试并扩展无头 Chromium 端到端校验（密码重置后控制面不冻结、脱敏 URL 编辑不覆写、同标签页登出后免刷新重登录）。
+  - 验证范围与边界：本机（Linux x86_64）在最终改动后完成非破坏性受保护副本重装（保留既有用户 PassKey）、`pnpm run check`（全量 31 个 `.mjs` 模块）、含显式 `AGENTDOCK_DOCKER_TEST=1` 与本机已固定测试镜像的 `pnpm test`、无头 Chromium 四分页 E2E、`validate_repo_docs.py`、`docs-site` 构建、`repo_maintenance_guard.py status` 与 `sync_assets_licenses.py --check --dry-run`；Windows DPAPI/NTFS ACL、`cmd.exe` 包装与 macOS Keychain 仍需在对应实机验证。
+
+Synced through 4bff65b（含二轮对抗性审查全量修复与验证）

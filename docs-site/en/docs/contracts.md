@@ -9,7 +9,7 @@ Translated/synchronized from the authoritative Chinese documentation ([接口与
 
 # Contracts & Boundaries
 
-This page specifies the hard protocol, approval, replay, and sandbox contracts enforced across the Cloudflare Worker, Windows host connector, and Linux container.
+This page specifies the hard protocol, approval, replay, and sandbox contracts enforced across the Cloudflare Worker, Windows/macOS/Linux host connector, and Linux container.
 
 ## Security Assumptions & Capability Boundaries
 
@@ -19,7 +19,7 @@ This page specifies the hard protocol, approval, replay, and sandbox contracts e
 | Transit | HTTPS required (`PUBLIC_ORIGIN`), zero-script CSP consent page | Cloudflare and the upstream AI client provider still see `/mcp` arguments & replies |
 | Local Approval | Canonical SHA-256 over full request parameters; `.approved.json` unlinked before `RequestReceipts` claim | `504` timeout after approval cannot prove no side effect occurred; no auto-replay |
 | Workspace | Single explicit root bound to `/workspace`; symlinks, multi-hardlinks, and custom DACL replacement blocked | Project files inside `/workspace` are intentionally readable/writable by approved tools |
-| Host OS | `loadSecrets` (DPAPI) and `createWindowsReplacementGuard` require `win32` | Non-Windows hosts support Worker deploy & cross-platform tests only |
+| Host OS | Windows enforces DPAPI + `windows-acl.mjs`; Linux/macOS enforce `host-safety.mjs` + `host-secrets.mjs` (Keychain / Secret Service / `0600`) | Headless Linux hosts without an active keyring fall back to `0600` file secrets (isolated from containers and other OS users, not same-user offline snapshots) |
 
 ## Cloud HTTP & OAuth 2.1 Contract
 
@@ -31,18 +31,17 @@ This page specifies the hard protocol, approval, replay, and sandbox contracts e
 | `/.well-known/*` | `GET` | — | OAuth Authorization Server & Protected Resource metadata |
 | `/register` | `POST` (DCR) | `20 / 3600s`, `16,384 B` | `1..10` redirect URIs, `client_name <= 120`, 90-day client TTL; CIMD also enabled |
 | `/authorize` | `GET` / `POST` | `GET: 30 / 600s`, `POST: 8 / 600s`, `8,192 B` | PKCE `S256` (43 chars) required; 10-min form handle; Origin + PBKDF2-SHA256 verification |
-| `/oauth/token` | `POST` form | `120 / 60s`, `16,384 B` | Access TTL `3600s`, refresh TTL `30d` (only with `offline_access`); reuse revokes whole family |
-| `/oauth/token/revoke` | `POST` form | `16,384 B` | Revokes grant family using body `client_id`, Basic auth, or UTF-8 JWT `client_assertion` |
+| `/oauth/token` | `POST` form / `OPTIONS` | `120 / 60s`, `16,384 B` | Access TTL `3600s`, refresh TTL `30d` (only with `offline_access`); reuse revokes whole family; also handles RFC 7009 revocation (`client_id`, Basic, or UTF-8 JWT `client_assertion`) |
 | `/mcp` | `POST` (Bearer) / `OPTIONS` | `1 MiB` RPC / `2 MiB` reply | Validates `MCP-Protocol-Version` (`2025-03-26`, `2025-06-18`, `2025-11-25`); `110s` deadline (`504`) |
 
-- **CORS Allowed Origins**: `PUBLIC_ORIGIN`, `https://chatgpt.com`, `https://chat.openai.com` (and controlled subdomains).
+- **CORS Allowed Origins**: Validated `PUBLIC_ORIGIN`, `https://chatgpt.com`, `https://chat.openai.com` (and controlled subdomains) on non-HTML responses (`Retry-After` preserved, `Vary: Origin` deduplicated), with `OPTIONS` preflight on `/register`, `/oauth/token`, `/mcp`, and `/.well-known/*`.
 - **Relay Lanes & Liveness**: `FIRST_HEARTBEAT_GRACE = 10s`, `HEARTBEAT_MAX_AGE = 65s`. Relay allows `16` ordinary concurrent RPCs and `4` `stop_command` slots (`2` max per client).
 
 ## 10 MCP Tools, Local Approval & Replay Order
 
-Although `cloud/index.mjs` still lists legacy aliases `agentdock_context` and `get_command`, `local/request-policy.mjs` (`toolScopes`) and `local/tools.mjs` (`TOOL_DEFINITIONS`) strictly expose and enforce the following **10 tools**:
+Although `cloud/index.mjs` still lists legacy aliases `agentdock_context` and `get_command` for scope routing compatibility, `local/request-policy.mjs` (`toolScopes`), `local/tools.mjs` (`TOOL_DEFINITIONS`), and `local/sandbox.mjs` strictly expose and enforce the following **10 tools**:
 
-| Tool | Required Scopes | Exempt from `Approve.cmd`? | Key Limits |
+| Tool | Required Scopes | Exempt from `Approve.cmd` / `approve`? | Key Limits |
 | --- | --- | --- | --- |
 | `computer_context` | `computer:read` | Yes | Returns container image ID, workspace mount, limits, security text |
 | `list_directory` | `computer:read` | No | `limit: 1..1000` (default `200`), filesystem order, never follows symlinks |
@@ -59,9 +58,9 @@ Although `cloud/index.mjs` still lists legacy aliases `agentdock_context` and `g
 
 ## Container Sandbox & File Policy Contract
 
-Containers launch with `--pull never`, `--read-only`, `--cap-drop ALL --cap-add SETUID --cap-add SETGID`, `--security-opt no-new-privileges=true`, `--pids-limit 256`, `--memory 2g --memory-swap 2g --cpus 2`, `--log-driver none`, `--network none|bridge`, single `/workspace` bind mount, and 512m tmpfs on `/tmp` and `/home/developer`. `container/runner.mjs` drops execution to UID/GID `1000` and kills the container (`125`) if the host fails to send a `{"type":"lease"}` heartbeat within `20s`. File operations execute in `container/file-worker.mjs` (`allowExec: false`) under `file-safety.mjs` (`lstat`, `nlink === 1`, `dev:ino` stability, atomic `O_EXCL` writes) and Windows `windows-acl.mjs` preflight before any replacement. Unconfirmed `docker rm -f` transitions the sandbox to `closed = true`, blocking new operations while preserving owner `command_status` and `stop_command`.
+Containers launch with `--init`, `--pull never`, `--read-only`, `--cap-drop ALL --cap-add SETUID --cap-add SETGID`, `--security-opt no-new-privileges=true`, `--pids-limit 256`, `--memory 2g --memory-swap 2g --cpus 2`, `--log-driver none`, `--network none|bridge`, single `/workspace` bind mount, and 512m tmpfs on `/tmp` and `/home/developer`. `container/runner.mjs` drops execution to UID/GID `1000` (or dynamically mapped non-root host Linux UID/GID) and kills the container (`125`) if the host fails to send a `{"type":"lease"}` heartbeat within `20s`. File operations execute in `container/file-worker.mjs` (`allowExec: false`, `1,400,000`-byte stdin limit) under `file-safety.mjs` (`lstat`, `nlink === 1`, `dev:ino` stability, atomic `O_EXCL` writes) and Windows `windows-acl.mjs` preflight before any replacement. Unconfirmed `docker rm -f` transitions the sandbox to `closed = true`, blocking new operations while preserving owner `command_status` and `stop_command`.
 
 ## Extension FAQ
 
-- **How do I disable `exec_command` or outbound container networking?** Set `allowExec: false` or `sandbox.allowOutbound: false` in `%USERPROFILE%\.agentdock-bridge\config.json` and restart via `Stop.cmd` / `Start.cmd` (note `Install-Hardened.ps1` resets both to `true`).
+- **How do I disable `exec_command` or outbound container networking?** Set `allowExec: false` or `sandbox.allowOutbound: false` in `~/.agentdock-bridge/config.json` (`%USERPROFILE%\.agentdock-bridge\config.json` on Windows) and restart via `Stop.cmd`/`Start.cmd` (or `~/.agentdock-bridge/stop` / `start`; note re-running the installer with defaults re-enables both unless disabled).
 - **What must change when adding a new MCP tool?** Update scope classification in `cloud/index.mjs`, local whitelist & approval policy in `local/request-policy.mjs`, strict schemas (`additionalProperties: false`) in `local/tools.mjs` / `local/sandbox.mjs`, and corresponding `test/` + `cloud/` assertions.

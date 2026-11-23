@@ -16,10 +16,10 @@ Start with [End-to-End Request Walkthrough](/en/docs/walkthrough) to understand 
 | Directory | Responsibility | Key Entrypoints |
 | --- | --- | --- |
 | `cloud/` | Cloudflare Worker OAuth 2.1, rate limits, Durable Objects & WSS relay | `index.mjs`, `relay.mjs`, `auth-store.mjs`, `auth-transactions.mjs`, `security.mjs`, `liveness.mjs` |
-| `local/` | Host WebSocket connector, envelope policy, approvals, replay receipts, Docker broker & file safety | `connector.mjs`, `request-policy.mjs`, `approvals.mjs`, `approval-store.mjs`, `approval-cli.mjs`, `receipts.mjs`, `sandbox.mjs`, `tools.mjs`, `file-safety.mjs`, `windows-acl.mjs`, `docker-query.mjs` |
+| `local/` | Host WebSocket connector, envelope policy, approvals, replay receipts, POSIX host safety/secrets, Docker broker & file safety | `connector.mjs`, `request-policy.mjs`, `approvals.mjs`, `approval-store.mjs`, `approval-cli.mjs`, `receipts.mjs`, `sandbox.mjs`, `tools.mjs`, `file-safety.mjs`, `windows-acl.mjs`, `host-safety.mjs`, `host-secrets.mjs`, `node-toolchains.mjs`, `docker-query.mjs` |
 | `container/` | Hardened container image, PID 1 lease supervisor, and isolated file worker | `Dockerfile`, `runner.mjs`, `file-worker.mjs` |
-| `scripts/` | Windows DPAPI setup, ACL checks, pinned Node install, hardened runtime install, rotation & live acceptance | `Setup.ps1`, `Secrets.ps1`, `Rotate-Secrets.ps1`, `Install-NodeRuntime.ps1`, `Install-Hardened.ps1`, `State-Safety.ps1`, `Manage.ps1`, `Approve.ps1`, `acceptance-v2.mjs`, `verify-lifecycle.mjs` |
-| `test/` | Host, approval budget, file hardening, Windows ACL, management safety & sandbox recovery tests | `connector.test.mjs`, `approval-budget.test.mjs`, `control-receipts.test.mjs`, `sandbox-recovery.test.mjs`, `sandbox.test.mjs`, `file-hardening.test.mjs`, `windows-acl.test.mjs`, `management-safety.test.mjs` |
+| `scripts/` | Cross-platform host CLI (`host-cli.mjs`), Windows DPAPI/ACL/PowerShell tooling, rotation & live acceptance | `host-cli.mjs`, `Setup.ps1`, `Secrets.ps1`, `Rotate-Secrets.ps1`, `Install-NodeRuntime.ps1`, `Install-Hardened.ps1`, `State-Safety.ps1`, `Manage.ps1`, `Approve.ps1`, `acceptance-v2.mjs`, `verify-lifecycle.mjs` |
+| `test/` | Host, approval budget, file hardening, POSIX/Windows safety & sandbox recovery tests | `connector.test.mjs`, `posix-host.test.mjs`, `approval-budget.test.mjs`, `control-receipts.test.mjs`, `sandbox-recovery.test.mjs`, `sandbox.test.mjs`, `file-hardening.test.mjs`, `windows-acl.test.mjs`, `management-safety.test.mjs` |
 
 ## Change Entrypoints
 

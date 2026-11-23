@@ -16,8 +16,8 @@ description: 详述 AgentDock Bridge 的安全假设、云端 HTTP 与 OAuth 2.1
 | 身份模型 | 单所有者模式（`userId: "owner"`），`PUBLIC_ORIGIN` 限定访问主机与 CORS | 不支持多用户隔离；修改密钥会联动失效全部历史授权 |
 | 传输信任 | Cloudflare Workers 强制 HTTPS（回环测试除外），同意书页面零脚本 CSP（禁止一切内联/外链 JS） | Cloudflare 与上游大模型平台仍可看到经过 `/mcp` 的工具参数与响应正文 |
 | 本地批准 | 非豁免工具绑定完整参数 SHA-256 摘要，先消费 `.approved.json` 再写 24 小时 `RequestReceipts` | 批准通过后的网络超时（`504`）不等于无副作用；禁止自动重放同一桥接 ID |
-| 工程目录访问 | 单一绝对工作区挂载为 `/workspace`；跳过软链接、多硬链接与含显式 NTFS ACL 的替换 | 项目根目录内对已批准的工具刻意可读写；工程内密钥文件与不可信提示词须靠人工在 `Approve.cmd` 审阅 |
-| 宿主平台 | `loadSecrets`（DPAPI）与 `createWindowsReplacementGuard`（NTFS ACL）明确依赖 `win32` | Linux / macOS 仅支持 Worker 部署与跨平台回归测试，不包含原生密钥库 |
+| 工程目录访问 | 单一绝对工作区挂载为 `/workspace`；跳过软链接、多硬链接与含显式 NTFS ACL 的替换 | 项目根目录内对已批准的工具刻意可读写；工程内密钥文件与不可信提示词须靠人工在 `Approve.cmd` / `approve` 审阅 |
+| 宿主平台 | Windows 使用 DPAPI + `windows-acl.mjs`；Linux/macOS 使用 `host-safety.mjs` + `host-secrets.mjs`（Keychain / Secret Service / `0600`） | 无头 Linux 宿主在无 Keyring 会话时依赖 `0600` 私有凭据文件，防容器与跨用户读取但不如 DPAPI/Keychain 防同用户离线备份 |
 
 ---
 
@@ -37,15 +37,14 @@ description: 详述 AgentDock Bridge 的安全假设、云端 HTTP 与 OAuth 2.1
 | `/.well-known/oauth-authorization-server`<br>`/.well-known/oauth-protected-resource/mcp` | `GET`（公开） | — | OAuth 2.1 元数据发现，声明受保护资源 `<origin>/mcp` 与四项作用域 |
 | `/register` | `POST`（公开 DCR） | `20 次 / 3600 秒`；Body 上限 `16,384 B` | 动态注册回调 URI（1–10 个），`client_name` 最长 `120` 字符（注册有效期 90 天） |
 | `/authorize` | `GET` / `POST`（所有者登录） | `GET: 30 / 600 秒`；`POST: 8 / 600 秒`；Body `8,192 B` | 强制 PKCE `S256`（43 字符）；自动包含 `computer:read`；表单句柄 `10` 分钟有效；校验 `Origin` 与 PBKDF2-SHA256 密码 |
-| `/oauth/token` | `POST`（`x-www-form-urlencoded`） | `120 次 / 60 秒`；Body `16,384 B` | 禁止重复表单参数（`resource` 除外）；拦截已用授权码；检测刷新令牌复用并整族撤销 |
-| `/oauth/token/revoke` | `POST`（`x-www-form-urlencoded`） | Body `16,384 B` | 支持表体 `client_id`、Basic 或 UTF-8 解码 JWT `client_assertion` 撤销同族凭证 |
+| `/oauth/token` | `POST`（`x-www-form-urlencoded`） / `OPTIONS` | `120 次 / 60 秒`；Body `16,384 B` | 禁止重复表单参数（`resource` 除外）；拦截已用授权码；检测刷新令牌复用并整族撤销；同步承担 RFC 7009 令牌撤销（支持表体 `client_id`、Basic 或 UTF-8 解码 JWT `client_assertion`） |
 | `/mcp` | `POST`（OAuth Bearer） / `OPTIONS` | `MAX_RPC_BYTES = 1 MiB`；回传 `2 MiB` | JSON-RPC 2.0；校验 `MCP-Protocol-Version`（`2025-03-26`、`2025-06-18`、`2025-11-25`）；超时 `110s` 返回 `504` |
 
 ### OAuth 作用域、代次与中继通道
 
 - **作用域清单**：`computer:read`（基础方法与只读工具）、`computer:write`（写/改/删文件，必同时具备 `computer:read`）、`computer:execute`（执行与控制命令，必同时具备 `computer:read`）、`offline_access`（允许保留 30 天刷新令牌；未获批准则令牌端点响应删除 `refresh_token`）。访问令牌默认有效期 `3600` 秒。
 - **密码代次隔离**：`AuthCoordinator` 实例名为 `owner-v2-${sha256(OWNER_PASSWORD_HASH)}`；一旦密码改变即切到全新 SQLite Durable Object，旧令牌立即失效。
-- **CORS 策略**：仅向 `PUBLIC_ORIGIN`、`https://chatgpt.com`、`https://chat.openai.com` 及其受控子域返回 CORS 允许头，并显式暴露 `WWW-Authenticate`、`MCP-Session-Id`、`MCP-Protocol-Version`。
+- **CORS 策略**：仅向受检的 `PUBLIC_ORIGIN`、`https://chatgpt.com`、`https://chat.openai.com` 及其受控子域返回非 HTML CORS 响应头（保留 `Retry-After`、去重 `Vary: Origin`），支持 `/register`、`/oauth/token`、`/mcp` 与 `/.well-known/*` 的 `OPTIONS` 预检，并显式暴露 `WWW-Authenticate`、`MCP-Session-Id`、`MCP-Protocol-Version`。
 - **并发与活性窗口**：`BridgeRelay` 等待首包心跳宽限 `10,000 ms`（`FIRST_HEARTBEAT_GRACE`），收到响应后在线上限 `65,000 ms`（`HEARTBEAT_MAX_AGE`）。普通 `/mcp` 通道共享 `16` 个并发槽，`stop_command` 独占 `4` 个并发槽（单客户端上限 `2` 个）。
 
 ---
@@ -58,7 +57,7 @@ description: 详述 AgentDock Bridge 的安全假设、云端 HTTP 与 OAuth 2.1
 
 `local/request-policy.mjs` 的 `toolScopes` 与 `local/tools.mjs` 的 `TOOL_DEFINITIONS` 共同定义了连接器实际开放的 10 个工具（注：云端 `cloud/index.mjs` 为兼容旧词表仍保留 `agentdock_context` 与 `get_command` 的作用域归类，但本地策略白名单严格只放行下表 10 项工具）：
 
-| 工具名称 | 所需作用域 | 是否免 `Approve.cmd` | 硬性输入与输出约束 |
+| 工具名称 | 所需作用域 | 是否免 `Approve.cmd` / `approve` | 硬性输入与输出约束 |
 | --- | --- | --- | --- |
 | `computer_context` | `computer:read` | 是（豁免） | 返回工作区挂载路径、容器镜像摘要、并发限制与安全提醒 |
 | `list_directory` | `computer:read` | 否（须批准） | 按文件系统顺序返回目录条目；`limit` 范围 `1..1000`（默认 `200`），不跟进符号链接 |
@@ -71,7 +70,7 @@ description: 详述 AgentDock Bridge 的安全假设、云端 HTTP 与 OAuth 2.1
 | `command_status` | `computer:read` + `computer:execute` | 是（豁免） | 校验 `job.ownerClient === authorization.clientId`，仅限当前连接器会话期内任务 |
 | `stop_command` | `computer:read` + `computer:execute` | 是（豁免） | 校验客户端归属后执行 `docker rm -f` 与进程树终止；幂等重试安全 |
 
-> **兼容注意**：`local/sandbox.mjs` 在只读状态查询内也兼容识别 `get_command`，但因 `toolScopes` 与 `TOOL_DEFINITIONS` 未开放该工具名，远端 MCP 调用应统一使用 `command_status`。
+> **兼容注意**：`cloud/index.mjs` 在云端 scopes 归类表中为历史兼容仍保留 `agentdock_context` 与 `get_command`，但本地 `local/request-policy.mjs`、`local/tools.mjs` 与 `local/sandbox.mjs` 均已不开放这两个旧名称，远端 MCP 调用应统一使用 `computer_context` 与 `command_status`。
 
 ### 本地批准与防重放顺序契约
 
@@ -89,18 +88,18 @@ description: 详述 AgentDock Bridge 的安全假设、云端 HTTP 与 OAuth 2.1
 每次命令或文件调用均由 `local/sandbox.mjs` 传入严格受限的 Docker 参数启动一次性容器：
 
 ```text
-docker create --rm -i --pull never --name agentdock-<uuid>
+docker create --init --rm -i --pull never --name agentdock-<uuid>
   --label cbnv.agentdock.install=<24-hex> --log-driver none --restart no
   --read-only --user 0:0 --cap-drop ALL --cap-add SETUID --cap-add SETGID
   --security-opt no-new-privileges=true --pids-limit 256
   --memory 2g --memory-swap 2g --cpus 2 --network <none|bridge>
   --mount type=bind,src=<workspace>,dst=/workspace
   --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777
-  --tmpfs /home/developer:rw,nosuid,nodev,size=512m,uid=1000,gid=1000,mode=700
+  --tmpfs /home/developer:rw,nosuid,nodev,size=512m,uid=<1000|host-uid>,gid=<1000|host-gid>,mode=700
   <sha256-pinned-image>
 ```
 
-- **租约心跳与降权执行**：容器 PID 1（`container/runner.mjs`）每 `2` 秒核查宿主标准输入写入的 `{"type":"lease"}`（宿主每 `5` 秒发送一次），超 `20` 秒断连或关闭即以退出码 125 自杀；实际命令（`bash --noprofile --norc`）与文件进程（`file-worker.mjs`，固定 `allowExec: false`）均降权为 UID/GID `1000`。
+- **租约心跳与降权执行**：容器 PID 1（`container/runner.mjs`）每 `2` 秒核查宿主标准输入写入的 `{"type":"lease"}`（宿主每 `5` 秒发送一次），超 `20` 秒断连或关闭即以退出码 125 自杀；实际命令（`bash --noprofile --norc`）与文件进程（`file-worker.mjs`，固定 `allowExec: false`，标准输入上限 `1,400,000` 字节）在 Windows/macOS Docker Desktop 下默认降权为 UID/GID `1000`，在原生 Linux 上通过 `AGENTDOCK_CHILD_UID`/`AGENTDOCK_CHILD_GID` 与 `/home/developer` tmpfs 映射为非 root 宿主 UID/GID。
 - **路径、编码与链接守卫**：`local/file-safety.mjs` 禁止孤立 UTF-16 代理项、`\0`、Windows 设备名（`con`/`nul`/`com1` 等）、NTFS 备用流（`:`）、逐级 `lstat` 命中符号链接/目录联接与多硬链接（`nlink !== 1`）；读取后校验 `dev:ino:size:mtimeMs:ctimeMs` 稳定；新建文件先用 `O_EXCL` 写同目录临时文件再原子硬链接发布。
 - **Windows DACL 替换守卫**：在 `win32` 宿主上，`edit_file` 与 `write_file(overwrite=true)` 前置调用只读 PowerShell 检查宿主真实路径与所有父目录，发现受保护 ACL、非规范顺序、显式非继承权限规则或所有者不匹配时直接拒绝覆盖。
 - **清理故障降级**：`docker rm -f` 无法确认容器已清除时置 `closed = true`，立即拒绝所有新文件与命令调用，同时保留属主客户端对自己已有任务的 `command_status` / `stop_command`。
@@ -111,11 +110,11 @@ docker create --rm -i --pull never --name agentdock-<uuid>
 
 ### 如何临时关闭命令执行或禁止容器出网？
 
-可在 `%USERPROFILE%\.agentdock-bridge\config.json` 中手动将 `allowExec` 或 `sandbox.allowOutbound` 设为 `false`，然后重启连接器（`Stop.cmd` → `Start.cmd`）。注意：每次重新运行 `Install-Hardened.ps1` 时，脚本默认写入 `allowExec: true` 与 `sandbox.allowOutbound: true`；若需长期禁用，应在重新安装后或修改安装脚本模板时显式关闭。
+可在 `~/.agentdock-bridge/config.json`（Windows 为 `%USERPROFILE%\.agentdock-bridge\config.json`）中手动将 `allowExec` 或 `sandbox.allowOutbound` 设为 `false`，然后重启连接器（`Stop.cmd` → `Start.cmd` 或 `stop` → `start`）。注意：每次重新运行安装器（`Install-Hardened.ps1` / `host-cli.mjs install`）默认开启 `allowExec: true` 与 `sandbox.allowOutbound: true`（Windows 可追加 `-AllowOutbound:$false`，POSIX 可追加 `--allow-outbound false`）。
 
 ### 如何更换绑定的项目根目录或修改 `PUBLIC_ORIGIN`？
 
-- 更换唯一挂载的工作区路径：停止连接器后重新运行 `.\scripts\Install-Hardened.ps1 -Workspace "<new-workspace-path>"`。系统拒绝一次配置多个根目录或把工作区设为磁盘根目录/包含逗号的路径。
+- 更换唯一挂载的工作区路径：停止连接器后重新运行 `.\scripts\Install-Hardened.ps1 -Workspace "<new-workspace-path>"`（Windows）或 `node scripts/host-cli.mjs install --workspace "<new-workspace-path>"`（Linux/macOS）。系统拒绝一次配置多个根目录或把工作区设为磁盘根目录/包含逗号的路径。
 - 更换云端网关域名：更新 `wrangler.jsonc` 中的 `vars.PUBLIC_ORIGIN`，重新执行 `pnpm run deploy`，并在本机 `config.json` 更新 `origin` 后重启连接器；现有待批准请求与 OAuth 客户端回调将按新源重新对齐。
 
 ### 二次开发新增一个 MCP 工具必须同时改哪些位置？

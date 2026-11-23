@@ -27,12 +27,15 @@ PATTERNS = [
 ]
 BEGIN = '# repo-maintenance-guard: begin'
 END = '# repo-maintenance-guard: end'
+GIT_TIMEOUT_SECONDS = 30
 
 
-def git(*args: str, data: bytes | None = None, check: bool = True) -> bytes:
-    result = subprocess.run(['git', *args], input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def git(*args: str, data: bytes | None = None, check: bool = True, timeout: int | float = GIT_TIMEOUT_SECONDS) -> bytes:
+    result = subprocess.run(['git', *args], input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     if check and result.returncode:
-        raise RuntimeError('Git 检查失败：' + ' '.join(args[:3]))
+        detail = result.stderr.decode('utf-8', 'replace').strip().splitlines()
+        hint = (' — ' + detail[-1][:160]) if detail else ''
+        raise RuntimeError('Git 检查失败：' + ' '.join(args[:3]) + hint)
     return result.stdout
 
 
@@ -45,9 +48,14 @@ def config(name: str) -> str:
 
 
 def message_problems(raw: str) -> list[str]:
-    lines = raw.lstrip('\ufeff').splitlines()
-    lines = [line for line in lines if not line.startswith('#')]
-    subject = next((line.strip() for line in lines if line.strip()), '')
+    clean_lines = []
+    for line in raw.lstrip('\ufeff').splitlines():
+        if line == '# ------------------------ >8 ------------------------':
+            break
+        if not line.startswith('#'):
+            clean_lines.append(line)
+    clean_text = '\n'.join(clean_lines)
+    subject = next((line.strip() for line in clean_lines if line.strip()), '')
     errors = []
     if not subject:
         errors.append('提交标题为空')
@@ -57,7 +65,7 @@ def message_problems(raw: str) -> list[str]:
         if len(subject) > 100:
             errors.append('提交标题超过 100 个字符，请把细节移到正文')
     for rule, pattern in PATTERNS:
-        if pattern.search(raw.encode('utf-8')):
+        if pattern.search(clean_text.encode('utf-8')):
             errors.append('提交信息包含疑似凭证：' + rule)
     return errors
 
@@ -65,12 +73,18 @@ def message_problems(raw: str) -> list[str]:
 def blocked_path(path: str) -> bool:
     parts = path.replace('\\', '/').split('/')
     name = parts[-1].lower()
-    example = re.search(r'(?:^|[._-])(?:example|sample|template|test|testing|defaults?)(?:[._-]|$)', name)
-    if (name == '.env' or name.startswith('.env.')) and not example:
+    example = re.search(r'(?:^|[._-])(?:example|sample|template)(?:[._-]|$)', name)
+    if (name == '.env' or name.startswith('.env.') or name == '.dev.vars' or name.startswith('.dev.vars.')) and not example:
+        return True
+    if name.endswith('.dpapi'):
+        return True
+    if name == 'wrangler.jsonc':
+        return True
+    if re.fullmatch(r'secrets(?:\.next|\.meta|-[^.]+)?\.json', name):
         return True
     if name in ('id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519', 'credentials.json', 'service-account.json'):
         return True
-    if any(part.lower() in ('secrets', '.secrets') for part in parts[:-1]) and not example:
+    if any(part.lower() in ('secrets', '.secrets') for part in parts[:-1]) and not re.search(r'(?:^|[._-])(?:example|sample|template)(?:[._-]|$)', name):
         return True
     return '设计文稿' in name or 'design-manuscript' in name
 
@@ -124,13 +138,28 @@ class ObjectBatch:
 
     def close(self):
         for process in (self.check, self.reader):
-            process.stdin.close()
-            process.stdout.close()
-            process.wait(timeout=10)
+            try:
+                if process.stdin:
+                    process.stdin.close()
+            except OSError:
+                pass
+            try:
+                if process.stdout:
+                    process.stdout.close()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 def allowlist(root: Path, revision: str = '', reader=None) -> dict:
     # 例外来自即将提交的 index 或待推送的提交；未暂存工作区不能放宽检查。
+    mode_check = git('ls-tree', revision, '.repo-security-allowlist.json', check=False) if revision else git('ls-files', '--stage', '--', '.repo-security-allowlist.json', check=False)
+    if mode_check.startswith(b'120000 '):
+        raise ValueError('安全例外清单不得为符号链接')
     raw = reader.read(revision + ':.repo-security-allowlist.json') if reader else git('show', revision + ':.repo-security-allowlist.json', check=False)
     if not raw:
         return {}
@@ -178,17 +207,33 @@ def scan_blob(path: str, oid: str, exceptions: dict, seen: set[tuple[str, str]],
 
 def staged(exceptions: dict) -> list[str]:
     names = git('diff', '--cached', '--name-only', '--diff-filter=ACMRT', '-z').split(b'\0')
+    paths = [os.fsdecode(raw) for raw in names if raw]
+    if not paths:
+        return []
     errors, seen = [], set()
-    for raw in filter(None, names):
-        path = os.fsdecode(raw)
-        entries = git('ls-files', '--stage', '-z', '--', path).split(b'\0')
+    reader = ObjectBatch()
+    primary_error = False
+    try:
+        entries = []
+        for offset in range(0, len(paths), 200):
+            entries.extend(git('ls-files', '--stage', '-z', '--', *paths[offset:offset + 200]).split(b'\0'))
         for entry in filter(None, entries):
-            info, _ = entry.split(b'\t', 1)
+            info, raw_path = entry.split(b'\t', 1)
+            path = os.fsdecode(raw_path)
             mode, oid, stage = info.split()
             if stage != b'0':
                 errors.append(path + ': 请先解决暂存区冲突')
             elif mode not in (b'120000', b'160000'):
-                errors.extend(scan_blob(path, oid.decode('ascii'), exceptions, seen))
+                errors.extend(scan_blob(path, oid.decode('ascii'), exceptions, seen, reader))
+    except Exception:
+        primary_error = True
+        raise
+    finally:
+        try:
+            reader.close()
+        except Exception:
+            if not primary_error:
+                raise
     return errors
 
 
@@ -209,7 +254,7 @@ def pushed(lines: bytes, exceptions: dict) -> list[str]:
             continue  # 直接指向 blob/tree 的标签不含提交历史。
         args = ['rev-list', local_commit.decode()]
         if set(remote) != {ord('0')}:
-            exists = subprocess.run(['git', 'cat-file', '-e', remote.decode() + '^{commit}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            exists = subprocess.run(['git', 'cat-file', '-e', remote.decode() + '^{commit}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=GIT_TIMEOUT_SECONDS)
             if exists.returncode:
                 raise ValueError('本机缺少远端顶点对象，无法确定待推送范围；先 fetch 对应远端再推送')
             args += ['^' + remote.decode() + '^{commit}']
@@ -217,6 +262,7 @@ def pushed(lines: bytes, exceptions: dict) -> list[str]:
     errors, checked = [], {}
     reader = ObjectBatch()
     root = repo_root()
+    primary_error = False
     try:
         for commit in sorted(commits):
             commit_exceptions = allowlist(root, commit, reader)
@@ -242,8 +288,15 @@ def pushed(lines: bytes, exceptions: dict) -> list[str]:
                 if key not in checked:
                     checked[key] = scan_blob(path, oid.decode('ascii'), commit_exceptions, set(), reader)
                     errors.extend(checked[key])
+    except Exception:
+        primary_error = True
+        raise
     finally:
-        reader.close()
+        try:
+            reader.close()
+        except Exception:
+            if not primary_error:
+                raise
     return errors
 
 
@@ -323,27 +376,33 @@ def main() -> int:
     parser.add_argument('command', choices=('install', 'pre-commit', 'commit-msg', 'pre-push', 'status'))
     parser.add_argument('arguments', nargs='*')
     args = parser.parse_args()
-    root = repo_root()
-    os.chdir(root)
-    if args.command == 'install':
-        print(json.dumps(install(root), ensure_ascii=False))
-        return 0
-    if args.command == 'status':
-        print(json.dumps(dict(version=VERSION, hooks_path=config('core.hooksPath'), commit_template=config('commit.template')), ensure_ascii=False))
-        return 0
-    exceptions = allowlist(root)
-    if args.command == 'pre-commit':
-        errors = staged(exceptions)
-    elif args.command == 'commit-msg':
-        if not args.arguments:
-            raise ValueError('commit-msg 缺少提交信息文件')
-        errors = message_problems(Path(args.arguments[0]).read_text(encoding='utf-8-sig'))
-    else:
-        errors = pushed(sys.stdin.buffer.read(), exceptions)
+    try:
+        root = repo_root()
+        os.chdir(root)
+        if args.command == 'install':
+            print(json.dumps(install(root), ensure_ascii=False))
+            return 0
+        if args.command == 'status':
+            print(json.dumps(dict(version=VERSION, hooks_path=config('core.hooksPath'), commit_template=config('commit.template')), ensure_ascii=False))
+            return 0
+        exceptions = allowlist(root)
+        if args.command == 'pre-commit':
+            errors = staged(exceptions)
+        elif args.command == 'commit-msg':
+            if not args.arguments:
+                raise ValueError('commit-msg 缺少提交信息文件')
+            errors = message_problems(Path(args.arguments[0]).read_text(encoding='utf-8-sig'))
+        else:
+            errors = pushed(sys.stdin.buffer.read(), exceptions)
+    except subprocess.TimeoutExpired as exc:
+        print('安全检查超时：' + str(exc), file=sys.stderr)
+        return 1
     if errors:
         print('安全检查未通过（仅显示规则与位置，不输出凭证值）：', file=sys.stderr)
         for error in errors[:50]:
             print('  ' + error, file=sys.stderr)
+        if len(errors) > 50:
+            print(f'  ... 其余 {len(errors) - 50} 项问题已省略', file=sys.stderr)
         print('请移除敏感内容；确属公开测试夹具时，按 SECURITY.md 用精确哈希登记例外。', file=sys.stderr)
         return 1
     return 0
@@ -352,6 +411,9 @@ def main() -> int:
 if __name__ == '__main__':
     try:
         raise SystemExit(main())
+    except subprocess.TimeoutExpired as exc:
+        print('安全检查超时：' + str(exc), file=sys.stderr)
+        raise SystemExit(1)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print('安全检查无法完成：' + str(exc), file=sys.stderr)
         raise SystemExit(1)

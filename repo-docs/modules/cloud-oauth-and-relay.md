@@ -11,16 +11,16 @@
 1. **主机名与 CORS 检查**：生产环境要求请求匹配配置的 `PUBLIC_ORIGIN`（仅对 `127.0.0.1`、`localhost` 与 `[::1]` 放行回环测试请求）；URL 超过 `12000` 字节返回 414。[安全与输入校验](../../cloud/security.mjs)的 `allowedOrigin` 仅允许 `chatgpt.com`、`chat.openai.com` 及其受控预览域名，以及 `PUBLIC_ORIGIN` 自身。
 2. **基础探针与入口页**：`GET /` 返回零脚本（`script-src` 被禁止，`default-src 'none'`）的网关说明页；`GET` 或 `HEAD /healthz` 转发至 `BridgeRelay` 的内部 `/status`，连接器在线时返回 HTTP 200（`{ "ok": true, "connectorOnline": true }`），离线或心跳超时返回 HTTP 503。
 3. **设备长连接接入**：`GET /bridge` 必须携带 `Upgrade: websocket` 且通过 `BRIDGE_TOKEN` 恒定时间摘要校验（`equalSecret` 要求密钥长度不少于 32 字符），校验通过后转交 `BridgeRelay` 建立唯一活跃连接。
-4. **流式限流与协议版本**：`/mcp` 检查 `MCP-Protocol-Version`（支持 `2025-03-26`、`2025-06-18` 与 `2025-11-25`），`OPTIONS` 仅返回预检头；对 `/register`（20 次 / 3600 秒）和 `/oauth/token`（120 次 / 60 秒）实施基于 `CF-Connecting-IP` 与 `BRIDGE_TOKEN` 哈希指纹的限流。
-5. **缓冲读取先行**：对 `/mcp`、`POST /authorize`、`/oauth/token`、`/oauth/token/revoke` 与 `/register` 的 `POST` 请求体，先通过 `readLimited` 在 15 秒时限内完整读取（上限分别为 `1 MiB`、`8192` 字节与 `16384` 字节）并严格校验 UTF-8，再送入 `AuthCoordinator`。
+4. **流式限流与协议版本**：`/mcp` 检查 `MCP-Protocol-Version`（支持 `2025-03-26`、`2025-06-18` 与 `2025-11-25`）；`/register`、`/oauth/token`、`/mcp` 与 `/.well-known/*` 均支持 `OPTIONS` 预检并统一由出口注入 CORS（限非 HTML 响应，保留 `Retry-After` 并去重 `Vary: Origin`）；对 `/register`（20 次 / 3600 秒）、`/oauth/token`（120 次 / 60 秒）、`/bridge`、`/healthz` 与 `/mcp` 实施基于 `CF-Connecting-IP`（IPv6 按 `/64` 前缀归一化）与 `BRIDGE_TOKEN` 哈希指纹的限流。
+5. **缓冲读取先行**：对 `/mcp`、`POST /authorize`、`/oauth/token` 与 `/register` 的 `POST` 请求体，先通过 `readLimited` 在 15 秒时限内完整读取（上限分别为 `1 MiB`、`8192` 字节与 `16384` 字节）并严格校验 UTF-8，再送入 `AuthCoordinator`；不存在的 `/mcp/*` 子路径在边缘即返回 `404`。
 
 ## OAuth 2.1、代次隔离与乐观事务
 
 授权状态由 `@cloudflare/workers-oauth-provider` 托管在 `AuthCoordinator` 中，所有实例名统一采用 `owner-v2-${generation}`，其中 `generation` 是 `OWNER_PASSWORD_HASH` 的 SHA-256 十六进制摘要。一旦通过秘密轮换修改所有者密码，Worker 会自动切换到全新的 Durable Object 实例，旧代次的客户端注册与令牌即时失效。
 
-- **强制 PKCE S256 与权限映射**：`GET /authorize` 先按 `authorize: 30 / 600s` 限流，强制要求 `codeChallengeMethod === 'S256'` 且 `codeChallenge` 符合 43 位 Base64url 格式；授权范围仅限 `computer:read`、`computer:write`、`computer:execute` 与 `offline_access`，并自动补全 `computer:read`。同意书页面同时合并基础策略与 SDK 生成的 CSP 响应头，表单句柄有效期为 10 分钟。`POST /authorize` 校验 `Origin` 与表单编码后按 `password: 8 / 600s` 限流，再通过 `verifyOwnerPassword` 核对密码。
-- **DCR、CIMD 与令牌轮换撤销**：网关启用了动态客户端注册（`/register`，限 `1..10` 个回调 URI，`client_name` 不超过 `120` 字符）及客户端元数据文档（CIMD）。令牌端点禁止重复表单键（`resource` 除外）、拦截已消费授权码，并在[授权状态存储](../../cloud/auth-store.mjs)中追踪刷新令牌家族：`refreshRecord.state !== 'current'` 时判定令牌复用并调用 `revokeFamily` 吊销整条授权链；若未获准 `offline_access`，响应会剔除 `refresh_token`。撤销端点 `/oauth/token/revoke` 会对 JWT `client_assertion` 载荷执行 UTF-8 解码，避免非 ASCII 客户端标识在撤销时失配。
-- **分通道并发与版本号校验**：[授权事务协调](../../cloud/auth-transactions.mjs)结合[串行队列](../../cloud/auth-queue.mjs)实现乐观并发控制：外部 CIMD/JWKS 读取在提交锁外执行，各用途通道独立限制并发数（`authorization: 4`、`consent: 4`、`token: 8`、`mcp: 32`、`stop: 4`、`other: 4`），队列深度上限为 `64`、等待上限 `15000` 毫秒；准备阶段与提交阶段之间若 `revision` 发生变化则重试（最多 4 轮，总超时 25 秒），防止过时授权视图覆盖新吊销结果。
+- **强制 PKCE S256 与权限映射**：`GET /authorize` 先按 `authorize: 30 / 600s` 限流并检验 `client_id` 长度，强制要求 `codeChallengeMethod === 'S256'` 且 `codeChallenge` 符合 43 位 Base64url 格式；授权范围仅限 `computer:read`、`computer:write`、`computer:execute` 与 `offline_access`，并自动补全 `computer:read`。同意书页面同时合并基础策略与 SDK 生成的 CSP 响应头，表单句柄有效期为 10 分钟。`POST /authorize` 校验 `Origin`、`Content-Type` 后按 `password: 8 / 600s` 限流，再通过 `verifyOwnerPassword` 核对密码。
+- **DCR、CIMD 与令牌轮换撤销**：网关启用了动态客户端注册（`/register`，限 `1..10` 个回调 URI，`client_name` 不超过 `120` 字符）及客户端元数据文档（CIMD）。令牌端点禁止重复表单键（`resource` 除外）、拦截已消费授权码，并在[授权状态存储](../../cloud/auth-store.mjs)中按 `refresh-by-grant:<userId>:<grantId>:<tokenHash>` 索引追踪刷新令牌家族：`refreshRecord.state !== 'current'` 时判定令牌复用并调用 `revokeFamily` 级联清理家族及关联 `refresh:*` 行；若未获准 `offline_access`，响应会剔除 `refresh_token`。遵循 RFC 7009，令牌撤销同样经 `POST /oauth/token`（提交 `token` 参数）触发，并对 JWT `client_assertion` 载荷执行 UTF-8 解码，避免非 ASCII 客户端标识在撤销时失配。
+- **分通道并发与版本号校验**：[授权事务协调](../../cloud/auth-transactions.mjs)结合[串行队列](../../cloud/auth-queue.mjs)实现乐观并发控制：外部 CIMD/JWKS 读取在提交锁外执行，各用途通道独立限制并发数（`authorization: 4`、`consent: 4`、`token: 8`、`mcp: 32`、`stop: 4`、`other: 16`），队列深度上限为 `64`、等待上限 `15000` 毫秒；准备阶段与提交阶段之间若 `revision` 发生变化则重试（最多 `12` 轮，总超时 25 秒），防止过时授权视图覆盖新吊销结果。
 
 ## WebSocket 中继、通道预算与活性判据
 

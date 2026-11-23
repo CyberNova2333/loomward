@@ -2,7 +2,7 @@
 layout: page
 sidebar: false
 title: API 与组件参考
-description: AgentDock Bridge Cloudflare Worker OAuth 2.1 + PKCE 网关端点、WSS 设备桥、Approve.cmd 与 10 个只读/读写 MCP 工作区工具交互式参考。
+description: AgentDock Bridge Cloudflare Worker OAuth 2.1 + PKCE 网关端点、WSS 设备桥、Approve.cmd / approve 与 10 个只读/读写 MCP 工作区工具交互式参考。
 ---
 
 <script setup lang="ts">

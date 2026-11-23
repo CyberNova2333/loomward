@@ -3,7 +3,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg" alt="License: AGPL-3.0-only" /></a>
   <a href="package.json"><img src="https://img.shields.io/badge/Node-%3E%3D24-339933.svg" alt="Node &gt;= 24" /></a>
-  <a href="wrangler.jsonc.example"><img src="https://img.shields.io/badge/Runtime-CF%20Worker%20%2B%20Win%20x64%20%2B%20Docker-0969da.svg" alt="Platform" /></a>
+  <a href="wrangler.jsonc.example"><img src="https://img.shields.io/badge/Runtime-CF%20Worker%20%2B%20Win%20%2F%20macOS%20%2F%20Linux%20%2B%20Docker-0969da.svg" alt="Platform" /></a>
 </p>
 
 <p align="center">
@@ -14,38 +14,40 @@
   <a href="https://agentdock-worker-remote.cbnv.me/">在线文档站</a> · <a href="docs-site/index.md">文档站源码</a> · <a href="repo-docs/README.md">源码阅读指南</a>
 </p>
 
-面向单人开发者的远程 MCP 桥接网关：通过 Cloudflare Workers 完成 OAuth 2.1 + PKCE 鉴权与请求中继，在 Windows 受保护连接器上等待人工逐参数批准后，交由只读 Linux Docker 沙箱执行工作区文件与命令操作。生产宿主强依赖 Windows DPAPI 与 NTFS ACL；非 Windows 系统支持云端 Worker 部署、容器构建与跨平台单元回归。
+面向单人开发者的远程 MCP 桥接网关：通过 Cloudflare Workers 完成 OAuth 2.1 + PKCE 鉴权与请求中继，在 Windows、macOS 或 Linux 受保护连接器上等待人工逐参数批准后，交由只读 Linux Docker 沙箱执行工作区文件与命令操作。
 
 ## 核心能力与执行链路
 
 - **边缘 OAuth 2.1 与代次隔离**：云端拆分授权（`AuthCoordinator`）与设备长连接（`BridgeRelay`）双 SQLite Durable Objects，强制 PKCE `S256`、零脚本 CSP 同意书与刷新令牌家族撤销；修改所有者密码即自动切换代次、立即作废旧授权。
-- **本机单次精确批准与防重放**：除只读环境、任务查询与停止工具外，敏感调用均按完整参数计算摘要并等待 `Approve.cmd` 人工输入口令放行；重试时先删除批准文件再写入 24 小时持久账本，避免重复副作用。
-- **Linux 只读容器沙箱与文件守卫**：Bash 命令与文件工具均在丢弃多余权能、UID 1000、默认 `--network none` 的一次性容器中运行，逐级检查符号链接、多硬链接、非法 UTF-16 与 Windows 自定义 NTFS ACL。
+- **本机单次精确批准与防重放**：除只读环境、任务查询与停止工具外，敏感调用均按完整参数计算摘要并等待本机人工复核。Windows 使用 `Approve.cmd`，Linux 和 macOS 可使用 `approve` 或受保护的回环 WebUI；重试时先删除批准文件再写入 24 小时持久账本，避免重复副作用。
+- **Linux 只读容器沙箱与文件守卫**：Bash 命令与文件工具均在丢弃多余权能、默认 `--network none` 的一次性容器中运行（Windows/macOS 映射 UID 1000，原生 Linux 按非 root 宿主 UID/GID 动态映射），逐级检查符号链接、多硬链接、非法 UTF-16 与 Windows 自定义 NTFS ACL。
 - **清理故障安全退守**：一旦容器清理未能确认，连接器立即拒绝后续新任务，同时保留属主客户端对其他已有任务的查询与停止权限，不虚报安全退出。
-- **受保护运行副本与固定工具链**：安装流程把本地运行时与配置隔离到 `%USERPROFILE%\.agentdock-bridge`，校验祖先路径权限、DPAPI 密钥与固定 Node 24.22.1 SHA-256 摘要，并清除 Node 预加载覆盖环境变量。
+- **受保护运行副本与固定工具链**：安装流程把本地运行时与配置隔离到 `~/.agentdock-bridge`（Windows 为 `%USERPROFILE%\.agentdock-bridge`），校验祖先路径权限、系统凭据保护（Windows DPAPI / macOS Keychain / Linux Secret Service 或 `0600` 文件）与固定 Node `24.22.1` SHA-256 摘要，并清除 Node 与动态链接器覆盖环境变量。
 
 ## 能做到什么程度与明确不能做什么
 
 | 维度 | 能做到什么程度（已实现能力） | 明确不能做什么（非目标与硬限制） |
 | --- | --- | --- |
 | 云端鉴权与连接 | OAuth 2.1 + PKCE S256、零脚本 CSP 同意页、密码改代次批量作废、`WSS /bridge` 反向穿透 | **不支持**多租户共享（仅单一 `owner`）与 SSE 响应流；Cloudflare 与 AI 平台可见传输正文 |
-| 本机人工批准 | 除 `computer_context` / `status` / `stop` 外全部工具须经 `Approve.cmd` 核对完整参数 SHA-256 摘要 | 5 分钟 pending 超时（上限 64 条）；`504` 超时后**不自动重放**未确认写入；生产仅限 Windows x64 DPAPI/ACL |
-| 工具与容器沙箱 | 10 项 MCP 工具运行于 `--read-only` / `--cap-drop ALL` / UID `1000` / `--network none` 一次性容器 | `/mcp` 限入站 `1 MiB` / 回包 `2 MiB` / `110s`；写文件 `<= 1 MiB`；清理未确认即闭锁新任务 |
+| 本机人工批准 | 除 `computer_context`、`command_status` 和 `stop_command` 外，均须通过本机终端或 POSIX WebUI 核对完整请求并批准一次 | 5 分钟 pending 超时（上限 64 条）；`504` 超时后**不自动重放**未确认写入；无头 Linux 若无 Keyring 服务需使用 `0600` 凭据文件 |
+| 工具与容器沙箱 | 10 项 MCP 工具运行于 `--read-only` / `--cap-drop ALL` / 非特权 UID / `--network none` 一次性容器 | `/mcp` 限入站 `1 MiB` / 回包 `2 MiB` / `110s`；写文件 `<= 1 MiB`；清理未确认即闭锁新任务 |
 
 ```mermaid
 flowchart LR
   MCPClient["MCP 客户端 (POST /mcp)"] --> Worker["Cloudflare Worker (OAuth 2.1 + BridgeRelay)"]
   Worker --> Connector["本机连接器 (信封校验 + 队列)"]
-  Connector --> Approve["Approve.cmd 人工逐参数确认"]
+  Connector --> Approve["本机终端或 POSIX WebUI 逐参数确认"]
   Approve --> Ledger["先消费批准 + 写入持久账本"]
   Ledger --> Container["Linux 容器沙箱 (/workspace)"]
 ```
 
-工具结果、错误码与心跳状态沿本地连接器主动建立的 `WSS /bridge` 长连接反向回传给云端中继，再作为 `/mcp` 的 HTTP 响应返回客户端；日常启停、状态探针与连接密码查看统一经 `%USERPROFILE%\.agentdock-bridge\{Start,Stop,Status,Password,Approve}.cmd` 执行（仓库根目录同名 `.cmd` 仅作转发）。
+工具结果、错误码与心跳状态沿本地连接器主动建立的 `WSS /bridge` 长连接反向回传给云端中继，再作为 `/mcp` 的 HTTP 响应返回客户端；日常启停、状态探针与连接密码查看统一经受保护目录 `~/.agentdock-bridge` 下的入口执行（Windows 为 `{Start,Stop,Status,Password,Approve}.cmd`，根目录同名 `.cmd` 仅作转发；Linux/macOS 为 `{start,stop,status,password,approve}`）。
 
 ## 快速开始
 
-以下为单机生产接入的最简主路径（在已登录 Cloudflare CLI 且 Docker Desktop `desktop-linux` 就绪的 Windows x64 环境执行；配置远端 MCP 客户端时填入 `https://<PUBLIC_ORIGIN>/mcp`）：
+以下为单机生产接入的最简主路径（已登录 Cloudflare CLI 且本机 Docker 就绪；配置远端 MCP 客户端时填入 `https://<PUBLIC_ORIGIN>/mcp`）：
+
+**Windows (PowerShell)**:
 
 ```powershell
 pnpm install --frozen-lockfile && pnpm run check && pnpm test
@@ -58,15 +60,30 @@ pnpm run deploy
 & "$env:USERPROFILE\.agentdock-bridge\Start.cmd"
 ```
 
+**Linux / macOS (Bash / Zsh)**:
+
+```sh
+pnpm install --frozen-lockfile && pnpm run check && pnpm test
+cp wrangler.jsonc.example wrangler.jsonc          # 按实际域名修改 PUBLIC_ORIGIN
+node scripts/host-cli.mjs setup --roots "<workspace-path>" --origin "https://<your-bridge-domain>"
+node scripts/host-cli.mjs upload-secrets
+docker build -f container/Dockerfile -t agentdock-dev:2026-10-28 .
+node scripts/host-cli.mjs install --workspace "<workspace-path>"
+pnpm run deploy
+~/.agentdock-bridge/start
+```
+
+Linux 与 macOS 的受保护安装还提供回环 WebUI。首次使用时在本机交互终端运行 `~/.agentdock-bridge/webui-auth init` 取得一次性初始化码。若控制台尚未运行，用 `~/.agentdock-bridge/webui` 启动，打开 `http://localhost:18797/` 完成认证，在「实时审计」页复核待批请求。
+
 其他运行模式与平台差异入口：
 
 | 部署 / 使用场景 | 适用环境与行为摘要 | 详细文档入口 |
 | --- | --- | --- |
 | 云端网关与本地开发调试 | Cloudflare Worker 配置、Secrets 上传与 `wrangler dev --ip 127.0.0.1 --port 8797` | [起步概览](docs-site/docs/index.md) · [配置矩阵](docs-site/docs/configuration.md) |
-| Windows 受保护安装与密钥轮换 | 默认 `%USERPROFILE%\.agentdock-bridge`、Node 固定摘要校验与双步密码轮换 | [配置与宿主安装](docs-site/docs/configuration.md) |
+| 受保护宿主安装与密钥轮换 | `~/.agentdock-bridge`、固定 Node `24.22.1` SHA-256 校验、Keychain/DPAPI/Secret Service 与两步轮换 | [配置与宿主安装](docs-site/docs/configuration.md) |
 | 容器镜像、网络出网与工具契约 | 10 项 MCP 工具上限、`network: "outbound"` 开关及 `file-worker` 无执行边界 | [接口与扩展契约](docs-site/docs/contracts.md) |
 | 公网验收与停机生命周期探针 | 显式运行 `acceptance-v2.mjs` / `verify-lifecycle.mjs` 验证 OAuth 与健康探针 | [配置与验收操作](docs-site/docs/configuration.md) · [修复快照](SECURITY-FIXES.md) |
-| Linux / macOS 开发与回归验证 | 运行 `pnpm run check` 与 `pnpm test`（15 项 Windows/Docker 用例按条件自动跳过） | [源码阅读指南](repo-docs/README.md) · [常见边界与排错](docs-site/docs/faq.md) |
+| 跨平台开发与回归验证 | 运行 `pnpm run check` 与 `pnpm test`（依赖 Windows DPAPI/ACL 或开启 Docker 的用例按环境条件跳过） | [源码阅读指南](repo-docs/README.md) · [常见边界与排错](docs-site/docs/faq.md) |
 
 ## 选型与边界 FAQ
 
@@ -88,7 +105,7 @@ pnpm run deploy
 
 - **能否直接在 Linux 或 macOS 宿主机运行本地连接器？**
 
-  当前生产凭据加载（`loadSecrets`）与安装检查显式限定 `win32` DPAPI 与 NTFS ACL；非 Windows 环境可运行纯 JS 与云端 Miniflare 回归，如需托管需自行替换密钥与宿主保护层。
+  支持。Windows 使用 `scripts/*.ps1`（DPAPI + NTFS ACL + PowerShell 5.1），Linux 与 macOS 使用 `scripts/host-cli.mjs`（配合 `local/host-safety.mjs`、`local/host-secrets.mjs` 与 `local/node-toolchains.mjs`）：macOS 默认将凭据存入登录 Keychain，Linux 桌面默认使用 Secret Service（`secret-tool`），无图形会话的 Linux 宿主可回退至 `0600` 权限私有凭据文件（`posix-file`），并均校验状态目录 `0700` 与祖先路径写保护。
 
 ## 文档与源码导航
 

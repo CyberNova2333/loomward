@@ -2,7 +2,7 @@
 layout: page
 sidebar: false
 title: API & Component Reference
-description: Interactive reference for AgentDock Bridge OAuth 2.1 endpoints, WSS connector relay, local Approve.cmd confirmation, and all 10 hardened MCP tools.
+description: Interactive reference for AgentDock Bridge OAuth 2.1 endpoints, WSS connector relay, local Approve.cmd / approve confirmation, and all 10 hardened MCP tools.
 ---
 
 <script setup lang="ts">
