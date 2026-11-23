@@ -135,3 +135,28 @@ test('relay reserves a bounded and client-fair stop lane while ordinary RPC capa
     assert.ok(responses.every(response => response.status === 200));
   }
 });
+
+test('relay limiter handles concurrent increments and >128 expired buckets without failing', { timeout: 30000 }, async t => {
+  const request = await fixture(t);
+  const inserts = Array.from({ length: 140 }, (_, i) => request('/limit', {
+    method: 'POST',
+    body: JSON.stringify({ key: `test:${i}`, maximum: 5, seconds: 10 }),
+  }));
+  const firstResults = await Promise.all(inserts);
+  assert.ok(firstResults.every(res => res.status === 200));
+  const concurrentSameKey = await Promise.all(Array.from({ length: 6 }, () => request('/limit', {
+    method: 'POST',
+    body: JSON.stringify({ key: 'concurrent:same', maximum: 5, seconds: 60 }),
+  })));
+  const outcomes = await Promise.all(concurrentSameKey.map(res => res.json()));
+  assert.equal(outcomes.filter(item => item.allowed).length, 5);
+  assert.equal(outcomes.filter(item => !item.allowed).length, 1);
+  await request('/test/advance?ms=20000');
+  await request('/test/advance?ms=3700000');
+  const afterCleanup = await request('/limit', {
+    method: 'POST',
+    body: JSON.stringify({ key: 'test:0', maximum: 5, seconds: 10 }),
+  });
+  assert.equal(afterCleanup.status, 200);
+  assert.equal((await afterCleanup.json()).allowed, true);
+});

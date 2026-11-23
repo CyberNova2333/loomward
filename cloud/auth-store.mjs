@@ -40,13 +40,19 @@ export class AuthStore {
     this.pending.set(key, { value, expires, metadata: completeMetadata(key, value, options.metadata === undefined ? null : JSON.stringify(options.metadata)) });
   }
 
-  async delete(key) { this.pending.set(key, null); }
+  async delete(key) {
+    this.pending.set(key, null);
+    if (key.startsWith('grant:')) {
+      const sep = key.lastIndexOf(':');
+      if (sep > 6 && sep < key.length - 1) await this.#revokeRefreshIndex(key.slice(6, sep), key.slice(sep + 1));
+    }
+  }
 
   async list({ prefix = '', cursor, limit = 1000 } = {}) {
     // Provider list operations are internal, bounded pages; cursors are last keys.
     const after = cursor ? decodeURIComponent(cursor) : '';
     const maximum = Math.max(1, Math.min(1000, limit));
-    const rows = this.sql.exec('SELECT key, value, expires, metadata FROM oauth_state WHERE key >= ? AND key < ? AND key > ? AND (expires IS NULL OR expires > ?) ORDER BY key LIMIT ?', prefix, `${prefix}\uffff`, after, nowSeconds(), maximum + this.pending.size + 1).toArray();
+    const rows = this.sql.exec('SELECT key, value, expires, metadata FROM oauth_state WHERE key >= ? AND key < ? AND key > ? AND (expires IS NULL OR expires > ?) ORDER BY key LIMIT ?', prefix, `${prefix}\u{10FFFF}`, after, nowSeconds(), maximum + this.pending.size + 1).toArray();
     const merged = new Map(rows.map(row => [row.key, row]));
     for (const [key, entry] of this.pending) {
       if (!key.startsWith(prefix) || key <= after) continue;
@@ -63,6 +69,7 @@ export class AuthStore {
   }
 
   commit() {
+    if (!this.pending.size) return;
     this.storage.transactionSync(() => {
       this.sql.exec('DELETE FROM oauth_state WHERE expires IS NOT NULL AND expires <= ?', nowSeconds());
       for (const [key, entry] of this.pending) {
@@ -76,6 +83,20 @@ export class AuthStore {
   async codeWasUsed(code) { return !!await this.get(`used-code:${await digest(code)}`); }
   async consumeCode(code) { await this.put(`used-code:${await digest(code)}`, '1', { expirationTtl: 600 }); }
 
+  async #revokeRefreshIndex(userId, grantId) {
+    const indexPrefix = `refresh-by-grant:${userId}:${grantId}:`;
+    let cursor;
+    do {
+      const page = await this.list({ prefix: indexPrefix, cursor });
+      for (const item of page.keys) {
+        const tokenHash = item.name.slice(indexPrefix.length);
+        this.pending.set(item.name, null);
+        if (tokenHash) this.pending.set(`refresh:${tokenHash}`, null);
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+  }
+
   async revokeFamily(record) {
     const prefix = `token:${record.userId}:${record.grantId}:`;
     let cursor;
@@ -84,6 +105,7 @@ export class AuthStore {
       for (const item of page.keys) await this.delete(item.name);
       cursor = page.list_complete ? undefined : page.cursor;
     } while (cursor);
+    await this.#revokeRefreshIndex(record.userId, record.grantId);
     await this.delete(`grant:${record.userId}:${record.grantId}`);
   }
 
@@ -98,8 +120,10 @@ export class AuthStore {
       if (!previous || previous.state !== 'current' || previous.userId !== userId || previous.grantId !== grantId) throw new Error('Refresh transaction is inconsistent.');
       await this.put(`refresh:${await digest(previousToken)}`, JSON.stringify({ ...previous, state: 'spent' }), { expiration: previous.expiresAt });
     }
+    const tokenHash = await digest(token);
     const record = { userId, grantId, clientId: grant.clientId, state: 'current', expiresAt: grant.expiresAt };
-    await this.put(`refresh:${await digest(token)}`, JSON.stringify(record), { expiration: grant.expiresAt });
+    await this.put(`refresh:${tokenHash}`, JSON.stringify(record), { expiration: grant.expiresAt });
+    await this.put(`refresh-by-grant:${userId}:${grantId}:${tokenHash}`, '1', { expiration: grant.expiresAt });
     // The provider's compatibility fallback must never retain a usable old token.
     delete grant.previousRefreshTokenId;
     delete grant.previousRefreshTokenWrappedKey;

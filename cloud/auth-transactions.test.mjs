@@ -83,3 +83,18 @@ test('persistent conflicts stop at the retry bound without committing or exposin
   assert.equal(attempts,4);
   assert.equal(staleCommits,0);
 });
+
+test('torn-read errors after a concurrent commit retry cleanly instead of escaping as failures', async () => {
+  const tx = new AuthTransactions({ attempts: 4 });
+  let attempts = 0;
+  const result = await tx.run('token', async () => {
+    attempts++;
+    if (attempts === 1) {
+      await tx.run('other', async () => prepared('concurrent write', () => {}, true));
+      throw new Error('Refresh transaction is inconsistent.');
+    }
+    return prepared('retried', () => {}, true);
+  });
+  assert.equal(result, 'retried');
+  assert.equal(attempts, 2);
+});

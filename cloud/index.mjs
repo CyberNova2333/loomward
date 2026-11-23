@@ -8,18 +8,55 @@ import { COMPUTER_SCOPES, OAUTH_SCOPES, PROTOCOL_VERSIONS, MAX_RPC_BYTES, HttpEr
 
 export { BridgeRelay };
 const providers = new Map();
+const generations = new Map();
 const READ_TOOLS = new Set(['computer_context', 'agentdock_context', 'list_directory', 'read_file', 'search_files']);
 const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'delete_file']);
 const EXEC_TOOLS = new Set(['exec_command', 'command_status', 'get_command', 'stop_command']);
 
 function relay(env) { return env.RELAY.getByName('primary'); }
 
+function safePathForLog(rawUrl) {
+  try { return new URL(rawUrl).pathname; } catch { return 'unknown'; }
+}
+
+async function callDo(target, action) {
+  try { return await action(); }
+  catch (error) {
+    if (error instanceof HttpError) throw error;
+    console.error('do_rpc_failed', { target, name: error?.name || 'Error' });
+    throw new HttpError(503, 'The gateway is temporarily unavailable.');
+  }
+}
+
+async function passwordGeneration(hash) {
+  if (!generations.has(hash)) {
+    if (generations.size > 16) generations.clear();
+    const digest = await sha256(hash);
+    generations.set(hash, [...digest].map(byte => byte.toString(16).padStart(2, '0')).join(''));
+  }
+  return generations.get(hash);
+}
+
+function normalizeRateAddress(address) {
+  if (!address.includes(':')) return address;
+  // Normalize IPv6 clients to their /64 prefix so single-allocation address rotation cannot bypass limits.
+  const withoutZone = address.split('%')[0];
+  const halves = withoutZone.split('::');
+  if (halves.length > 2) return withoutZone;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = halves.length === 2 ? Math.max(0, 8 - left.length - right.length) : 0;
+  const groups = [...left, ...Array(missing).fill('0'), ...right];
+  if (groups.length < 4) return withoutZone;
+  return `${groups.slice(0, 4).map(group => group.padStart(4, '0').toLowerCase()).join(':')}::/64`;
+}
+
 async function rate(request, env, category, maximum, seconds) {
   // Cloudflare overwrites CF-Connecting-IP; it is never taken from an arbitrary X-Forwarded-For.
-  const address = request.headers.get('cf-connecting-ip') || 'local-development';
+  const address = normalizeRateAddress(request.headers.get('cf-connecting-ip') || 'local-development');
   const digest = await sha256(`${env.BRIDGE_TOKEN}:${address}`);
   const fingerprint = [...digest].map(byte => byte.toString(16).padStart(2, '0')).join('');
-  const response = await relay(env).fetch('https://machine.internal/limit', { method: 'POST', body: JSON.stringify({ key: `${category}:${fingerprint}`, maximum, seconds }) });
+  const response = await callDo('relay-limit', () => relay(env).fetch('https://machine.internal/limit', { method: 'POST', body: JSON.stringify({ key: `${category}:${fingerprint}`, maximum, seconds }) }));
   if (!response.ok) throw new HttpError(503, 'Authentication is temporarily unavailable.');
   const allowance = await response.json();
   if (!allowance.allowed) {
@@ -314,8 +351,8 @@ async function authorize(request, env) {
   const oauth = env.OAUTH_PROVIDER;
   try {
     if (request.method === 'GET') {
-      await rate(request, env, 'authorize', 30, 600);
       const authRequest = await oauth.parseAuthRequest(request);
+      if (typeof authRequest.clientId === 'string' && authRequest.clientId.length > 2048) throw new HttpError(400, 'Client identifier is too long.');
       if (authRequest.codeChallengeMethod !== 'S256' || !/^[A-Za-z0-9_-]{43}$/.test(authRequest.codeChallenge || '')) throw new HttpError(400, 'PKCE S256 is required for every client.');
       if (authRequest.scope.some(scope => !OAUTH_SCOPES.includes(scope))) throw new HttpError(400, 'An unsupported permission was requested.');
       authRequest.scope = [...new Set(['computer:read', ...authRequest.scope])];
@@ -324,8 +361,7 @@ async function authorize(request, env) {
     if (request.method !== 'POST') return json({ error: 'Method not allowed.' }, 405, { allow: 'GET, POST' });
     const origin = request.headers.get('origin');
     if (origin && origin !== publicOrigin(env)) throw new HttpError(403, 'Cross-origin authorization form rejected.');
-    if (!request.headers.get('content-type')?.startsWith('application/x-www-form-urlencoded')) throw new HttpError(415, 'A URL-encoded authorization form is required.');
-    await rate(request, env, 'password', 8, 600);
+    if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/x-www-form-urlencoded')) throw new HttpError(415, 'A URL-encoded authorization form is required.');
     const form = new URLSearchParams(await readLimited(request, 8192));
     const handle = form.get('handle') || '';
     if (handle.length > 1024) throw new HttpError(400, 'Invalid consent handle.');
@@ -399,7 +435,13 @@ function provider(origin) {
       if (typeof clientMetadata.client_name === 'string' && clientMetadata.client_name.length > 120) return { description: 'Client name is too long.' };
     },
     // Expected OAuth errors are returned by the provider. Do not write tokens or bodies to logs.
-    onError() {},
+    onError(error) {
+      console.error('oauth_provider_error', {
+        status: error?.status,
+        code: error?.code,
+        category: error?.internal?.category,
+      });
+    },
   }));
   return providers.get(origin);
 }
@@ -407,20 +449,26 @@ function provider(origin) {
 async function route(request, env, context) {
   const origin = publicOrigin(env);
   const url = new URL(request.url);
-  const expectedHost = new URL(origin).host;
+  const originUrl = new URL(origin);
+  const expectedHost = originUrl.host;
   const isLoopback = url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]';
-  if (url.origin !== origin && !isLoopback && url.host !== expectedHost) return json({ error: 'Use the configured gateway hostname.' }, 421);
+  if (!isLoopback) {
+    if (url.host !== expectedHost) return json({ error: 'Use the configured gateway hostname.' }, 421);
+    if (url.protocol !== originUrl.protocol) return json({ error: 'HTTPS is required.' }, 400);
+  }
   if (url.href.length > 12000) return json({ error: 'URL is too long.' }, 414);
   if (!allowedOrigin(request.headers.get('origin'), origin)) return json({ error: 'Origin is not allowed.' }, 403);
   const path = url.pathname;
   if (path === '/bridge') {
     if (request.method !== 'GET' || request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return json({ error: 'A WebSocket connection is required.' }, 426);
+    await rate(request, env, 'bridge', 60, 60);
     const authorization = request.headers.get('authorization') || '';
     if (!authorization.startsWith('Bearer ') || !await equalSecret(authorization.slice(7), env.BRIDGE_TOKEN)) return json({ error: 'Unauthorized.' }, 401);
-    return relay(env).fetch(new Request('https://machine.internal/socket', request));
+    return callDo('relay-socket', () => relay(env).fetch(new Request('https://machine.internal/socket', request)));
   }
   if (path === '/healthz' && ['GET', 'HEAD'].includes(request.method)) {
-    const status = await relay(env).fetch('https://machine.internal/status');
+    await rate(request, env, 'healthz', 120, 60);
+    const status = await callDo('relay-status', () => relay(env).fetch('https://machine.internal/status'));
     if (request.method === 'HEAD') return new Response(null, { status: status.status, headers: status.headers });
     return status;
   }
@@ -429,7 +477,7 @@ async function route(request, env, context) {
     <p>这是个人专用的安全 MCP 远程代理网关。</p>
     <div class="endpoint-box">
       <label>MCP 服务端点：</label>
-      <code>${publicOrigin(env)}/mcp</code>
+      <code>${escapeHtml(origin)}/mcp</code>
       <p class="sub">认证协议：OAuth 2.1 + PKCE (RFC 7636)</p>
     </div>
     <section class="permissions">
@@ -442,14 +490,34 @@ async function route(request, env, context) {
     </section>
     <p class="foot">宿主机连接器需手动启动；电脑休眠或离线时无法执行请求。</p>
   `), { headers: pageHeaders() });
+  if (path.startsWith('/mcp/')) return json({ error: 'Not found.' }, 404);
   if (path === '/mcp') {
     const version = request.headers.get('mcp-protocol-version');
     if (version && !PROTOCOL_VERSIONS.has(version)) return json({ error: 'Unsupported MCP protocol version.' }, 400);
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'access-control-allow-methods': 'POST, OPTIONS', 'access-control-allow-headers': 'Authorization, Content-Type, Accept, MCP-Protocol-Version, Mcp-Session-Id', 'access-control-max-age': '600', 'cache-control': 'no-store' } });
+    await rate(request, env, 'mcp', 300, 60);
+  }
+  if (request.method === 'OPTIONS' && ['/register', '/oauth/token', '/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource/mcp'].includes(path)) {
+    const methods = path.startsWith('/.well-known/') ? 'GET, OPTIONS' : 'POST, OPTIONS';
+    return new Response(null, { status: 204, headers: { 'access-control-allow-methods': methods, 'access-control-allow-headers': 'Authorization, Content-Type, Accept', 'access-control-max-age': '600', 'cache-control': 'no-store' } });
+  }
+  if (path === '/authorize') {
+    if (request.method === 'GET') {
+      const clientId = url.searchParams.get('client_id') || '';
+      if (clientId.length > 2048) throw new HttpError(400, 'Client identifier is too long.');
+      await rate(request, env, 'authorize', 30, 600);
+    } else if (request.method === 'POST') {
+      const requestOrigin = request.headers.get('origin');
+      if (requestOrigin && requestOrigin !== origin) throw new HttpError(403, 'Cross-origin authorization form rejected.');
+      if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/x-www-form-urlencoded')) throw new HttpError(415, 'A URL-encoded authorization form is required.');
+      await rate(request, env, 'password', 8, 600);
+    } else {
+      return json({ error: 'Method not allowed.' }, 405, { allow: 'GET, POST' });
+    }
   }
   if (path === '/register') await rate(request, env, 'register', 20, 3600);
   if (path === '/oauth/token') await rate(request, env, 'token', 120, 60);
-  if (['/register', '/oauth/token', '/oauth/token/revoke', '/authorize', '/mcp'].includes(path) && request.method === 'POST') {
+  if (['/register', '/oauth/token', '/authorize', '/mcp'].includes(path) && request.method === 'POST') {
     // Do not hold the globally serialized authority while an Internet client
     // drips an upload. The DO only receives a bounded, fully buffered body.
     const body = await readLimited(request, path === '/mcp' ? MAX_RPC_BYTES : path === '/authorize' ? 8192 : 16384);
@@ -460,12 +528,12 @@ async function route(request, env, context) {
   }
   // Password rotation selects a new authorization generation automatically;
   // grants and clients issued under the retired credential cannot authenticate.
-  const generation = [...await sha256(env.OWNER_PASSWORD_HASH)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  const generation = await passwordGeneration(env.OWNER_PASSWORD_HASH);
   // v2 retires grants that older releases may have retained after a CIMD downgrade.
-  const response = await env.AUTH.getByName(`owner-v2-${generation}`).fetch(request);
+  const response = await callDo('auth', () => env.AUTH.getByName(`owner-v2-${generation}`).fetch(request));
   if (path === '/mcp' && response.status === 200) {
     const envelope = await response.json();
-    return relay(env).fetch('https://machine.internal/rpc', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(envelope), signal: request.signal });
+    return callDo('relay-rpc', () => relay(env).fetch('https://machine.internal/rpc', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(envelope), signal: request.signal }));
   }
   return response;
 }
@@ -483,27 +551,34 @@ export class AuthCoordinator {
   async fetch(request) {
     const pathname = new URL(request.url).pathname;
     let lane = pathname === '/mcp' ? 'mcp' : pathname === '/authorize' ? request.method === 'GET' ? 'authorization' : 'consent' : pathname.startsWith('/oauth/token') ? 'token' : 'other';
-    if (lane === 'mcp' && request.method === 'POST') {
+    if (lane === 'mcp' && request.method === 'POST' && request.headers.get('authorization')?.startsWith('Bearer ')) {
       try {
         const body = await request.clone().json();
         if (body.method === 'tools/call' && body.params?.name === 'stop_command') lane = 'stop';
       } catch { /* The provider handles invalid requests without bypassing auth. */ }
     }
-    return await this.transactions.run(lane, async () => {
-      const store = new AuthStore(this.state.storage);
-      const response = await this.handle(request.clone(), store);
-      return { response, writes: store.pending.size > 0, commit: () => store.commit() };
-    }, request.signal) || json({ error: 'temporarily_unavailable' }, 503);
+    try {
+      return await this.transactions.run(lane, async () => {
+        const store = new AuthStore(this.state.storage);
+        const response = await this.handle(request.clone(), store);
+        return { response, writes: store.pending.size > 0, commit: () => store.commit() };
+      }, request.signal) || json({ error: 'temporarily_unavailable' }, 503);
+    } catch (error) {
+      if (error instanceof HttpError) {
+        return json({ error: error.message }, error.status, error.retryAfter ? { 'retry-after': String(error.retryAfter) } : {});
+      }
+      throw error;
+    }
   }
 
   async handle(request, store) {
     const env = { ...this.env, OAUTH_KV: store };
     const path = new URL(request.url).pathname;
     let form, refreshToken, refreshRecord;
-    if (['/oauth/token', '/oauth/token/revoke'].includes(path) && request.method === 'POST' && request.headers.get('content-type')?.toLowerCase().startsWith('application/x-www-form-urlencoded')) {
+    if (path === '/oauth/token' && request.method === 'POST' && request.headers.get('content-type')?.toLowerCase().startsWith('application/x-www-form-urlencoded')) {
       form = new URLSearchParams(await request.clone().text());
       for (const name of new Set(form.keys())) if (name !== 'resource' && form.getAll(name).length !== 1) return json({ error: 'invalid_request' }, 400);
-      if (form.get('grant_type') === 'authorization_code' && form.get('code') && await store.codeWasUsed(form.get('code'))) return json({ error: 'invalid_grant' }, 400);
+      if (form.get('grant_type') === 'authorization_code' && form.get('code') && (form.get('code').length > 1024 || await store.codeWasUsed(form.get('code')))) return json({ error: 'invalid_grant' }, 400);
       if (form.get('grant_type') === 'refresh_token') {
         refreshToken = form.get('refresh_token');
         if (!refreshToken || refreshToken.length > 1024) return json({ error: 'invalid_grant' }, 400);
@@ -562,16 +637,25 @@ export default {
     try { result = await route(request, env, context); }
     catch (error) {
       const status = error instanceof HttpError ? error.status : 500;
+      if (status === 500) {
+        console.error('gateway_unhandled_error', { path: safePathForLog(request.url), name: error?.name || 'Error' });
+      }
       result = json({ error: status === 500 ? 'The gateway is temporarily unavailable.' : error.message }, status, error.retryAfter ? { 'retry-after': String(error.retryAfter) } : {});
     }
     // A 101 response owns a live socket and cannot be reconstructed like an HTTP response.
     if (result.status === 101) return result;
     const headers = new Headers(result.headers);
+    let configuredOrigin = '';
+    try { configuredOrigin = publicOrigin(env); } catch {}
     const origin = request.headers.get('origin');
-    if (origin && allowedOrigin(origin, env.PUBLIC_ORIGIN)) {
+    const contentType = headers.get('content-type') || '';
+    if (origin && configuredOrigin && allowedOrigin(origin, configuredOrigin) && !contentType.toLowerCase().includes('text/html')) {
       headers.set('access-control-allow-origin', origin);
-      headers.set('access-control-expose-headers', 'WWW-Authenticate, MCP-Session-Id, MCP-Protocol-Version');
-      headers.append('vary', 'Origin');
+      const exposed = new Set((headers.get('access-control-expose-headers') || '').split(',').map(v => v.trim()).filter(Boolean));
+      for (const name of ['WWW-Authenticate', 'MCP-Session-Id', 'MCP-Protocol-Version', 'Retry-After']) exposed.add(name);
+      headers.set('access-control-expose-headers', [...exposed].join(', '));
+      const vary = (headers.get('vary') || '').split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
+      if (!vary.includes('origin')) headers.append('vary', 'Origin');
     }
     headers.set('x-content-type-options', 'nosniff');
     headers.set('strict-transport-security', 'max-age=31536000');

@@ -138,4 +138,19 @@ test('Worker enforces OAuth, browser-bound consent, PKCE, scopes and an authenti
   assert.equal((await request('/mcp', { method: 'POST', headers: readonlyHeaders, body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list' }) })).status, 200);
   assert.equal((await request('/mcp', { method: 'POST', headers: readonlyHeaders, body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'write_file', arguments: {} } }) })).status, 403);
   assert.equal((await request('/mcp', { method: 'POST', headers: readonlyHeaders, body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'exec_command', arguments: {} } }) })).status, 403);
+
+  // Security & HTTP boundary regression checks:
+  assert.equal((await instance.dispatchFetch(`http://bridge.example.test/healthz`, { redirect: 'manual' })).status, 400);
+  const plainPkce = await request(`/authorize?${new URLSearchParams({ client_id: client.client_id, redirect_uri: 'https://chatgpt.com/connector/oauth/test', response_type: 'code', code_challenge_method: 'plain', code_challenge: verifier, state: 'x' })}`);
+  assert.equal(plainPkce.status, 302);
+  assert.equal(new URL(plainPkce.headers.get('location')).searchParams.get('error'), 'invalid_request');
+  assert.equal((await request(`/authorize?${new URLSearchParams({ client_id: client.client_id, redirect_uri: 'https://chatgpt.com/connector/oauth/test', response_type: 'code', code_challenge_method: 'S256', code_challenge: challenge, scope: 'computer:read bogus:scope', state: 'x' })}`)).status, 400);
+  assert.equal((await request('/authorize', { method: 'POST', headers: { origin: 'https://chatgpt.com', 'content-type': 'application/x-www-form-urlencoded' }, body: 'handle=x&decision=approve&password=y' })).status, 403);
+  assert.equal((await request('/authorize', { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{}' })).status, 415);
+  assert.equal((await request('/mcp/extra', { method: 'POST', body: '{}' })).status, 404);
+  const htmlCors = await request('/', { headers: { origin: 'https://chatgpt.com' } });
+  assert.equal(htmlCors.headers.get('access-control-allow-origin'), null);
+  const apiCors = await request('/mcp', { method: 'POST', headers: { origin: 'https://chatgpt.com' }, body: '{}' });
+  assert.equal(apiCors.headers.get('access-control-allow-origin'), 'https://chatgpt.com');
+  assert.ok(apiCors.headers.get('access-control-expose-headers')?.includes('Retry-After'));
 });

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // This file is part of AgentDock Bridge and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
 import { AuthQueue } from './auth-queue.mjs';
+import { HttpError } from './security.mjs';
 
 /** External preparation never owns the commit lock. Optimistic revision checks
  * make completed transactions serializable without making network latency global.
  */
 export class AuthTransactions {
-  constructor({ now = Date.now, timeoutMs = 25000, attempts = 4, limits = { authorization: 4, consent: 4, token: 8, mcp: 32, stop: 4, other: 4 }, retain = () => {} } = {}) {
+  constructor({ now = Date.now, timeoutMs = 25000, attempts = 12, limits = { authorization: 4, consent: 4, token: 8, mcp: 32, stop: 4, other: 16 }, retain = () => {} } = {}) {
     this.now = now;
     this.timeoutMs = timeoutMs;
     this.attempts = attempts;
@@ -35,15 +36,23 @@ export class AuthTransactions {
           // Nothing awaits between taking the revision and starting preparation.
           // Any interleaved committed write invalidates the entire prepared view.
           const revision = this.revision;
-          const prepared = await prepare();
+          let prepared;
+          try {
+            prepared = await prepare();
+          } catch (error) {
+            if (!(error instanceof HttpError) && revision !== this.revision && !expired()) continue;
+            throw error;
+          }
           if (expired()) return null;
           const committed = await this.queue.run(() => {
             if (expired()) return null;
             if (revision !== this.revision) return false;
             // This callback is synchronous: it cannot release the commit lock
             // while storage writes, issuance or revocation are still in flight.
-            prepared.commit();
-            if (prepared.writes) this.revision++;
+            if (prepared.writes) {
+              prepared.commit();
+              this.revision++;
+            }
             return true;
           }, signal);
           if (committed === true) return prepared.response;

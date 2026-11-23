@@ -12,6 +12,8 @@ export class BridgeRelay extends DurableObject {
     this.env = env;
     this.pending = new Map();
     this.nextCleanup = 0;
+    ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL)');
+    ctx.storage.sql.exec('CREATE INDEX IF NOT EXISTS rate_limits_until ON rate_limits(until)');
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'));
   }
 
@@ -25,10 +27,19 @@ export class BridgeRelay extends DurableObject {
     for (const socket of this.ctx.getWebSockets('machine')) {
       const attachment = socket.deserializeAttachment();
       const acceptedAt = attachment?.acceptedAt;
-      const heartbeat = this.ctx.getWebSocketAutoResponseTimestamp(socket)?.getTime();
+      const autoBeat = this.ctx.getWebSocketAutoResponseTimestamp(socket)?.getTime();
+      const manualBeat = attachment?.lastPingAt;
+      const heartbeat = Number.isFinite(autoBeat) || Number.isFinite(manualBeat)
+        ? Math.max(Number.isFinite(autoBeat) ? autoBeat : -Infinity, Number.isFinite(manualBeat) ? manualBeat : -Infinity)
+        : undefined;
       const state = connectionLiveness(acceptedAt, heartbeat);
-      if (socket.readyState === WebSocket.OPEN && state.reserved && attachment?.credentialVersion === this.credentialVersion) live.push({ socket, ...state });
-      else { try { socket.close(1001, 'Connector heartbeat expired'); } catch {} this.disconnected(socket); }
+      const validCredential = attachment?.credentialVersion === this.credentialVersion;
+      if (socket.readyState === WebSocket.OPEN && state.reserved && validCredential) live.push({ socket, ...state });
+      else {
+        const reason = validCredential ? 'Connector heartbeat expired' : 'Connector credentials changed.';
+        try { socket.close(validCredential ? 1001 : 1008, reason); } catch {}
+        this.disconnected(socket);
+      }
     }
     return live;
   }
@@ -47,7 +58,6 @@ export class BridgeRelay extends DurableObject {
     const path = new URL(request.url).pathname;
     if (path === '/status') { const online = !!this.connector(); return json({ ok: online, connectorOnline: online }, online ? 200 : 503); }
     if (path === '/limit' && request.method === 'POST') return this.limit(request);
-    if (path === '/guard' && request.method === 'POST') return this.guard(request);
     if (path === '/socket' && request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
       if (this.liveConnections().length) return json({ error: 'A connector is already online or completing its heartbeat.' }, 409);
       const pair = new WebSocketPair();
@@ -99,46 +109,24 @@ export class BridgeRelay extends DurableObject {
     const value = await request.json();
     if (typeof value.key !== 'string' || !/^[a-z0-9:-]{1,160}$/.test(value.key) || !Number.isInteger(value.maximum) || value.maximum < 1 || value.maximum > 1000 || !Number.isInteger(value.seconds) || value.seconds < 1 || value.seconds > 86400) return json({ error: 'Invalid limiter input.' }, 400);
     const now = Date.now();
-    const key = `limit:${value.key}`;
-    const result = await this.ctx.storage.transaction(async storage => {
-      const previous = await storage.get(key);
-      const bucket = previous && previous.until > now ? previous : { count: 0, until: now + value.seconds * 1000 };
-      if (bucket.count >= value.maximum) return { allowed: false, retryAfter: Math.max(1, Math.ceil((bucket.until - now) / 1000)) };
-      bucket.count++;
-      await storage.put(key, bucket);
+    const result = this.ctx.storage.transactionSync(() => {
+      const row = this.ctx.storage.sql.exec('SELECT count, until FROM rate_limits WHERE key = ?', value.key).toArray()[0];
+      const active = row && row.until > now;
+      const count = active ? row.count : 0;
+      const until = active ? row.until : now + value.seconds * 1000;
+      if (count >= value.maximum) return { allowed: false, retryAfter: Math.max(1, Math.ceil((until - now) / 1000)) };
+      this.ctx.storage.sql.exec(
+        'INSERT INTO rate_limits(key, count, until) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET count = excluded.count, until = excluded.until',
+        value.key,
+        count + 1,
+        until,
+      );
       return { allowed: true, retryAfter: 0 };
     });
     if (now >= this.nextCleanup) {
       this.nextCleanup = now + 3600000;
-      const entries = await this.ctx.storage.list({ prefix: 'limit:', limit: 1000 });
-      const expired = [...entries].filter(([, item]) => item.until < now).map(([entry]) => entry);
-      if (expired.length) await this.ctx.storage.delete(expired);
-      const guards = await this.ctx.storage.list({ prefix: 'guard:', limit: 1000 });
-      const oldGuards = [...guards].filter(([, item]) => item.until < now).map(([entry]) => entry);
-      if (oldGuards.length) await this.ctx.storage.delete(oldGuards);
+      this.ctx.storage.sql.exec('DELETE FROM rate_limits WHERE until <= ?', now);
     }
-    return json(result);
-  }
-
-  async guard(request) {
-    const { action, key, lease } = await request.json();
-    if (!['claim', 'commit', 'release', 'consume'].includes(action) || typeof key !== 'string' || !/^(?:consent|code):[a-f0-9]{64}$/.test(key)) return json({ error: 'Invalid guard.' }, 400);
-    const now = Date.now();
-    const storageKey = `guard:${key}`;
-    const result = await this.ctx.storage.transaction(async storage => {
-      const previous = await storage.get(storageKey);
-      const current = previous && previous.until > now ? previous : null;
-      if (action === 'consume' || action === 'claim') {
-        if (current) return { acquired: false };
-        const id = crypto.randomUUID();
-        await storage.put(storageKey, { state: action === 'consume' ? 'consumed' : 'pending', lease: id, until: now + (action === 'consume' ? 600000 : 120000) });
-        return { acquired: true, lease: id };
-      }
-      if (!current || current.state !== 'pending' || typeof lease !== 'string' || current.lease !== lease) return { acquired: false };
-      if (action === 'release') await storage.delete(storageKey);
-      else await storage.put(storageKey, { state: 'consumed', until: now + 600000 });
-      return { acquired: true };
-    });
     return json(result);
   }
 
@@ -163,7 +151,12 @@ export class BridgeRelay extends DurableObject {
     if (typeof data !== 'string' || new TextEncoder().encode(data).byteLength > MAX_REPLY_BYTES) { socket.close(1009, 'Invalid response size.'); this.disconnected(socket); return; }
     let message;
     try { message = JSON.parse(data); } catch { socket.close(1003, 'Expected JSON.'); this.disconnected(socket); return; }
-    if (message?.type === 'ping') { socket.send('{"type":"pong"}'); return; }
+    if (message?.type === 'ping') {
+      const attachment = socket.deserializeAttachment();
+      if (attachment) socket.serializeAttachment({ ...attachment, lastPingAt: Date.now() });
+      socket.send('{"type":"pong"}');
+      return;
+    }
     if (message?.type === 'pong') return;
     if (message?.type !== 'response' || typeof message.id !== 'string') return;
     const pending = this.pending.get(message.id);
@@ -177,6 +170,10 @@ export class BridgeRelay extends DurableObject {
   disconnected(socket) {
     for (const [id, request] of this.pending) if (request.socket === socket) this.finish(id, json({ error: 'Computer disconnected. Operations are not replayed automatically.' }, 502));
   }
-  webSocketClose(socket, code) { this.disconnected(socket); try { socket.close(code === 1005 ? 1000 : code); } catch {} }
+  webSocketClose(socket, code) {
+    this.disconnected(socket);
+    const safeCode = [1005, 1006, 1015].includes(code) || code < 1000 || code >= 5000 ? 1000 : code;
+    try { socket.close(safeCode); } catch {}
+  }
   webSocketError(socket) { this.disconnected(socket); }
 }

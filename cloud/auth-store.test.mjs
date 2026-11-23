@@ -103,3 +103,34 @@ test('grant metadata preserves client, resource and callback on updates and norm
   next.commit();
   assert.deepEqual((await new AuthStore(storage).list({ prefix: 'grant:' })).keys[0].metadata, expected);
 });
+
+test('AuthStore supports astral-plane Unicode keys, skips empty commits, and purges refresh rows on revokeFamily', async t => {
+  const storage = storageFixture(t);
+  let beginCount = 0;
+  const origTxSync = storage.transactionSync;
+  storage.transactionSync = cb => { beginCount++; return origTxSync(cb); };
+  const readOnly = new AuthStore(storage);
+  await readOnly.get('missing');
+  readOnly.commit();
+  assert.equal(beginCount, 0);
+
+  const expiresAt = Math.floor(Date.now() / 1000) + 300;
+  const seed = new AuthStore(storage);
+  await seed.put('token:😀:one', '1');
+  await seed.put('grant:owner:fam', JSON.stringify({ clientId: 'c1', scope: ['computer:read', 'offline_access'], expiresAt }));
+  await seed.recordIssuedRefresh('owner:fam:r1');
+  await seed.recordIssuedRefresh('owner:fam:r2', 'owner:fam:r1');
+  seed.commit();
+  assert.equal(beginCount, 1);
+
+  const listed = await new AuthStore(storage).list({ prefix: 'token:' });
+  assert.deepEqual(listed.keys.map(k => k.name), ['token:😀:one']);
+
+  const revoker = new AuthStore(storage);
+  await revoker.revokeFamily(await revoker.refreshRecord('owner:fam:r2'));
+  revoker.commit();
+  const check = new AuthStore(storage);
+  assert.equal(await check.refreshRecord('owner:fam:r1'), null);
+  assert.equal(await check.refreshRecord('owner:fam:r2'), null);
+  assert.equal((await check.list({ prefix: 'refresh-by-grant:owner:fam:' })).keys.length, 0);
+});
