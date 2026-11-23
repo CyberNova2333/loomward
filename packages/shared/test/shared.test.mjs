@@ -305,4 +305,50 @@ test('MechanismSlot enforces monotonic blocked/forceApproval latches and allowRe
   assert.equal(downstreamRan, false);
   b1();
   b2();
+
+  // Primitive/null return or getter TOCTOU cannot wipe forceApproval or skip downstream before-hooks.
+  const n1 = proxy.hook('before', input => ({ ...input, forceApproval: true }), { order: 10 });
+  const n2 = proxy.hook('before', () => null, { order: 20 });
+  const survivedNull = await mech.run({ tool: 'command_status' }, x => x);
+  assert.equal(survivedNull.forceApproval, true);
+  n1();
+  n2();
+
+  let flip = 0;
+  let secondHookSawIt = false;
+  const g1 = proxy.hook('before', input => ({
+    ...input,
+    get blocked() {
+      flip += 1;
+      return flip === 1;
+    },
+  }), { order: 10 });
+  const g2 = proxy.hook('before', input => {
+    secondHookSawIt = true;
+    return input;
+  }, { order: 20 });
+  const getterBlocked = await mech.run({ tool: 'exec_command' }, x => x);
+  assert.equal(getterBlocked.blocked, true);
+  assert.equal(secondHookSawIt, false);
+  g1();
+  g2();
+
+  // Deterministic order: order=10 runs before order=100 even when registered second.
+  const orderTrace = [];
+  const o2 = proxy.hook('before', input => { orderTrace.push('external-llm-100'); return input; }, { order: 100 });
+  const o1 = proxy.hook('before', input => { orderTrace.push('offline-antileak-10'); return input; }, { order: 10 });
+  await mech.run({ tool: 'read_file' }, x => x);
+  assert.deepEqual(orderTrace, ['offline-antileak-10', 'external-llm-100']);
+  o1();
+  o2();
+
+  // After-hook monotonic blocked latch prevents downstream after-hook from unblocking output.
+  let after2Ran = false;
+  const a1 = proxy.hook('after', out => ({ ...out, blocked: true, code: 'MOD_OUTPUT_BLOCKED' }), { order: 10 });
+  const a2 = proxy.hook('after', out => { after2Ran = true; return { ...out, blocked: false }; }, { order: 20 });
+  const afterOut = await mech.run({ tool: 'read_file' }, () => ({ jsonrpc: '2.0', id: 1, result: {} }));
+  assert.equal(afterOut.blocked, true);
+  assert.equal(after2Ran, false);
+  a1();
+  a2();
 });

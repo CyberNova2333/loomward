@@ -9,13 +9,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import {
+  ToolBlockedError,
+  applyOutputRedaction,
   buildContentInspectRequest,
   validateConsolePanelDecl,
   validateContentInspectVerdict,
 } from '@loomward/shared';
 import { startDualOriginConsole, connectControlSocket } from '../src/index.mjs';
 import { startLoomWardDaemon } from '../../host/src/daemon.mjs';
-import { ToolBlockedError } from '../../host/src/pipeline.mjs';
 import { issueSetupTicketSync } from '../../../local/webui-auth.mjs';
 import { toBase64Url } from '../../../local/webauthn.mjs';
 import { digest as policyDigest } from '../../../local/request-policy.mjs';
@@ -213,6 +214,16 @@ test('Dual-Origin Console enforces physical isolation, single-use handoff, linke
   // Built zero-CDN assets are served with strict CSP & CORP on their respective origins.
   const trustHome = await httpCall(dual.trust.url, '/');
   assert.equal(trustHome.status, 200);
+  // Top-level cross-port/cross-host loopback navigation (e.g. window.open from Trust Origin to Console Origin) is permitted on GET /
+  const navConsoleHome = await httpCall(dual.console.url, '/', {
+    headers: { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' },
+  });
+  assert.equal(navConsoleHome.status, 200);
+  // But subresource or API requests with Sec-Fetch-Site: same-site are strictly rejected with 403.
+  const crossSiteScript = await httpCall(dual.console.url, '/console.js', {
+    headers: { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'script' },
+  });
+  assert.equal(crossSiteScript.status, 403);
   assert.equal(trustHome.headers['cross-origin-resource-policy'], 'same-origin');
   assert.match(trustHome.headers['content-security-policy'], /script-src 'self'/);
   let trustCsrf = trustHome.text.match(/<meta name="loomward-csrf" content="([^"]+)"/)?.[1];
@@ -669,7 +680,7 @@ test('Cordis kernel + Dual-Origin Console host an isolated standalone-style LLM 
               categories: ['privacy.pii'],
               redactedPayload: text.replace('PII_CANARY_123', '[REDACTED_PII]'),
             }, { stage: 'output' });
-            return { ...output, result: { ...output.result, content: [{ type: 'text', text: v.redactedPayload }] } };
+            return applyOutputRedaction(output, v);
           }
           return output;
         });

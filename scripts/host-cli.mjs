@@ -94,17 +94,19 @@ function shellQuote(value) {
 function writePrivateJsonSync(filePath, data) {
   const dir = path.dirname(filePath);
   const temp = path.join(dir, `.tmp-${crypto.randomUUID()}.json`);
-  const fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
+  let fd;
   try {
+    fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
     fs.writeFileSync(fd, JSON.stringify(data, null, 2), 'utf8');
     fs.fsyncSync(fd);
-  } finally {
     fs.closeSync(fd);
-  }
-  try {
+    fd = undefined;
     fs.chmodSync(temp, 0o600);
     fs.renameSync(temp, filePath);
   } catch (error) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch {}
+    }
     fs.rmSync(temp, { force: true });
     throw error;
   }
@@ -113,17 +115,19 @@ function writePrivateJsonSync(filePath, data) {
 function writeExecutableWrapperSync(filePath, content) {
   const dir = path.dirname(filePath);
   const temp = path.join(dir, `.tmp-${crypto.randomUUID()}.sh`);
-  const fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o700);
+  let fd;
   try {
+    fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o700);
     fs.writeFileSync(fd, content, 'utf8');
     fs.fsyncSync(fd);
-  } finally {
     fs.closeSync(fd);
-  }
-  try {
+    fd = undefined;
     fs.chmodSync(temp, 0o700);
     fs.renameSync(temp, filePath);
   } catch (error) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch {}
+    }
     fs.rmSync(temp, { force: true });
     throw error;
   }
@@ -187,6 +191,10 @@ function inspectDockerInstallation(dockerPath, context, image) {
 }
 
 function copyTreeFilteredSync(sourceDir, targetDir, { skipDirs = new Set() } = {}) {
+  const rootStat = fs.lstatSync(sourceDir);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error(`Refusing symbolic link or non-directory runtime source root: ${sourceDir}`);
+  }
   fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 });
   for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
     if (entry.name === 'node_modules' || entry.name === '__pycache__' || entry.name.startsWith('.')) continue;
@@ -329,15 +337,12 @@ export async function installHardened({
   for (const file of ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml']) {
     const src = path.join(sourceRoot, file);
     if (!fs.existsSync(src)) continue;
+    if (fs.lstatSync(src).isSymbolicLink()) {
+      throw new Error(`Refusing symbolic link in runtime manifest: ${src}`);
+    }
     const dst = path.join(destination, file);
     fs.copyFileSync(src, dst);
     fs.chmodSync(dst, 0o600);
-  }
-  let rpmManifestHash = null;
-  if (fs.existsSync(path.join(destination, 'packages', 'shared', 'src', 'index.mjs'))) {
-    const frozenRpm = await generateWorkspaceRpmForRelease(sourceRoot, destination);
-    writePrivateJsonSync(path.join(destination, 'rpm.json'), frozenRpm);
-    rpmManifestHash = frozenRpm.manifestHash;
   }
 
   if (!skipDependencyInstall) {
@@ -349,6 +354,16 @@ export async function installHardened({
       timeout: 180000,
       stdio: 'inherit',
     });
+  }
+
+  let rpmManifestHash = null;
+  if (fs.existsSync(path.join(destination, 'packages', 'shared', 'src', 'index.mjs'))) {
+    const frozenRpm = await generateWorkspaceRpmForRelease(sourceRoot, destination);
+    if (!/^sha256:[a-f0-9]{64}$/.test(frozenRpm?.manifestHash || '')) {
+      throw new Error('Protected runtime RPM manifest generation failed.');
+    }
+    writePrivateJsonSync(path.join(destination, 'rpm.json'), frozenRpm);
+    rpmManifestHash = frozenRpm.manifestHash;
   }
 
   const configFile = assertPrivateFile(path.join(statePath, 'config.json'));
@@ -418,7 +433,15 @@ export async function installHardened({
     sha256: collectReleaseHashes(destination),
   };
   writePrivateJsonSync(path.join(statePath, 'installation.json'), manifest);
-  return { runtime: destination, workspace: workspacePath, image: imageId, context: chosenContext, started: false };
+  return {
+    runtime: destination,
+    workspace: workspacePath,
+    image: imageId,
+    context: chosenContext,
+    allowOutbound: Boolean(allowOutbound),
+    ...(rpmManifestHash ? { rpmManifestHash } : {}),
+    started: false,
+  };
 }
 
 function readTrustedConfig(stateDir, runtimeRoot) {

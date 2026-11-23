@@ -22,12 +22,14 @@ export class ImplSlot {
   #entries = new Map();
   #decl;
   #authorizer;
+  #capability;
   #userPick;
 
-  constructor(decl, authorizer = () => undefined) {
+  constructor(decl, authorizer = () => undefined, { capability = null } = {}) {
     if (!decl?.name) throw new SlotError('ImplSlot requires a declaration with a name.');
     this.#decl = Object.freeze({ ...decl });
     this.#authorizer = authorizer;
+    this.#capability = capability;
   }
 
   get decl() {
@@ -38,11 +40,17 @@ export class ImplSlot {
     return own(this).#decl.name;
   }
 
-  registerBuiltin(name, impl) {
-    if (this.ctx) throw new SlotError('Builtin implementations cannot be registered via tracked proxy.');
+  registerBuiltin(name, impl, token) {
     const self = own(this);
+    if (this.ctx) throw new SlotError('Builtin implementations cannot be registered via tracked proxy.');
+    if (self.#capability !== null && token !== self.#capability) {
+      throw new SlotError(`Builtin registration on ${self.#decl.name} requires kernel capability token.`);
+    }
+    if (self.#decl.cardinality === 'single' && self.#entries.size > 0) {
+      throw new SlotError(`ImplSlot ${self.#decl.name} has cardinality="single" and already has an implementation.`);
+    }
     if (self.#entries.has(name)) throw new SlotError(`ImplSlot ${self.#decl.name} already has ${name}.`);
-    self.#entries.set(name, { impl, builtin: true, seq: seqCounter++ });
+    self.#entries.set(name, { impl, builtin: true, rootOwned: true, seq: seqCounter++ });
   }
 
   register(name, impl) {
@@ -51,12 +59,17 @@ export class ImplSlot {
     if (!caller || typeof caller.effect !== 'function') {
       throw new SlotError('ImplSlot.register requires a tracked Cordis caller context.');
     }
-    const req = { kind: 'register', slot: self.#decl.name, name };
-    self.#authorizer()?.authorize(caller, req);
+    if (self.#decl.cardinality === 'single' && self.#entries.size > 0) {
+      throw new SlotError(`ImplSlot ${self.#decl.name} has cardinality="single" and already has an implementation.`);
+    }
     if (self.#entries.has(name)) {
       throw new SlotError(`ImplSlot ${self.#decl.name} already has ${name}.`);
     }
-    const entry = { impl, builtin: false, seq: seqCounter++ };
+    const req = { kind: 'register', slot: self.#decl.name, name };
+    const auth = self.#authorizer();
+    auth?.authorize(caller, req);
+    const rootOwned = Boolean(auth?.isRootCaller?.(caller));
+    const entry = { impl, builtin: false, rootOwned, seq: seqCounter++ };
     const dispose = caller.effect(() => {
       self.#entries.set(name, entry);
       return () => {
@@ -71,18 +84,31 @@ export class ImplSlot {
     };
   }
 
-  select(name) {
+  select(name, token) {
     const caller = this.ctx;
     const self = own(this);
-    if (caller) self.#authorizer()?.authorize(caller, { kind: 'select', slot: self.#decl.name });
+    const hasKernelCap = self.#capability !== null && token === self.#capability;
+    if (!hasKernelCap) {
+      const auth = self.#authorizer();
+      if (auth) {
+        if (!caller) throw new SlotError(`ImplSlot.select on ${self.#decl.name} requires an authorized caller.`);
+        auth.authorize(caller, { kind: 'select', slot: self.#decl.name });
+      }
+    }
     if (name !== undefined && !self.#entries.has(name)) {
       throw new SlotError(`Unknown implementation "${name}" in slot ${self.#decl.name}.`);
     }
     self.#userPick = name;
   }
 
+  #assertReadAllowed(caller) {
+    if (!caller || this.#decl.policy === 'public') return;
+    this.#authorizer()?.authorize(caller, { kind: 'read', slot: this.#decl.name });
+  }
+
   current() {
     const self = own(this);
+    self.#assertReadAllowed(this.ctx);
     if (self.#userPick && self.#entries.has(self.#userPick)) {
       return { name: self.#userPick, impl: self.#entries.get(self.#userPick).impl };
     }
@@ -92,10 +118,12 @@ export class ImplSlot {
 
   entries() {
     const self = own(this);
+    self.#assertReadAllowed(this.ctx);
     return [...self.#entries.entries()].map(([name, entry]) => ({
       name,
       impl: entry.impl,
       builtin: entry.builtin,
+      rootOwned: entry.rootOwned,
     }));
   }
 
@@ -132,7 +160,7 @@ export class MechanismSlot {
     return own(this).#hooks.replace.length > 0;
   }
 
-  hook(phase, handler) {
+  hook(phase, handler, { order = 100 } = {}) {
     if (!['before', 'after', 'replace'].includes(phase)) {
       throw new SlotError(`Invalid mechanism phase: ${String(phase)}`);
     }
@@ -142,14 +170,19 @@ export class MechanismSlot {
     if (phase === 'replace' && self.#decl.allowReplace === false) {
       throw new SlotError(`MechanismSlot ${self.#decl.name} forbids replace hooks to protect core invariants.`);
     }
+    if (phase === 'replace' && self.#hooks.replace.length > 0) {
+      throw new SlotError(`MechanismSlot ${self.#decl.name} already has a replace hook.`);
+    }
     if (!caller || typeof caller.effect !== 'function') {
       throw new SlotError('MechanismSlot.hook requires a tracked Cordis caller context.');
     }
+    const normalizedOrder = Number.isFinite(order) ? Math.trunc(order) : 100;
     const req = { kind: 'hook', slot: self.#decl.name, phase };
     self.#authorizer()?.authorize(caller, req);
-    const entry = { handler, seq: seqCounter++ };
+    const entry = { handler, order: normalizedOrder, seq: seqCounter++ };
     const dispose = caller.effect(() => {
       self.#hooks[phase].push(entry);
+      self.#hooks[phase].sort((a, b) => (a.order - b.order) || (a.seq - b.seq));
       return () => {
         const list = self.#hooks[phase];
         const idx = list.indexOf(entry);
@@ -164,23 +197,40 @@ export class MechanismSlot {
 
   async run(input, baseAction) {
     const self = own(this);
-    let currentInput = input;
-    let forcedApproval = Boolean(input && typeof input === 'object' && input.forceApproval === true);
-    for (const item of [...self.#hooks.before]) {
-      const next = await item.handler(currentInput);
-      if (next !== undefined) {
-        if (next && typeof next === 'object') {
-          if (next.forceApproval === true) forcedApproval = true;
-          currentInput = forcedApproval && next.forceApproval !== true
-            ? { ...next, forceApproval: true }
-            : next;
-          // Monotonic deny latch: once any before-hook blocks, later hooks cannot inspect or un-block it.
-          if (currentInput.blocked === true) break;
-        } else {
-          currentInput = next;
+    const isObjectInput = Boolean(input && typeof input === 'object' && !Array.isArray(input));
+    let currentInput = isObjectInput ? { ...input } : input;
+    let forcedApproval = Boolean(isObjectInput && currentInput.forceApproval === true);
+    let alreadyBlocked = Boolean(isObjectInput && currentInput.blocked === true);
+
+    if (!alreadyBlocked) {
+      for (const item of [...self.#hooks.before]) {
+        const next = await item.handler(currentInput);
+        if (next === undefined) continue;
+        if (!next || typeof next !== 'object' || Array.isArray(next)) {
+          // Non-object return cannot erase monotonic safety latches or structured invocation input.
+          if (isObjectInput && forcedApproval) {
+            currentInput = { ...currentInput, forceApproval: true };
+          }
+          continue;
+        }
+        // Read getter-sensitive security flags ONCE into plain booleans to prevent getter TOCTOU.
+        const nextBlocked = next.blocked === true;
+        const nextForceApproval = next.forceApproval === true;
+        if (nextForceApproval) forcedApproval = true;
+        const materialized = {
+          ...next,
+          ...(forcedApproval ? { forceApproval: true } : {}),
+          ...(nextBlocked ? { blocked: true } : {}),
+        };
+        currentInput = materialized;
+        // Monotonic deny latch: once any before-hook blocks, later hooks cannot inspect or un-block it.
+        if (nextBlocked) {
+          alreadyBlocked = true;
+          break;
         }
       }
     }
+
     let output;
     if (self.#decl.allowReplace !== false && self.#hooks.replace.length > 0) {
       const replacer = self.#hooks.replace[self.#hooks.replace.length - 1];
@@ -188,9 +238,22 @@ export class MechanismSlot {
     } else {
       output = await baseAction(currentInput);
     }
+
     for (const item of [...self.#hooks.after]) {
       const next = await item.handler(output, currentInput);
-      if (next !== undefined) output = next;
+      if (next === undefined) continue;
+      if (next && typeof next === 'object' && !Array.isArray(next)) {
+        const nextBlocked = next.blocked === true;
+        if (nextBlocked) {
+          output = {
+            ...next,
+            blocked: true,
+          };
+          // Monotonic output deny latch: later after-hooks cannot un-block or observe blocked output.
+          break;
+        }
+      }
+      output = next;
     }
     return output;
   }

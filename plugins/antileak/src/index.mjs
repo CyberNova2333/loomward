@@ -5,7 +5,7 @@ import {
   buildContentInspectRequest,
   validateConsolePanelDecl,
 } from '@loomward/shared';
-import { createAntileakEngineRunner } from './runner.mjs';
+import { MAX_INPUT_BYTES, createAntileakEngineRunner } from './runner.mjs';
 
 export { contract } from './contract.mjs';
 export { createAntileakEngineRunner } from './runner.mjs';
@@ -14,6 +14,7 @@ export const name = 'plugin-antileak';
 
 const DEFAULT_EXEMPT_TOOLS = new Set(['computer_context', 'command_status', 'stop_command']);
 const MAX_RECENT_BLOCKS = 20;
+const MAX_EXTRACT_DEPTH = 32;
 
 export function createAntileakAdapterDescriptor() {
   return Object.freeze({
@@ -25,23 +26,42 @@ export function createAntileakAdapterDescriptor() {
   });
 }
 
-const MAX_EXTRACT_DEPTH = 32;
-const MAX_EXTRACT_CHARS = 1024 * 1024;
-
-export function extractInspectableText(toolName, args) {
-  if (!args || typeof args !== 'object') return '';
+export function extractInspectablePayload(_toolName, args) {
+  if (args === null || args === undefined) {
+    return { text: '', overflow: false, reason: null };
+  }
   const parts = [];
   const seen = new WeakSet();
-  let totalChars = 0;
+  let totalBytes = 0;
+  let overflow = false;
+  let overflowReason = null;
+
+  const pushString = str => {
+    if (overflow) return;
+    const trimmed = str.trim();
+    if (!trimmed) return;
+    const bytes = Buffer.byteLength(trimmed, 'utf8');
+    if (totalBytes + bytes > MAX_INPUT_BYTES) {
+      overflow = true;
+      overflowReason = 'ANTILEAK-INPUT-TOO-LARGE';
+      return;
+    }
+    parts.push(trimmed);
+    totalBytes += bytes + 1;
+  };
+
   const collect = (value, depth) => {
-    if (depth > MAX_EXTRACT_DEPTH || totalChars >= MAX_EXTRACT_CHARS) return;
+    if (overflow) return;
+    if (depth > MAX_EXTRACT_DEPTH) {
+      overflow = true;
+      overflowReason = 'ANTILEAK-DEPTH-EXCEEDED';
+      return;
+    }
     if (typeof value === 'string') {
-      if (value.trim()) {
-        const remaining = MAX_EXTRACT_CHARS - totalChars;
-        const slice = value.length > remaining ? value.slice(0, remaining) : value;
-        parts.push(slice);
-        totalChars += slice.length;
-      }
+      pushString(value);
+      return;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
       return;
     }
     if (!value || typeof value !== 'object') return;
@@ -49,18 +69,30 @@ export function extractInspectableText(toolName, args) {
     seen.add(value);
     if (Array.isArray(value)) {
       for (const item of value) {
-        if (totalChars >= MAX_EXTRACT_CHARS) break;
+        if (overflow) break;
         collect(item, depth + 1);
       }
       return;
     }
-    for (const v of Object.values(value)) {
-      if (totalChars >= MAX_EXTRACT_CHARS) break;
+    for (const [k, v] of Object.entries(value)) {
+      if (overflow) break;
+      pushString(k);
+      if (overflow) break;
       collect(v, depth + 1);
     }
   };
+
   collect(args, 0);
-  return parts.join('\n');
+  return {
+    text: overflow ? '' : parts.join('\n'),
+    overflow,
+    reason: overflowReason,
+  };
+}
+
+export function extractInspectableText(toolName, args) {
+  const res = extractInspectablePayload(toolName, args);
+  return res.text;
 }
 
 export function apply(ctx, config = {}) {
@@ -81,8 +113,23 @@ export function apply(ctx, config = {}) {
     recentBlocks: [],
   };
 
+  const recordBlock = (toolName, ruleId, isFailClosed) => {
+    if (isFailClosed) stats.failClosed += 1;
+    else stats.blocked += 1;
+    stats.recentBlocks.unshift({
+      time: new Date().toISOString(),
+      tool: toolName,
+      ruleId: ruleId || 'ANTILEAK',
+      category: isFailClosed ? 'fail-closed' : 'violation',
+    });
+    if (stats.recentBlocks.length > MAX_RECENT_BLOCKS) {
+      stats.recentBlocks.length = MAX_RECENT_BLOCKS;
+    }
+  };
+
   const invokeSlot = ctx.get('tool:invoke@1');
   if (invokeSlot) {
+    // Register with order: 10 so offline R1-R7 anti-leak always executes BEFORE any external LLM moderation plugin.
     invokeSlot.hook('before', async input => {
       if (!config.inspectControlTools && DEFAULT_EXEMPT_TOOLS.has(input.toolName)) {
         return input;
@@ -94,25 +141,27 @@ export function apply(ctx, config = {}) {
         providerName: input.providerName,
         payload: input.body?.params?.arguments ?? {},
       });
-      const text = extractInspectableText(req.toolName, req.payload);
       stats.inspected += 1;
-      const verdict = await runner.inspectText(text, { signal: input.signal });
+      const extracted = extractInspectablePayload(req.toolName, req.payload);
+      if (extracted.overflow) {
+        const ruleId = extracted.reason || 'ANTILEAK-INPUT-TOO-LARGE';
+        recordBlock(req.toolName, ruleId, true);
+        return {
+          ...input,
+          blocked: true,
+          code: 'ANTILEAK_FAIL_CLOSED',
+          rule: ruleId,
+          reason: 'Tool payload exceeds offline anti-leak size or nesting depth limit (fail-closed).',
+        };
+      }
+
+      const verdict = await runner.inspectText(extracted.text, { signal: input.signal });
       if (verdict.decision === 'allow') {
         stats.passed += 1;
         return input;
       }
-      const isFailClosed = verdict.categories.includes('antileak.fail_closed');
-      if (isFailClosed) stats.failClosed += 1;
-      else stats.blocked += 1;
-      stats.recentBlocks.unshift({
-        time: new Date().toISOString(),
-        tool: req.toolName,
-        ruleId: verdict.ruleId || 'ANTILEAK',
-        category: isFailClosed ? 'fail-closed' : 'violation',
-      });
-      if (stats.recentBlocks.length > MAX_RECENT_BLOCKS) {
-        stats.recentBlocks.length = MAX_RECENT_BLOCKS;
-      }
+      const isFailClosed = verdict.failClosed === true || verdict.categories.includes('antileak.fail_closed');
+      recordBlock(req.toolName, verdict.ruleId || 'ANTILEAK', isFailClosed);
       return {
         ...input,
         blocked: true,
@@ -120,7 +169,7 @@ export function apply(ctx, config = {}) {
         rule: verdict.ruleId || 'ANTILEAK',
         reason: verdict.reason || 'Blocked by offline anti-leak guardrail.',
       };
-    });
+    }, { order: 10 });
   }
 
   const panelSlot = ctx.get('console:panel@1');
@@ -161,4 +210,10 @@ export function apply(ctx, config = {}) {
       },
     }));
   }
+
+  ctx.effect(() => async () => {
+    if (typeof runner.close === 'function') {
+      await runner.close();
+    }
+  }, 'antileak:close');
 }

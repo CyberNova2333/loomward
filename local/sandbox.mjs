@@ -401,5 +401,7 @@ export async function createSandboxRuntime(config) {
       }
     },
     async close() { closed = true; await Promise.allSettled([...containers].map(stop)); await Promise.allSettled([...containers].map(j => j.done)); await auditQueue; },
+    isLockedDown: () => cleanupFailed,
+    isClosed: () => closed,
   };
 }

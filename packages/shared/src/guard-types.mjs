@@ -3,6 +3,13 @@
 
 export const VAULT_SLOT = 'vault:backend@1';
 export const CLOSED_SLOTS = Object.freeze([VAULT_SLOT]);
+export const ROOT_ONLY_SERVICES = Object.freeze([
+  VAULT_SLOT,
+  'sandbox:docker',
+  'host:dispatch',
+  'host:platform',
+  'console:trust-origin',
+]);
 
 export const AUDIT_CODES = Object.freeze({
   AUDIT_ROOT_MOUNTED: 'AUDIT_ROOT_MOUNTED',
@@ -48,6 +55,15 @@ export const FORBIDDEN_AUDIT_KEYS = Object.freeze([
 ]);
 
 const FORBIDDEN_AUDIT_KEY_SET = new Set(FORBIDDEN_AUDIT_KEYS.map(k => k.toLowerCase()));
+const FORBIDDEN_AUDIT_KEY_RE =
+  /(token|secret|password|passphrase|api[_-]?key|private[_-]?key|authorization|cookie|credential|stdout|stderr|content|rawbody|prompt|payload|arguments)/i;
+const PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const ACTION_KIND_RE = /^[a-z][a-z0-9._-]{0,63}$/;
+const ACTION_TARGET_RE = /^[a-zA-Z0-9._:@/-]{1,128}$/;
+const ACTION_METHOD_RE = /^(?:\*|[A-Za-z0-9_$.-]{1,64})$/;
+const MAX_AUDIT_KEYS = 32;
+const MAX_AUDIT_STRING = 256;
+const MAX_AUDIT_ARRAY = 16;
 
 export function mechanismActionKind(phase) {
   if (phase === 'before') return 'mechanism.hook.before';
@@ -68,7 +84,16 @@ export function formatActionNode(req) {
   if (!req || typeof req !== 'object' || typeof req.kind !== 'string' || typeof req.target !== 'string') {
     throw new TypeError('Permission action request requires string kind and target.');
   }
-  if (typeof req.method === 'string' && req.method.length > 0) {
+  if (!ACTION_KIND_RE.test(req.kind)) {
+    throw new TypeError(`Invalid permission action kind: ${req.kind}`);
+  }
+  if (!ACTION_TARGET_RE.test(req.target)) {
+    throw new TypeError(`Invalid permission action target: ${req.target}`);
+  }
+  if (req.method !== undefined && req.method !== null && req.method !== '') {
+    if (typeof req.method !== 'string' || !ACTION_METHOD_RE.test(req.method)) {
+      throw new TypeError(`Invalid permission action method: ${String(req.method)}`);
+    }
     return `${req.kind}:${req.target}#${req.method}`;
   }
   return `${req.kind}:${req.target}`;
@@ -98,18 +123,46 @@ export function isSafeUnicodeString(value, { allowNullByte = false } = {}) {
   return true;
 }
 
+function clampAuditScalar(value) {
+  if (typeof value === 'string') {
+    const cleaned = value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '');
+    return cleaned.length > MAX_AUDIT_STRING ? `${cleaned.slice(0, MAX_AUDIT_STRING - 1)}…` : cleaned;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === 'boolean' || value === null) return value;
+  return undefined;
+}
+
 export function sanitizeAuditMetadata(entry) {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
     return {};
   }
   const clean = {};
+  let count = 0;
   for (const [key, value] of Object.entries(entry)) {
-    if (FORBIDDEN_AUDIT_KEY_SET.has(key.toLowerCase())) continue;
+    if (count >= MAX_AUDIT_KEYS) break;
+    if (PROTO_KEYS.has(key)) continue;
+    const lower = key.toLowerCase();
+    if (FORBIDDEN_AUDIT_KEY_SET.has(lower) || FORBIDDEN_AUDIT_KEY_RE.test(key)) continue;
     if (value === undefined) continue;
-    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value === null) {
-      clean[key] = value;
-    } else if (Array.isArray(value) && value.every(v => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')) {
-      clean[key] = [...value];
+    const scalar = clampAuditScalar(value);
+    if (scalar !== undefined) {
+      clean[key] = scalar;
+      count += 1;
+      continue;
+    }
+    if (Array.isArray(value)) {
+      const sanitizedArr = [];
+      for (const item of value.slice(0, MAX_AUDIT_ARRAY)) {
+        const s = clampAuditScalar(item);
+        if (s !== undefined && s !== null) sanitizedArr.push(s);
+      }
+      if (sanitizedArr.length === value.slice(0, MAX_AUDIT_ARRAY).length) {
+        clean[key] = sanitizedArr;
+        count += 1;
+      }
     }
   }
   return clean;

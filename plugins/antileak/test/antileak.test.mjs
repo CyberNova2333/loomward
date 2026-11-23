@@ -61,16 +61,27 @@ test('antileak offline Python engine enforces R1-R7 rules, redacts secrets, and 
   const r1Hit = await runner.inspectText('See notes from secret-internal-repo for details.');
   assert.equal(r1Hit.decision, 'block');
   assert.ok(r1Hit.categories.includes('antileak.violation'));
+  assert.equal(r1Hit.reason.includes('secret-internal-repo'), false);
+  assert.equal(r1Hit.ruleId, 'ANTILEAK-R1');
 
   const r4Hit = await runner.inspectText('Endpoint https://api.internal.corp.example/v1');
   assert.equal(r4Hit.decision, 'block');
   assert.ok(r4Hit.categories.includes('antileak.violation'));
+  assert.equal(r4Hit.ruleId, 'ANTILEAK-R4');
 
   // Dynamically construct synthetic credential so repository secret scanners never see a literal.
   const syntheticSecret = ['ghp', '_'].join('') + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4';
   const r7Hit = await runner.inspectText(`token=${syntheticSecret}`);
   assert.equal(r7Hit.decision, 'block');
   assert.equal(r7Hit.reason.includes(syntheticSecret), false);
+  assert.equal(r7Hit.ruleId, 'ANTILEAK-R7');
+
+  // Pre-aborted signal must fail closed without ReferenceError TDZ.
+  const preAborted = new AbortController();
+  preAborted.abort();
+  const abortedVerdict = await runner.inspectText('hello', { signal: preAborted.signal });
+  assert.equal(abortedVerdict.decision, 'block');
+  assert.equal(abortedVerdict.ruleId, 'ANTILEAK-CANCELLED');
 
   // 3. Expired cache -> fail-closed block even on harmless content!
   await writePrivateCache(cachePath, { expiresOffsetSec: -600 });
@@ -134,7 +145,34 @@ test('antileak mounts out-of-process on Cordis kernel, blocks leaked arguments b
     { requestId: 'al_req_1' },
   );
   assert.equal(blocked.error.data.code, 'ANTILEAK_BLOCKED');
+  assert.equal(JSON.stringify(blocked).includes('secret-internal-repo'), false);
   assert.deepEqual(await fs.readdir(path.join(stateDir, 'approvals')), []);
+
+  // Leaked secret inside an object key is also detected and blocked!
+  const keyBlocked = await daemon.localIngress.dispatchRpc(
+    {
+      jsonrpc: '2.0',
+      id: '1b',
+      method: 'tools/call',
+      params: { name: 'write_file', arguments: { path: 'README.md', secret_map: { 'secret-internal-repo': '1' } } },
+    },
+    { requestId: 'al_req_1b' },
+  );
+  assert.equal(keyBlocked.error.data.code, 'ANTILEAK_BLOCKED');
+
+  // > 1 MiB padding attack fails closed with ANTILEAK-INPUT-TOO-LARGE instead of truncating!
+  const hugePadding = 'a'.repeat(1024 * 1024 + 64) + ' secret-internal-repo';
+  const overflowBlocked = await daemon.localIngress.dispatchRpc(
+    {
+      jsonrpc: '2.0',
+      id: '1c',
+      method: 'tools/call',
+      params: { name: 'write_file', arguments: { path: 'README.md', content: hugePadding } },
+    },
+    { requestId: 'al_req_1c' },
+  );
+  assert.equal(overflowBlocked.error.data.code, 'ANTILEAK_FAIL_CLOSED');
+  assert.equal(overflowBlocked.error.data.rule, 'ANTILEAK-INPUT-TOO-LARGE');
 
   // Expire cache -> read_file fails closed BEFORE entering approval queue!
   await writePrivateCache(cachePath, { expiresOffsetSec: -120 });
@@ -155,6 +193,6 @@ test('antileak mounts out-of-process on Cordis kernel, blocks leaked arguments b
   const panel = await consoleSvc.panelCollector.collectById('antileak');
   assert.equal(panel.id, 'antileak');
   assert.equal(panel.status, 'error');
-  assert.ok(panel.summary.some(s => s.label === '规则阻断' && s.value === '1'));
-  assert.ok(panel.summary.some(s => s.label === '故障闭锁' && s.value === '1'));
+  assert.ok(panel.summary.some(s => s.label === '规则阻断' && s.value === '2'));
+  assert.ok(panel.summary.some(s => s.label === '故障闭锁' && s.value === '2'));
 });

@@ -60,6 +60,12 @@ export function allowedOriginsForPort(boundPort) {
   ]);
 }
 
+export function formatLoopbackOrigin(host, port) {
+  const h = String(host || '127.0.0.1');
+  const formattedHost = h.includes(':') && !h.startsWith('[') ? `[${h}]` : h;
+  return `http://${formattedHost}:${port}`;
+}
+
 export function verifyHostForPort(req, boundPort) {
   const hostHeader = String(req.headers.host || '').toLowerCase();
   return allowedHostsForPort(boundPort).has(hostHeader);
@@ -70,10 +76,19 @@ export function verifyOriginForPort(req, boundPort) {
   return allowedOriginsForPort(boundPort).has(origin);
 }
 
-export function verifyFetchSiteSameOriginOrNone(req, allowNone) {
+export function verifyFetchSiteSameOriginOrNone(req, allowTopNavigation = false) {
   const site = req.headers['sec-fetch-site'];
   if (!site) return true;
-  return allowNone ? (site === 'same-origin' || site === 'none') : site === 'same-origin';
+  if (site === 'same-origin') return true;
+  if (!allowTopNavigation) return false;
+  if (site === 'none') return true;
+  if (req.method === 'GET' && (site === 'same-site' || site === 'cross-site')) {
+    const mode = req.headers['sec-fetch-mode'];
+    const dest = req.headers['sec-fetch-dest'];
+    if (!mode && !dest) return site === 'same-site';
+    return mode === 'navigate' && dest === 'document';
+  }
+  return false;
 }
 
 export function applySecurityHeaders(res, contentType, extra = {}) {

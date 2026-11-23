@@ -27,11 +27,18 @@ export function canonicalJson(value) {
 }
 
 export async function sha256Tagged(input) {
-  const bytes = typeof input === 'string'
-    ? new TextEncoder().encode(input)
-    : input instanceof Uint8Array
-      ? input
-      : new Uint8Array(input);
+  let bytes;
+  if (typeof input === 'string') {
+    bytes = new TextEncoder().encode(input);
+  } else if (input instanceof Uint8Array) {
+    bytes = input;
+  } else if (ArrayBuffer.isView(input)) {
+    bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+  } else if (input instanceof ArrayBuffer) {
+    bytes = new Uint8Array(input);
+  } else {
+    throw new TypeError('sha256Tagged requires a string, ArrayBuffer, or TypedArray/DataView.');
+  }
   const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
   const hex = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
   return `sha256:${hex}`;
@@ -73,8 +80,18 @@ export function isRpmShape(rpm) {
 }
 
 export async function createFrozenRpm({ target = 'runtime', rootPlugins }) {
-  const sorted = [...rootPlugins].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  const body = { format: RPM_FORMAT_VERSION, target, rootPlugins: sorted };
+  if (!Array.isArray(rootPlugins) || rootPlugins.length === 0) {
+    throw new Error('rootPlugins must be a non-empty array.');
+  }
+  const sorted = rootPlugins
+    .map(entry => Object.freeze({
+      id: entry?.id,
+      version: entry?.version,
+      entryHash: entry?.entryHash,
+      provides: Object.freeze(Array.isArray(entry?.provides) ? [...entry.provides] : []),
+    }))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const body = { format: RPM_FORMAT_VERSION, target, rootPlugins: Object.freeze(sorted) };
   const manifestHash = await computeManifestHash(body);
   const rpm = { ...body, manifestHash };
   if (!isRpmShape(rpm)) throw new Error('Generated RPM failed shape validation.');

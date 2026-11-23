@@ -29,7 +29,7 @@
 #     说明内容改动逐字节等于远端本来就有的，只是换了签名/committer/父提交——不再重扫其新增行；
 #     消息、签名、作者/提交者邮箱照查。远端"已有"以 --net 下 ls-remote 的真实顶点为准(本地 refs/remotes 可被伪造)，
 #     无网络退回本地跟踪 ref。算不出 patch-id 就退化为全扫，绝不因此放行。policy.resign_exempt=false 可整体关闭。
-import sys, os, json, re, subprocess, time, tempfile
+import sys, os, stat, json, re, subprocess, time, tempfile
 # 中文 Windows / GBK 区域设置下 Python 默认按本地编码读写标准流：统一走 UTF-8，
 # 否则读到的中文会乱码或抛错（抛错多半落进 fail-open 分支），输出 ✘ 等字符也会崩。
 for _s in (sys.stdin, sys.stdout, sys.stderr):
@@ -42,7 +42,13 @@ POLICY_PATH = (
     or os.environ.get('GUARD_POLICY')
     or ('/root/.claude/policy/policy.json' if os.path.exists('/root/.claude/policy/policy.json') else os.path.join(_ENGINE_DIR, 'policy.json'))
 )
-POLICY = json.load(open(POLICY_PATH, encoding='utf-8'))
+try:
+    with open(POLICY_PATH, encoding='utf-8') as _pf:
+        POLICY = json.load(_pf)
+except Exception:
+    print('error')
+    print('  ✘ 无法读取策略文件(fail-closed)', file=sys.stderr)
+    sys.exit(0)
 
 
 def norm_fp(s):
@@ -57,8 +63,14 @@ BRANCH_PREFIXES = [p.casefold() for p in POLICY['agent_branch_prefixes']]
 SIGN_HELP = POLICY.get('signing_instructions', '请生成独立的 ed25519 SSH Signing Key 并把公钥发给维护者。')
 PROVIDER_EMAILS = [e.casefold() for e in POLICY['agent_provider_emails']]
 CACHE = os.environ.get('LOOMWARD_ANTILEAK_CACHE') or POLICY['private_cache']
-REFRESH = os.environ.get('LOOMWARD_ANTILEAK_REFRESH') or POLICY.get('refresh_script', os.path.join(_ENGINE_DIR, 'refresh-private.py'))
-RESOLVE = os.environ.get('LOOMWARD_ANTILEAK_RESOLVE') or POLICY.get('resolve_script', os.path.join(os.path.dirname(REFRESH), 'resolve-private.py'))
+REFRESH = (
+    os.environ.get('LOOMWARD_ANTILEAK_REFRESH')
+    or (os.path.join(_ENGINE_DIR, 'refresh-private.py') if os.environ.get('LOOMWARD_ANTILEAK_POLICY') else POLICY.get('refresh_script', os.path.join(_ENGINE_DIR, 'refresh-private.py')))
+)
+RESOLVE = (
+    os.environ.get('LOOMWARD_ANTILEAK_RESOLVE')
+    or (os.path.join(_ENGINE_DIR, 'resolve-private.py') if os.environ.get('LOOMWARD_ANTILEAK_POLICY') else POLICY.get('resolve_script', os.path.join(os.path.dirname(REFRESH), 'resolve-private.py')))
+)
 RESOLVE_BUDGET = int(POLICY.get('resolve_budget', 30))
 NET = False                                               # 由 main 按 --net 设置
 ZERO = '0' * 40
@@ -122,12 +134,24 @@ def ck(v):
 
 
 def load_cache():
+    fd = None
     try:
-        d = json.load(open(CACHE, encoding='utf-8'))
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+        fd = os.open(CACHE, flags)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > 4 * 1024 * 1024:
+            return None
+        with os.fdopen(fd, 'r', encoding='utf-8') as f:
+            fd = None
+            d = json.load(f)
         if isinstance(d, dict):
             return d
     except Exception:
-        pass
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
     return None
 
 

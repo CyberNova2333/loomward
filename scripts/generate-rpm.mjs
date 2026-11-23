@@ -11,15 +11,24 @@ export const CORE_ROOT_PLUGIN_IDS = Object.freeze(['cloud-relay', 'sandbox', 'ho
 export async function buildReleaseRpm({ sourceRoot, destinationRoot }) {
   const srcRoot = path.resolve(sourceRoot);
   const dstRoot = path.resolve(destinationRoot);
-  const { createFrozenRpm, sha256Tagged, validateContractDecl } = await import(
-    pathToFileURL(path.join(srcRoot, 'packages', 'shared', 'src', 'index.mjs')).href
-  );
+  const sharedEntry = fs.existsSync(path.join(dstRoot, 'packages', 'shared', 'src', 'index.mjs'))
+    ? path.join(dstRoot, 'packages', 'shared', 'src', 'index.mjs')
+    : path.join(srcRoot, 'packages', 'shared', 'src', 'index.mjs');
+  const { createFrozenRpm, sha256Tagged, validateContractDecl } = await import(pathToFileURL(sharedEntry).href);
   const rootPlugins = [];
   for (const id of CORE_ROOT_PLUGIN_IDS) {
-    const contractFile = path.join(srcRoot, 'packages', id, 'src', 'contract.mjs');
+    // Prefer contracts from the copied release tree when node_modules is already available there.
+    const dstContract = path.join(dstRoot, 'packages', id, 'src', 'contract.mjs');
+    const srcContract = path.join(srcRoot, 'packages', id, 'src', 'contract.mjs');
+    const contractFile = fs.existsSync(path.join(dstRoot, 'node_modules')) && fs.existsSync(dstContract)
+      ? dstContract
+      : srcContract;
     const entryFile = path.join(dstRoot, 'packages', id, 'src', 'index.mjs');
     const mod = await import(pathToFileURL(contractFile).href);
     const contract = validateContractDecl(mod.contract);
+    if (contract.id !== id || contract.kind !== 'root-plugin') {
+      throw new Error(`Root plugin contract mismatch for ${id}: got id=${contract.id}, kind=${contract.kind}.`);
+    }
     const entryHash = await sha256Tagged(fs.readFileSync(entryFile));
     rootPlugins.push({
       id: contract.id,
@@ -36,17 +45,19 @@ export async function writeReleaseRpmFile({ sourceRoot, destinationRoot, outFile
   const targetPath = outFile ? path.resolve(outFile) : path.join(path.resolve(destinationRoot), 'rpm.json');
   const tempPath = path.join(path.dirname(targetPath), `.tmp-rpm-${crypto.randomUUID()}.json`);
   const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0);
-  const fd = fs.openSync(tempPath, flags, 0o600);
+  let fd;
   try {
+    fd = fs.openSync(tempPath, flags, 0o600);
     fs.writeFileSync(fd, JSON.stringify(rpm, null, 2), 'utf8');
     fs.fsyncSync(fd);
-  } finally {
     fs.closeSync(fd);
-  }
-  try {
+    fd = undefined;
     if (process.platform !== 'win32') fs.chmodSync(tempPath, 0o600);
     fs.renameSync(tempPath, targetPath);
   } catch (error) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch {}
+    }
     fs.rmSync(tempPath, { force: true });
     throw error;
   }
@@ -67,8 +78,20 @@ function parseArgs(argv) {
   return args;
 }
 
-const isEntry = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename);
-if (isEntry) {
+function isSameExecutablePath(argvPath, modulePath) {
+  if (!argvPath || !modulePath) return false;
+  try {
+    const a = fs.realpathSync(argvPath);
+    const b = fs.realpathSync(modulePath);
+    return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+  } catch {
+    const a = path.resolve(argvPath);
+    const b = path.resolve(modulePath);
+    return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+  }
+}
+
+if (isSameExecutablePath(process.argv[1], import.meta.filename)) {
   const args = parseArgs(process.argv.slice(2));
   if (!args.source || !args.dest) {
     console.error('Usage: node scripts/generate-rpm.mjs --source <checkoutDir> --dest <releaseDir> [--out <rpmPath>]');

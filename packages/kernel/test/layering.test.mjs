@@ -4,11 +4,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import module from 'node:module';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { validateContractDecl } from '@loomward/shared';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '../../..');
+const NODE_BUILTINS = new Set(
+  module.builtinModules.flatMap(name => [name, name.replace(/^node:/, ''), `node:${name.replace(/^node:/, '')}`]),
+);
 
 function walkSourceFiles(dir) {
   if (!fs.existsSync(dir)) return [];
@@ -17,22 +21,32 @@ function walkSourceFiles(dir) {
     if (entry.name === 'node_modules' || entry.name === 'test' || entry.name === 'dist') continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) out.push(...walkSourceFiles(full));
-    else if (/\.(?:mjs|js|ts|mts)$/.test(entry.name)) out.push(full);
+    else if (/\.(?:mjs|cjs|js|ts|mts|cts)$/.test(entry.name)) out.push(full);
   }
   return out;
 }
 
+function stripJsComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:\\])\/\/.*$/gm, '$1');
+}
+
 function parseImportSpecifiers(filePath) {
-  const text = fs.readFileSync(filePath, 'utf8');
+  const raw = fs.readFileSync(filePath, 'utf8');
+  const text = stripJsComments(raw);
   const specs = [];
-  for (const m of text.matchAll(/^\s*(?:import|export)\s+(type\s+)?[^'"]*?from\s+['"]([^'"]+)['"]/gm)) {
+  for (const m of text.matchAll(/\b(?:import|export)\s+(type\s+)?[\s\S]*?\bfrom\s*['"]([^'"]+)['"]/g)) {
     specs.push({ spec: m[2], typeOnly: Boolean(m[1]) });
   }
-  for (const m of text.matchAll(/^\s*import\s+['"]([^'"]+)['"]/gm)) {
+  for (const m of text.matchAll(/^\s*import\s*['"]([^'"]+)['"]/gm)) {
     specs.push({ spec: m[1], typeOnly: false });
   }
-  for (const m of text.matchAll(/\bimport\(\s*['"]([^'"]+)['"]\s*\)/g)) {
+  for (const m of text.matchAll(/\b(?:import|require)\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g)) {
     specs.push({ spec: m[1], typeOnly: false });
+  }
+  for (const m of text.matchAll(/\bgetBuiltinModule\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g)) {
+    specs.push({ spec: `node:${m[1].replace(/^node:/, '')}`, typeOnly: false });
   }
   return specs;
 }
@@ -42,19 +56,31 @@ function rel(filePath) {
 }
 
 test('layering: @loomward/shared has zero Node/host/cordis/kernel/plugin imports', () => {
-  const sharedFiles = walkSourceFiles(path.join(REPO_ROOT, 'packages/shared/src'));
+  const sharedSrcDir = path.join(REPO_ROOT, 'packages/shared/src');
+  const sharedFiles = walkSourceFiles(sharedSrcDir);
   assert.ok(sharedFiles.length > 0);
   const violations = [];
   for (const file of sharedFiles) {
+    const raw = stripJsComments(fs.readFileSync(file, 'utf8'));
+    if (/\bprocess\.getBuiltinModule\b|\bcreateRequire\b/.test(raw)) {
+      violations.push(`${rel(file)} -> uses dynamic Node builtin loader`);
+    }
     for (const imp of parseImportSpecifiers(file)) {
-      const target = imp.spec.startsWith('.') ? rel(path.resolve(path.dirname(file), imp.spec)) : imp.spec;
-      if (
-        /^node:|^cordis(?:\/|$)|^@loomward\/(?!shared$)/.test(target)
-        || target.startsWith('packages/kernel')
-        || target.startsWith('packages/host')
-        || target.startsWith('plugins/')
-      ) {
-        violations.push(`${rel(file)} -> ${imp.spec}`);
+      const spec = imp.spec;
+      if (NODE_BUILTINS.has(spec) || spec.startsWith('node:')) {
+        violations.push(`${rel(file)} -> ${spec} (Node builtin forbidden in @loomward/shared)`);
+        continue;
+      }
+      if (spec.startsWith('.')) {
+        const resolved = path.resolve(path.dirname(file), spec);
+        const relToShared = path.relative(sharedSrcDir, resolved);
+        if (relToShared.startsWith('..') || path.isAbsolute(relToShared)) {
+          violations.push(`${rel(file)} -> ${spec} (exits packages/shared/src)`);
+        }
+        continue;
+      }
+      if (spec !== '@loomward/shared') {
+        violations.push(`${rel(file)} -> ${spec} (external dependency forbidden in @loomward/shared)`);
       }
     }
   }
@@ -71,6 +97,21 @@ test('layering: non-kernel packages and plugins never import cordis at runtime o
     for (const entry of fs.readdirSync(groupDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       const ownName = entry.name;
+      const pkgJsonPath = path.join(groupDir, ownName, 'package.json');
+      if (fs.existsSync(pkgJsonPath)) {
+        const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+        const deps = { ...pkgJson.dependencies, ...pkgJson.optionalDependencies };
+        if (!(groupName === 'packages' && ownName === 'kernel') && Object.hasOwn(deps, 'cordis')) {
+          violations.push(`${rel(pkgJsonPath)} -> dependency on cordis is restricted to @loomward/kernel`);
+        }
+        if (groupName === 'plugins') {
+          for (const depName of Object.keys(deps)) {
+            if (depName.startsWith('@loomward/') && depName !== '@loomward/shared') {
+              violations.push(`${rel(pkgJsonPath)} -> plugin cannot depend on ${depName}`);
+            }
+          }
+        }
+      }
       const srcDir = path.join(groupDir, ownName, 'src');
       for (const file of walkSourceFiles(srcDir)) {
         for (const imp of parseImportSpecifiers(file)) {
@@ -84,9 +125,18 @@ test('layering: non-kernel packages and plugins never import cordis at runtime o
             if ((parts[0] === 'packages' || parts[0] === 'plugins') && (parts[0] !== groupName || parts[1] !== ownName)) {
               violations.push(`${rel(file)} -> ${imp.spec} (cross-package relative import)`);
             }
+            if (groupName === 'plugins' && ownName !== 'mcp-hub' && parts[0] !== 'plugins') {
+              violations.push(`${rel(file)} -> ${imp.spec} (plugin relative import outside plugin boundary)`);
+            }
           }
-          if (groupName === 'plugins' && /^@loomward\/plugin-/.test(imp.spec) && imp.spec !== `@loomward/plugin-${ownName}`) {
-            violations.push(`${rel(file)} -> ${imp.spec} (cross-plugin direct import)`);
+          if (groupName === 'plugins') {
+            if (
+              /^@loomward\//.test(imp.spec)
+              && imp.spec !== '@loomward/shared'
+              && imp.spec !== `@loomward/plugin-${ownName}`
+            ) {
+              violations.push(`${rel(file)} -> ${imp.spec} (plugins may only import @loomward/shared)`);
+            }
           }
         }
       }

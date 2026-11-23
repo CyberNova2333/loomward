@@ -24,11 +24,14 @@ export const DEFAULT_CONSOLE_PORT = 18797;
 export const DEFAULT_TRUST_PORT = 18798;
 
 function sha256OfSnapshot(snap, panels) {
+  const normalizedPanels = Array.isArray(panels)
+    ? panels.map(p => (p && typeof p === 'object' ? { ...p, updatedAt: undefined } : p))
+    : undefined;
   const comparable = {
     ...snap,
     observedAt: undefined,
     daemon: snap?.daemon ? { ...snap.daemon, gatewayLatencyMs: undefined } : snap?.daemon,
-    panels,
+    panels: normalizedPanels,
   };
   return crypto.createHash('sha256').update(JSON.stringify(comparable)).digest('hex');
 }
@@ -150,6 +153,7 @@ export async function startDualOriginConsole({
       return queuedRefresh.promise;
     }
 
+    const needConsolePanels = Boolean(broadcast && consoleServer?.hasSseClients());
     refreshing = Promise.all([
       collectStatusSnapshot({
         stateDir: resolvedState,
@@ -161,7 +165,9 @@ export async function startDualOriginConsole({
         ...(systemdProbe ? { systemdProbe } : {}),
         blockedOrigins: getBlockedOrigins(),
       }),
-      panelCollector.collectAll({ originRole: 'console' }),
+      needConsolePanels
+        ? panelCollector.collectAll({ originRole: 'console' })
+        : Promise.resolve(null),
     ])
       .then(([snap, panels]) => {
         lastSnapshot = snap;
@@ -171,7 +177,9 @@ export async function startDualOriginConsole({
           lastDigest = digestHash;
           const auth = loadCurrentAuthRecord();
           trustServer?.broadcastSnapshot(snap, auth);
-          consoleServer?.broadcastSnapshot(snap, panels, auth);
+          if (panels && consoleServer?.hasSseClients()) {
+            consoleServer.broadcastSnapshot(snap, panels, auth);
+          }
         } else if (!anySse && (force || digestHash !== lastDigest)) {
           lastDigest = digestHash;
         }
@@ -189,18 +197,27 @@ export async function startDualOriginConsole({
     return refreshing;
   }
 
+  let channelRefreshTimer = null;
   const unsubChannel = controlChannel.subscribe(event => {
     try {
       const auth = loadCurrentAuthRecord();
       consoleServer?.broadcastChannelEvent(event, auth);
     } catch {}
     if (trustServer?.hasSseClients() || consoleServer?.hasSseClients()) {
-      void refreshSnapshot({ force: true }).catch(() => {});
+      if (!channelRefreshTimer) {
+        channelRefreshTimer = setTimeout(() => {
+          channelRefreshTimer = null;
+          if (trustServer?.hasSseClients() || consoleServer?.hasSseClients()) {
+            void refreshSnapshot({ force: true }).catch(() => {});
+          }
+        }, 40);
+        channelRefreshTimer.unref?.();
+      }
     }
   });
 
-  if (ownsChannel && enableControlSocket) {
-    await controlChannel.startSocketServer().catch(() => null);
+  if (enableControlSocket && !controlChannel.getSocketPath()) {
+    await controlChannel.startSocketServer(controlSocketPath || path.join(resolvedState, 'control.sock')).catch(() => null);
   }
 
   trustServer = await createTrustOriginServer({
@@ -263,6 +280,7 @@ export async function startDualOriginConsole({
     refreshSnapshot,
     async close() {
       if (fallbackTimer) clearInterval(fallbackTimer);
+      if (channelRefreshTimer) clearTimeout(channelRefreshTimer);
       unsubChannel();
       broker.clearAll();
       await Promise.all([trustServer.close(), consoleServer.close()]);

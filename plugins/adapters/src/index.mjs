@@ -19,6 +19,8 @@ import {
   DEFAULT_MAX_RESPONSE_BYTES,
   assertSafeEndpointUrl,
   assertSafeIntegrationOrigin,
+  assertSafeResolvedHostname,
+  classifyIpLiteral,
   fetchBounded,
   parseSseJsonRpcFrames,
 } from './network.mjs';
@@ -28,8 +30,10 @@ export {
   CLOUDFORGE_TOOL_PREFIX,
   MODELBRIDGE_MAX_TIMEOUT_MS,
   DEFAULT_MAX_RESPONSE_BYTES,
+  classifyIpLiteral,
   assertSafeIntegrationOrigin,
   assertSafeEndpointUrl,
+  assertSafeResolvedHostname,
   fetchBounded,
   parseSseJsonRpcFrames,
   generatePkcePair,
@@ -66,9 +70,10 @@ export function apply(ctx, options = {}) {
     ? createModelBridgeClient(options.modelbridge)
     : null;
 
+  let provider = null;
   const toolProviderSlot = ctx.get('tool:provider@1');
   if (toolProviderSlot && cloudforgeClient) {
-    const provider = createCloudForgeToolProvider(cloudforgeClient);
+    provider = createCloudForgeToolProvider(cloudforgeClient);
     const release = toolProviderSlot.register('cloudforge', provider);
     if (typeof release === 'function') disposers.push(release);
   }
@@ -84,10 +89,13 @@ export function apply(ctx, options = {}) {
     if (typeof releaseMb === 'function') disposers.push(releaseMb);
   }
 
-  ctx.on('dispose', () => {
+  ctx.effect(() => async () => {
     while (disposers.length) {
       const dispose = disposers.pop();
       try { dispose(); } catch {}
     }
-  });
+    if (provider) {
+      await provider.close();
+    }
+  }, 'adapters:close');
 }

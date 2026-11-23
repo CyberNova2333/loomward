@@ -68,6 +68,9 @@ test('network boundary guard blocks non-HTTPS remote URLs, metadata IPs, embedde
   assert.throws(() => assertSafeIntegrationOrigin('https://127.0.0.1:8443'), /loopback/i);
   assert.throws(() => assertSafeIntegrationOrigin('https://localhost.:8443'), /loopback/i);
   assert.throws(() => assertSafeIntegrationOrigin('https://169.254.169.254'), /blocked/i);
+  assert.throws(() => assertSafeIntegrationOrigin('https://[::ffff:169.254.169.254]'), /blocked|private|loopback/i);
+  assert.throws(() => assertSafeIntegrationOrigin('https://[64:ff9b::169.254.169.254]'), /blocked|private|loopback/i);
+  assert.throws(() => assertSafeIntegrationOrigin('https://[fe80::1]'), /blocked|private|loopback/i);
   assert.throws(() => assertSafeIntegrationOrigin('https://10.0.0.5'), /private network/i);
   assert.throws(() => assertSafeIntegrationOrigin('https://user:pass@forge.example.test'), /credentials/i);
   assert.throws(() => assertSafeIntegrationOrigin('https://forge.example.test/api'), /path suffix/i);
@@ -258,6 +261,9 @@ test('CloudForge adapter supports RFC 9728/8414 OAuth 2.1 + PKCE discovery, meta
   assert.equal(tools[1].name, 'mcp__cloudforge__merge_pull_request');
   assert.equal(tools[1].annotations.risk, 'write');
   assert.equal(classifyCloudForgeToolRisk('moderate_issue'), 'write');
+  assert.equal(classifyCloudForgeToolRisk('fork_repo'), 'write');
+  assert.equal(classifyCloudForgeToolRisk('star_repo'), 'write');
+  assert.equal(classifyCloudForgeToolRisk('search_issues'), 'read');
 
   const res = await cf.callTool('mcp__cloudforge__merge_pull_request', { repo: 'loomward', pr: 7 });
   assert.equal(res.isError, undefined);
@@ -512,6 +518,8 @@ test('adapters plugin integrates with LoomWard daemon approval pipeline, dual-or
   const mbPanel = allPanels.find(p => p.id === 'modelbridge');
   assert.ok(cfPanel && cfPanel.status === 'ok');
   assert.ok(mbPanel && mbPanel.status === 'ok');
+  assert.ok(cfPanel.table && Array.isArray(cfPanel.tables));
+  assert.ok(mbPanel.table && Array.isArray(mbPanel.tables));
   assert.ok(mbPanel.summary.some(s => s.label === '可见模型数' && s.value === '1'));
 
   const serialized = JSON.stringify(allPanels);

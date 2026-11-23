@@ -1,4 +1,4 @@
-/* web/shared/theme.css */
+/* packages/console/web/shared/theme.css */
 *,
 *::before,
 *::after {
@@ -362,8 +362,73 @@ body {
   font-weight: 700;
   margin-top: 2px;
 }
+.lw-stack-sm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.lw-stack-md {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.lw-auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 480px;
+}
+.lw-between {
+  justify-content: space-between;
+}
+.lw-end {
+  justify-content: flex-end;
+}
+.lw-mb-sm {
+  margin-bottom: 8px;
+}
+.lw-mb-md {
+  margin-bottom: 12px;
+}
+.lw-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 16px;
+}
+.lw-summary-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.lw-approval-item {
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lw-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.lw-switch-row:last-child {
+  border-bottom: none;
+}
+.lw-table-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin: 0 0 6px;
+}
 
-/* web/console/console.css */
+/* packages/console/web/console/console.css */
 .lw-console-mark {
   display: inline-flex;
   align-items: center;

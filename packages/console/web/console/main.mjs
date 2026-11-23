@@ -50,6 +50,7 @@ function startStream() {
         stopStream();
         client.clearTabToken();
         state.snapshot = null;
+        state.liveKernelEvents = [];
         if (state.session) state.session.authenticated = false;
       }
       render();
@@ -68,12 +69,12 @@ function startStream() {
 }
 
 async function boot() {
+  const handoffTicket = extractAndScrubTicketFromHash();
   try {
     const sess = await client.api('/api/console/session');
     state.session = sess;
     if (sess.trustOrigin) state.trustOrigin = sess.trustOrigin;
 
-    const handoffTicket = extractAndScrubTicketFromHash();
     if (handoffTicket) {
       const exchanged = await client.api('/api/console/session/exchange', {
         method: 'POST',
@@ -105,6 +106,7 @@ async function handleLogout() {
   } catch {}
   client.clearTabToken();
   state.snapshot = null;
+  state.liveKernelEvents = [];
   if (state.session) state.session.authenticated = false;
   render();
 }
@@ -197,9 +199,9 @@ function renderOverview() {
   const kernel = snap.kernel || { roots: [], units: [] };
   const pending = snap.approvals?.pendingCount || 0;
 
-  return el('div', { style: 'display:flex;flex-direction:column;gap:16px;' }, [
+  return el('div', { class: 'lw-stack-md' }, [
     pending > 0
-      ? el('div', { class: 'lw-banner lw-banner-warn lw-row', style: 'justify-content:space-between;' }, [
+      ? el('div', { class: 'lw-banner lw-banner-warn lw-row lw-between' }, [
           el('span', { text: `当前有 ${pending} 条待人工复核审批的工具请求，请前往独立 Trust Origin 复核参数。` }),
           state.trustOrigin
             ? el('a', { class: 'lw-btn lw-btn-trust', href: state.trustOrigin, target: '_blank', rel: 'noopener noreferrer', text: '去 Trust Origin 审批' })
@@ -256,7 +258,7 @@ function renderAudit() {
     el('td', { class: 'lw-muted lw-mono', text: JSON.stringify(ev.meta || {}) }),
   ]));
 
-  return el('div', { style: 'display:flex;flex-direction:column;gap:16px;' }, [
+  return el('div', { class: 'lw-stack-md' }, [
     el('section', { class: 'lw-card' }, [
       el('div', { class: 'lw-card-head' }, [
         el('div', {}, [
@@ -372,15 +374,22 @@ function renderDeclarativePanels() {
     if (panel.notices?.length) {
       for (const notice of panel.notices) {
         const cls = notice.tone === 'err' ? 'err' : notice.tone === 'warn' ? 'warn' : notice.tone === 'ok' ? 'ok' : 'info';
-        cardChildren.push(el('div', { class: `lw-banner lw-banner-${cls}`, style: 'margin-bottom:8px;', text: notice.text }));
+        cardChildren.push(el('div', { class: `lw-banner lw-banner-${cls} lw-mb-sm`, text: notice.text }));
       }
     }
 
-    if (panel.table?.columns?.length) {
-      cardChildren.push(el('div', { class: 'lw-table-wrap', style: 'margin-bottom:8px;' }, [
+    const tables = Array.isArray(panel.tables) && panel.tables.length
+      ? panel.tables
+      : (panel.table?.columns?.length ? [panel.table] : []);
+    for (const table of tables) {
+      if (!table?.columns?.length) continue;
+      if (table.title) {
+        cardChildren.push(el('h4', { class: 'lw-table-title', text: table.title }));
+      }
+      cardChildren.push(el('div', { class: 'lw-table-wrap lw-mb-sm' }, [
         el('table', { class: 'lw-table' }, [
-          el('thead', {}, [el('tr', {}, panel.table.columns.map(col => el('th', { text: col })))]),
-          el('tbody', {}, (panel.table.rows || []).map(row => el('tr', {}, row.map(cell => el('td', { class: 'lw-mono', text: cell }))))),
+          el('thead', {}, [el('tr', {}, table.columns.map(col => el('th', { text: col })))]),
+          el('tbody', {}, (table.rows || []).map(row => el('tr', {}, row.map(cell => el('td', { class: 'lw-mono', text: cell }))))),
         ]),
       ]));
     }

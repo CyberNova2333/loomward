@@ -6,6 +6,7 @@ import http from 'node:http';
 import { publicWebUiAuthSummary } from '../../../local/webui-auth.mjs';
 import {
   applySecurityHeaders,
+  formatLoopbackOrigin,
   parseCookieHeader,
   readBodyJson,
   sendJson,
@@ -47,7 +48,7 @@ export async function createConsoleOriginServer({
   const sseClients = new Map();
   let actualPort = port;
 
-  const getConsoleOrigin = () => `http://${host === '127.0.0.1' ? '127.0.0.1' : host}:${actualPort}`;
+  const getConsoleOrigin = () => formatLoopbackOrigin(host, actualPort);
 
   function verifyPreAuthMutation(req) {
     if (!verifyOriginForPort(req, actualPort)) return false;
@@ -79,13 +80,42 @@ export async function createConsoleOriginServer({
   }
 
   function enrichSnapshot(snap, panels) {
+    const rawKernel = getKernelSummary() || {};
+    const sanitizedSecurity = snap?.security
+      ? {
+          initialized: Boolean(snap.security.initialized),
+          mode: snap.security.mode,
+          requirePasskey: Boolean(snap.security.requirePasskey),
+          passkeyCount: Number(snap.security.passkeyCount || 0),
+          sessionPersistence: snap.security.sessionPersistence || 'tab',
+        }
+      : undefined;
+    const sanitizedApprovals = snap?.approvals
+      ? {
+          pendingCount: Number(snap.approvals.pendingCount || 0),
+          items: Array.isArray(snap.approvals.items)
+            ? snap.approvals.items.map(item => ({
+                idShort: item.idShort,
+                tool: item.tool,
+                clientId: item.clientId,
+                expiresAt: item.expiresAt,
+                alreadyApproved: Boolean(item.alreadyApproved),
+              }))
+            : [],
+        }
+      : undefined;
     return {
       ...snap,
+      ...(sanitizedSecurity ? { security: sanitizedSecurity } : {}),
+      ...(sanitizedApprovals ? { approvals: sanitizedApprovals } : {}),
       originRole: 'console',
       readOnly: true,
       trustOrigin: getTrustOrigin(),
       consoleOrigin: getConsoleOrigin(),
-      kernel: getKernelSummary(),
+      kernel: {
+        roots: Array.isArray(rawKernel.roots) ? rawKernel.roots : [],
+        units: Array.isArray(rawKernel.units) ? rawKernel.units : [],
+      },
       channelEvents: getRecentChannelEvents(),
       panels,
     };
@@ -184,6 +214,7 @@ export async function createConsoleOriginServer({
 
       if (req.method === 'GET' && reqUrl.pathname === '/api/console/session') {
         if (!verifyFetchSiteSameOriginOrNone(req, false)) return sendJson(res, 403, { error: 'Cross-site request rejected.' });
+        if (req.headers.origin && !verifyOriginForPort(req, actualPort)) return sendJson(res, 403, { error: 'Cross-origin request rejected.' });
         const authRecord = loadCurrentAuthRecord();
         const session = broker.authenticateConsoleSession(req, authRecord);
         if (session) {
@@ -299,13 +330,11 @@ export async function createConsoleOriginServer({
         req.on('close', dropClient);
         res.on('error', dropClient);
         res.on('close', dropClient);
-        const cached = getLastSnapshot();
+        const cached = getLastSnapshot() || await refreshSnapshot({ force: false, broadcast: false });
         const panels = await panelCollector.collectAll({ originRole: 'console' });
-        if (cached) {
-          sendStreamFrame(res, req, authRecord, `event: status\ndata: ${JSON.stringify(enrichSnapshot(cached, panels))}\n\n`);
-        } else {
-          await refreshSnapshot({ force: false });
-        }
+        if (res.writableEnded || res.destroyed) return;
+        const freshAuth = loadCurrentAuthRecord();
+        sendStreamFrame(res, req, freshAuth, `event: status\ndata: ${JSON.stringify(enrichSnapshot(cached, panels))}\n\n`);
         return;
       }
 

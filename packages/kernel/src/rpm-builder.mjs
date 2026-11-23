@@ -101,7 +101,15 @@ export async function verifyWorkspaceRpm(
     const absEntry = path.join(resolvedRoot, spec.entryPath);
     const contractMod = await import(pathToFileURL(absContract).href);
     const contract = validateContractDecl(contractMod.contract);
-    if (contract.id !== entry.id || contract.version !== entry.version || contract.kind !== 'root-plugin') {
+    const sameProvides = Array.isArray(entry.provides)
+      && contract.provides.length === entry.provides.length
+      && [...contract.provides].sort().every((val, idx) => val === [...entry.provides].sort()[idx]);
+    if (
+      contract.id !== entry.id
+      || contract.version !== entry.version
+      || contract.kind !== 'root-plugin'
+      || !sameProvides
+    ) {
       throw new StartupRejectedError(REJECT_CODES.GUARD_CONTRACT_MISMATCH, entry.id);
     }
     const actualHash = await sha256Tagged(await fs.readFile(absEntry));

@@ -24,9 +24,12 @@ export function createControlChannel({ socketPath = null } = {}) {
       : 'kernel.event';
     const meta = sanitizeAuditMetadata(raw?.meta ?? raw ?? {});
     delete meta.type;
+    const rawTime = typeof raw?.time === 'string' && raw.time.length > 0 && raw.time.length <= 40
+      ? raw.time
+      : new Date().toISOString();
     return {
       type,
-      time: typeof raw?.time === 'string' ? raw.time : new Date().toISOString(),
+      time: rawTime,
       meta,
     };
   }
@@ -75,6 +78,9 @@ export function createControlChannel({ socketPath = null } = {}) {
     if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
       throw new Error('Control socket directory must be an ordinary non-linked directory.');
     }
+    if (process.platform !== 'win32' && (dirStat.mode & 0o077) !== 0) {
+      throw new Error('Control socket directory must not be group or world accessible (0700 required).');
+    }
     const existing = fs.lstatSync(resolved, { throwIfNoEntry: false });
     if (existing) {
       if (existing.isSymbolicLink() || !existing.isSocket()) {
@@ -106,7 +112,9 @@ export function createControlChannel({ socketPath = null } = {}) {
             if (msg?.op === 'publish' && msg.event) {
               publish(msg.event);
             } else if (msg?.op === 'ping') {
-              sock.write(JSON.stringify({ type: 'pong', time: new Date().toISOString(), meta: {} }) + '\n');
+              if (sock.writable && !sock.destroyed && sock.writableLength <= MAX_LINE_BYTES) {
+                sock.write(JSON.stringify({ type: 'pong', time: new Date().toISOString(), meta: {} }) + '\n');
+              }
             }
           } catch {}
         }

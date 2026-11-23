@@ -173,19 +173,24 @@ test('decisions plugin runs out-of-process Python SQLite ledger, enforces local 
   assert.equal(staleSave.result.structuredContent.httpStatus, 409);
   assert.equal(staleSave.result.structuredContent.error, 'version_conflict');
 
-  // 4. Consistency check & context export read live SQLite records.
+  // 4. Consistency check & context export read live SQLite records, while path-traversal topic_id is rejected.
+  const dotTraversal = await callApproved('mcp__decisions__export_context', { topic_id: '..' }, 'dec_dot');
+  assert.equal(dotTraversal.result.isError, true);
+  assert.match(dotTraversal.result.content[0].text, /invalid topic_id/i);
+
   const consistency = await callApproved('mcp__decisions__check_consistency', {}, 'dec_check');
   assert.equal(consistency.result.structuredContent.consistent, true);
 
   const exported = await callApproved('mcp__decisions__export_context', { topic_id: 'adr-001' }, 'dec_ctx');
   assert.ok(JSON.stringify(exported.result.structuredContent).includes('adr-001'));
 
-  // 5. Declarative console:panel@1 reflects live SQLite topic inventory & loopback link!
+  // 5. Declarative console:panel@1 reflects live SQLite topic inventory, workflow_state, & loopback link!
   const consoleSvc = daemon.control.getService('console:loopback');
   const panel = await consoleSvc.panelCollector.collectById('decisions');
   assert.equal(panel.id, 'decisions');
   assert.equal(panel.status, 'ok');
   assert.ok(panel.summary.some(s => s.label === '决策议题' && s.value === '1'));
+  assert.equal(panel.table.rows[0][2], 'decided');
   assert.equal(panel.links.length, 1);
   assert.match(panel.links[0].href, /^http:\/\/127\.0\.0\.1:\d+$/);
 });

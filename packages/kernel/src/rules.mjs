@@ -3,20 +3,26 @@
 import {
   CLOSED_SLOTS,
   REJECT_CODES,
+  ROOT_ONLY_SERVICES,
   buildPermissionSubject,
   formatActionNode,
   mechanismActionKind,
+  serviceInvokeActionKind,
   validateContractDecl,
 } from '@loomward/shared';
 import { compileUnitGrant } from './policy-tree.mjs';
 
 const CLOSED_SLOT_SET = new Set(CLOSED_SLOTS);
+const ROOT_ONLY_SET = new Set(ROOT_ONLY_SERVICES);
 
 export const executionBoundaryRule = Object.freeze({
   id: 'guard.execution-boundary',
   order: 10,
   evaluate(ctx) {
-    const { contract } = ctx;
+    const { contract, expectedKind } = ctx;
+    if (expectedKind && contract.kind !== expectedKind) {
+      return REJECT_CODES.GUARD_CONTRACT_MISMATCH;
+    }
     if (contract.kind === 'extension-plugin' && contract.executionBoundary !== 'out-of-process') {
       return REJECT_CODES.GUARD_EXECUTION_BOUNDARY_REQUIRED;
     }
@@ -33,7 +39,7 @@ export const closedSlotRule = Object.freeze({
     const { contract, slotRegistry } = ctx;
     if (contract.kind === 'root-plugin') return;
     const isClosedTarget = target => {
-      if (CLOSED_SLOT_SET.has(target)) return true;
+      if (CLOSED_SLOT_SET.has(target) || ROOT_ONLY_SET.has(target)) return true;
       const slot = slotRegistry.get(target);
       return slot?.decl?.policy === 'closed';
     };
@@ -58,18 +64,28 @@ export const slotDeclarationRule = Object.freeze({
   order: 30,
   evaluate(ctx) {
     const { contract, slotRegistry } = ctx;
+    const isRoot = contract.kind === 'root-plugin';
+    const singleSlotsClaimed = new Set();
+
     for (const reg of contract.registers) {
       const slot = slotRegistry.get(reg.slot);
       if (!slot || typeof slot.register !== 'function') {
         return REJECT_CODES.GUARD_SLOT_UNDECLARED;
       }
-      if (slot.decl?.policy === 'closed') {
+      if (!isRoot && slot.decl?.policy === 'closed') {
         return REJECT_CODES.GUARD_POLICY_CLOSED;
+      }
+      if (slot.decl?.cardinality === 'single') {
+        const existingCount = typeof slot.names === 'function' ? slot.names().length : 0;
+        if (existingCount > 0 || singleSlotsClaimed.has(reg.slot)) {
+          return REJECT_CODES.GUARD_SLOT_NAME_TAKEN;
+        }
+        singleSlotsClaimed.add(reg.slot);
       }
       if (typeof slot.has === 'function' && slot.has(reg.name)) {
         return REJECT_CODES.GUARD_SLOT_NAME_TAKEN;
       }
-      if (slot.decl?.policy === 'trusted') {
+      if (!isRoot && slot.decl?.policy === 'trusted') {
         ctx.trustedActions.push(formatActionNode({ kind: 'impl.register', target: reg.slot }));
       }
     }
@@ -80,7 +96,7 @@ export const slotDeclarationRule = Object.freeze({
       if (!slot || typeof slot.hook !== 'function') {
         return REJECT_CODES.GUARD_SLOT_UNDECLARED;
       }
-      if (slot.decl?.policy === 'closed') {
+      if (!isRoot && slot.decl?.policy === 'closed') {
         return REJECT_CODES.GUARD_POLICY_CLOSED;
       }
       if (hook.phase === 'replace') {
@@ -92,16 +108,28 @@ export const slotDeclarationRule = Object.freeze({
         }
         replaceSlots.add(hook.slot);
       }
-      if (slot.decl?.policy === 'trusted') {
+      if (!isRoot && slot.decl?.policy === 'trusted') {
         ctx.trustedActions.push(formatActionNode({ kind: mechanismActionKind(hook.phase), target: hook.slot }));
       }
     }
 
-    for (const svcName of contract.writes.intercepts) {
-      ctx.trustedActions.push(formatActionNode({ kind: 'service.intercept', target: svcName }));
-    }
-    for (const svcName of contract.writes.isolateProvides) {
-      ctx.trustedActions.push(formatActionNode({ kind: 'service.isolate-provide', target: svcName }));
+    if (!isRoot) {
+      for (const svcName of contract.writes.intercepts) {
+        ctx.trustedActions.push(formatActionNode({ kind: 'service.intercept', target: svcName }));
+      }
+      for (const svcName of contract.writes.isolateProvides) {
+        ctx.trustedActions.push(formatActionNode({ kind: 'service.isolate-provide', target: svcName }));
+      }
+      for (const [svcName, rules] of Object.entries(ctx.serviceMethods ?? {})) {
+        if (!rules || typeof rules !== 'object') continue;
+        for (const [methodName, rule] of Object.entries(rules)) {
+          if (rule?.policy === 'trusted') {
+            ctx.trustedActions.push(
+              formatActionNode({ kind: serviceInvokeActionKind(rule.mode || 'read'), target: svcName, method: methodName }),
+            );
+          }
+        }
+      }
     }
   },
 });
@@ -134,7 +162,7 @@ export function createGuardPipeline(extraRules = []) {
 
 export function evaluateGuard(
   input,
-  { pipeline = BUILTIN_GUARD_RULES, extraNodes = [], serviceMethods = {} } = {},
+  { pipeline = BUILTIN_GUARD_RULES, extraNodes = [], serviceMethods = {}, expectedKind = null } = {},
 ) {
   try {
     if (!input || typeof input !== 'object' || !(input.slotRegistry instanceof Map)) {
@@ -150,7 +178,9 @@ export function evaluateGuard(
     const evalCtx = {
       input,
       contract,
+      expectedKind,
       slotRegistry: input.slotRegistry,
+      serviceMethods,
       trust,
       subject,
       trustedActions: [],
@@ -158,15 +188,19 @@ export function evaluateGuard(
     };
     for (const rule of pipeline) {
       const code = rule.evaluate(evalCtx);
-      if (typeof code === 'string' && code.length > 0) {
-        return { decision: 'deny', code };
+      if (code !== undefined) {
+        if (typeof code === 'string' && code.length > 0) {
+          return { decision: 'deny', code };
+        }
+        // Fail closed on async/thenable or non-string guard rule results.
+        return { decision: 'deny', code: REJECT_CODES.GUARD_INDETERMINATE };
       }
     }
     if (evalCtx.pendingActions.length > 0) {
       return {
         decision: 'escalate',
         code: REJECT_CODES.GUARD_TRUSTED_APPROVAL_REQUIRED,
-        pendingActions: [...new Set(evalCtx.pendingActions)],
+        pendingActions: Object.freeze([...new Set(evalCtx.pendingActions)]),
         subject,
       };
     }
@@ -174,12 +208,12 @@ export function evaluateGuard(
       approvedActions: trust.approvedActions ?? [],
       extraNodes,
       serviceMethods,
+      autoApproveTrusted: trust.autoApproveTrusted === true,
     });
     return {
       decision: 'allow',
       subject,
       grant,
-      trustedActions: [...new Set(evalCtx.trustedActions)],
     };
   } catch {
     return { decision: 'deny', code: REJECT_CODES.GUARD_INDETERMINATE };

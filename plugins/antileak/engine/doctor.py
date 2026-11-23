@@ -25,7 +25,9 @@ def sh(*a):
 
 pol = {}
 try:
-    pol = json.load(open(os.path.join(P, 'policy.json'), encoding='utf-8'))
+    _pol_path = os.environ.get('LOOMWARD_ANTILEAK_POLICY') or os.environ.get('GUARD_POLICY') or os.path.join(P, 'policy.json')
+    with open(_pol_path, encoding='utf-8') as _pf:
+        pol = json.load(_pf)
     ok('policy.json 可读', len(pol.get('forbidden_patterns', [])) > 0, '规则数=%d' % len(pol.get('forbidden_patterns', [])))
 except Exception as e:
     ok('policy.json 可读', False, str(e))
@@ -59,7 +61,7 @@ def _code(path):
 ok('git 钩子带 --net(懒刷新/即时查询只在 git 层)', all('--net' in _code(os.path.join(G, hk)) for hk in ('pre-commit', 'commit-msg', 'pre-push')))
 ok('Claude hooks 不带 --net(不在 hook 内联网)', not any('--net' in _code(os.path.join(H, f)) for f in os.listdir(H) if f.endswith('.sh')))
 # 3) R1 动态名单
-cache = pol.get('private_cache', os.path.join(H, 'private-repos.json'))
+cache = os.environ.get('LOOMWARD_ANTILEAK_CACHE') or pol.get('private_cache', os.path.join(H, 'private-repos.json'))
 if os.path.isfile(cache):
     try:
         d = json.load(open(cache, encoding='utf-8')); exp = d.get('expires_at', 0)

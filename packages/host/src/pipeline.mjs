@@ -1,20 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // This file is part of LoomWard (织盾) and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
+import { ToolBlockedError } from '@loomward/shared';
 import { ApprovalRecordTooLargeError } from '../../../local/approval-store.mjs';
 import { LocalApprovals } from '../../../local/approvals.mjs';
 import { RequestReceipts, TransientReceipts, StopReceipts } from '../../../local/receipts.mjs';
 import { validateRequestEnvelope, requiresApproval } from '../../../local/request-policy.mjs';
 
-const SUPPORTED_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26'];
+export { ToolBlockedError };
 
-export class ToolBlockedError extends Error {
-  constructor(message, { code = 'TOOL_HOOK_BLOCKED', rule = null } = {}) {
-    super(message);
-    this.name = 'ToolBlockedError';
-    this.code = code;
-    this.rule = rule;
-  }
-}
+const SUPPORTED_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26'];
+const VALID_SCOPE_SET = new Set(['computer:read', 'computer:write', 'computer:execute']);
 
 class ControlReplySignal {
   constructor(reply) {
@@ -32,6 +27,27 @@ function makeRpcError(rpcId, message, data, code = -32001) {
       ...(data ? { data } : {}),
     },
   };
+}
+
+function deepFreezeClone(value) {
+  const cloned = structuredClone(value);
+  const visit = node => {
+    if (!node || typeof node !== 'object') return node;
+    Object.freeze(node);
+    for (const child of Object.values(node)) {
+      visit(child);
+    }
+    return node;
+  };
+  return visit(cloned);
+}
+
+function isValidJsonRpcReply(outcome) {
+  if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) return false;
+  if (outcome.jsonrpc !== '2.0') return false;
+  const hasResult = Object.hasOwn(outcome, 'result');
+  const hasError = Object.hasOwn(outcome, 'error');
+  return hasResult !== hasError;
 }
 
 export function createCapabilityPolicyRule() {
@@ -77,21 +93,48 @@ export function createToolDispatchPipeline({
     throw new Error('createToolDispatchPipeline requires Cordis kernel slots.');
   }
 
+  const safeRecord = (event, fields) => {
+    try {
+      record(event, fields);
+    } catch {}
+  };
+
   const effectiveReceipts = receipts ?? (stateDir ? new RequestReceipts(stateDir) : null);
   const fallbackApprovals = approvals ?? (stateDir ? new LocalApprovals(stateDir, origin) : null);
+  effectiveReceipts?.ready?.catch(() => {});
+  fallbackApprovals?.ready?.catch(() => {});
+
   const inflight = new Map();
+
+  function getSandboxProvider() {
+    return slots.toolProvider.entries().find(e => e.name === 'sandbox-docker')?.impl ?? null;
+  }
 
   function collectExternalToolScopes() {
     const merged = new Map();
+    const sandboxProvider = getSandboxProvider();
     for (const entry of slots.toolProvider.entries()) {
       if (entry.name === 'sandbox-docker') continue;
       if (typeof entry.impl?.getToolScopes !== 'function') continue;
-      const scopes = entry.impl.getToolScopes();
+      let scopes;
+      try {
+        scopes = entry.impl.getToolScopes();
+      } catch {
+        continue;
+      }
       if (!(scopes instanceof Map)) continue;
       for (const [toolName, scopeList] of scopes.entries()) {
-        if (!merged.has(toolName) && Array.isArray(scopeList)) {
-          merged.set(toolName, [...scopeList]);
+        if (typeof toolName !== 'string' || merged.has(toolName)) continue;
+        if (sandboxProvider?.ownsTool?.(toolName)) continue;
+        try {
+          if (typeof entry.impl?.ownsTool === 'function' && !entry.impl.ownsTool(toolName)) continue;
+        } catch {
+          continue;
         }
+        if (!Array.isArray(scopeList) || scopeList.length === 0) continue;
+        const cleanScopes = scopeList.filter(s => typeof s === 'string' && VALID_SCOPE_SET.has(s));
+        if (cleanScopes.length === 0 || cleanScopes.length !== scopeList.length) continue;
+        merged.set(toolName, [...new Set(cleanScopes)]);
       }
     }
     return merged;
@@ -99,9 +142,11 @@ export function createToolDispatchPipeline({
 
   function findOwningProvider(toolName) {
     for (const entry of slots.toolProvider.entries()) {
-      if (typeof entry.impl?.ownsTool === 'function' && entry.impl.ownsTool(toolName)) {
-        return entry;
-      }
+      try {
+        if (typeof entry.impl?.ownsTool === 'function' && entry.impl.ownsTool(toolName)) {
+          return entry;
+        }
+      } catch {}
     }
     return null;
   }
@@ -130,15 +175,14 @@ export function createToolDispatchPipeline({
           reason: 'Local policy evaluation failed; request blocked.',
         };
       }
-      if (verdict?.decision === 'deny') {
-        return {
-          decision: 'deny',
-          rule: entry.name,
-          code: verdict.code || 'CAPABILITY_DISABLED',
-          capability: verdict.capability || 'policy',
-          reason: verdict.reason || 'Tool call blocked by local policy.',
-        };
-      }
+      if (verdict?.decision === 'allow') continue;
+      return {
+        decision: 'deny',
+        rule: entry.name,
+        code: verdict?.code || (verdict?.decision === 'deny' ? 'CAPABILITY_DISABLED' : 'POLICY_RULE_ERROR'),
+        capability: verdict?.capability || (verdict?.decision === 'deny' ? 'policy' : 'policyError'),
+        reason: verdict?.reason || 'Tool call blocked by local policy.',
+      };
     }
     return { decision: 'allow' };
   }
@@ -150,12 +194,24 @@ export function createToolDispatchPipeline({
     if (body.method === 'tools/list') {
       const seen = new Set();
       const tools = [];
+      const sandboxProvider = getSandboxProvider();
       for (const entry of slots.toolProvider.entries()) {
         if (typeof entry.impl?.listTools !== 'function') continue;
-        const listed = await entry.impl.listTools({ signal });
+        let listed;
+        try {
+          listed = await entry.impl.listTools({ signal });
+        } catch {
+          continue;
+        }
         if (!Array.isArray(listed)) continue;
         for (const tool of listed) {
           if (!tool || typeof tool.name !== 'string' || seen.has(tool.name)) continue;
+          if (entry.name !== 'sandbox-docker' && sandboxProvider?.ownsTool?.(tool.name)) continue;
+          try {
+            if (typeof entry.impl?.ownsTool === 'function' && !entry.impl.ownsTool(tool.name)) continue;
+          } catch {
+            continue;
+          }
           seen.add(tool.name);
           tools.push(tool);
         }
@@ -217,41 +273,7 @@ export function createToolDispatchPipeline({
         externalToolScopes: collectExternalToolScopes(),
       });
     } catch (error) {
-      return makeRpcError(rpcId, error.message);
-    }
-
-    let ownerEntry = null;
-    if (authorized.body.method === 'tools/call') {
-      const calledName = authorized.body.params?.name;
-      ownerEntry = findOwningProvider(calledName);
-      const evalCtx = Object.freeze({
-        requestId: message.id,
-        toolName: calledName,
-        body: structuredClone(authorized.body),
-        authorization: Object.freeze({ ...authorized.authorization }),
-        provider: ownerEntry?.impl ?? null,
-        providerName: ownerEntry?.name ?? null,
-      });
-      const policyOutcome = await evaluatePolicyRules(evalCtx);
-      if (policyOutcome.decision === 'deny') {
-        record('capability_blocked', {
-          tool: calledName,
-          rule: policyOutcome.rule,
-          capability: policyOutcome.capability,
-        });
-        return makeRpcError(authorized.body.id, policyOutcome.reason, {
-          code: policyOutcome.code,
-          tool: calledName,
-          capability: policyOutcome.capability,
-        });
-      }
-      if (!ownerEntry) {
-        return makeRpcError(authorized.body.id, `Tool "${calledName}" is unavailable.`, {
-          code: 'CAPABILITY_DISABLED',
-          tool: calledName,
-          capability: 'unknown',
-        });
-      }
+      return makeRpcError(rpcId, error?.message || 'Invalid request envelope.');
     }
 
     if (inflight.has(message.id)) {
@@ -274,9 +296,49 @@ export function createToolDispatchPipeline({
       else callerSignal.addEventListener('abort', onCallerAbort, { once: true });
     }
     const deadlineTimer = setTimeout(() => controller.abort(), Math.max(1, message.deadline - Date.now()));
+    deadlineTimer.unref?.();
     inflight.set(message.id, { controller, stopping, clientId: authorized.authorization.clientId });
 
     try {
+      controller.signal.throwIfAborted();
+
+      let ownerEntry = null;
+      if (authorized.body.method === 'tools/call') {
+        const calledName = authorized.body.params?.name;
+        ownerEntry = findOwningProvider(calledName);
+        const evalCtx = Object.freeze({
+          requestId: message.id,
+          toolName: calledName,
+          body: deepFreezeClone(authorized.body),
+          authorization: Object.freeze({ ...authorized.authorization }),
+          provider: ownerEntry?.impl ?? null,
+          providerName: ownerEntry?.name ?? null,
+          signal: controller.signal,
+        });
+        const policyOutcome = await evaluatePolicyRules(evalCtx);
+        if (policyOutcome.decision !== 'allow') {
+          safeRecord('capability_blocked', {
+            tool: calledName,
+            rule: policyOutcome.rule,
+            capability: policyOutcome.capability,
+          });
+          return makeRpcError(authorized.body.id, policyOutcome.reason, {
+            code: policyOutcome.code,
+            tool: calledName,
+            capability: policyOutcome.capability,
+          });
+        }
+        if (!ownerEntry) {
+          return makeRpcError(authorized.body.id, `Tool "${calledName}" is unavailable.`, {
+            code: 'CAPABILITY_DISABLED',
+            tool: calledName,
+            capability: 'unknown',
+          });
+        }
+      }
+
+      controller.signal.throwIfAborted();
+
       const persistent = requiresApproval(authorized.body);
       let prior;
       if (persistent) {
@@ -284,9 +346,16 @@ export function createToolDispatchPipeline({
           return makeRpcError(authorized.body.id, 'Replay protection ledger is unavailable.');
         }
         prior = await effectiveReceipts.inspect(message);
+      } else if (authorized.body.method === 'tools/call') {
+        // For exempt tool calls, only inspect before hooks run so blocked or force-approval requests do not burn quota prematurely.
+        const memLedger = stopping ? stopReceipts : controlReceipts;
+        prior = memLedger.inspect(message);
+        if (prior.acquired && !stopping && effectiveReceipts) {
+          prior = await effectiveReceipts.inspect(message);
+        }
       } else {
-        prior = (stopping ? controlReceipts : stopReceipts).inspect(message);
-        if (prior.acquired) prior = (stopping ? stopReceipts : controlReceipts).claim(message);
+        prior = controlReceipts.inspect(message);
+        if (prior.acquired) prior = controlReceipts.claim(message);
       }
       if (!prior.acquired) {
         return makeRpcError(
@@ -303,12 +372,17 @@ export function createToolDispatchPipeline({
       }
 
       const calledName = authorized.body.params.name;
+      const frozenBody = deepFreezeClone(authorized.body);
+      const frozenAuth = Object.freeze({
+        ...authorized.authorization,
+        scope: Object.freeze([...(authorized.authorization.scope ?? [])]),
+      });
       const invocation = Object.freeze({
         requestId: message.id,
         toolName: calledName,
         providerName: ownerEntry.name,
-        body: structuredClone(authorized.body),
-        authorization: Object.freeze({ ...authorized.authorization }),
+        body: frozenBody,
+        authorization: frozenAuth,
         signal: controller.signal,
       });
 
@@ -322,7 +396,8 @@ export function createToolDispatchPipeline({
 
         controller.signal.throwIfAborted();
 
-        const needsApproval = persistent || current?.forceApproval === true;
+        const forced = current?.forceApproval === true;
+        const needsApproval = persistent || forced;
         if (needsApproval) {
           const channel = resolveApprovalChannel();
           if (!channel || typeof channel.authorize !== 'function') {
@@ -331,35 +406,44 @@ export function createToolDispatchPipeline({
           // Approval is strictly verified and unlinked BEFORE claiming the 24h receipt or running the tool.
           const approval = await channel.authorize(authorized.body, authorized.authorization, {
             signal: controller.signal,
-            force: current?.forceApproval === true,
+            force: forced,
           });
-          if (!approval.approved) {
+          if (approval?.approved !== true) {
             const approveCommand = process.platform === 'win32' ? 'Approve.cmd' : 'approve';
-            record('approval_required', {
+            safeRecord('approval_required', {
               tool: calledName,
-              approvalIdShort: String(approval.id || '').slice(0, 8),
+              approvalIdShort: String(approval?.id || '').slice(0, 8),
             });
             throw new ControlReplySignal(makeRpcError(
               authorized.body.id,
               `Local approval is required. Open the protected ${approveCommand} on your computer, review this request, then retry the same tool arguments.`,
               {
                 code: 'LOCAL_APPROVAL_REQUIRED',
-                approval_id: approval.id,
-                expires_at: new Date(approval.expiresAt).toISOString(),
+                approval_id: approval?.id,
+                expires_at: approval?.expiresAt ? new Date(approval.expiresAt).toISOString() : null,
                 tool: calledName,
               },
             ));
           }
           controller.signal.throwIfAborted();
-          if (persistent) {
-            const claim = await effectiveReceipts.claim(message);
-            if (!claim.acquired) {
-              throw new ControlReplySignal(makeRpcError(
-                authorized.body.id,
-                'This request ID was already attempted; its result is not replayed.',
-                { reason: claim.reason },
-              ));
-            }
+          const claim = (persistent || (!stopping && effectiveReceipts))
+            ? await effectiveReceipts.claim(message)
+            : (stopping ? stopReceipts : controlReceipts).claim(message);
+          if (!claim.acquired) {
+            throw new ControlReplySignal(makeRpcError(
+              authorized.body.id,
+              'This request ID was already attempted; its result is not replayed.',
+              { reason: claim.reason },
+            ));
+          }
+        } else {
+          const claim = (stopping ? stopReceipts : controlReceipts).claim(message);
+          if (!claim.acquired) {
+            throw new ControlReplySignal(makeRpcError(
+              authorized.body.id,
+              'This request ID was already attempted or its control budget is exhausted.',
+              { reason: claim.reason },
+            ));
           }
         }
 
@@ -384,13 +468,25 @@ export function createToolDispatchPipeline({
         return { jsonrpc: '2.0', id: authorized.body.id ?? null, result: toolResult };
       });
 
+      controller.signal.throwIfAborted();
+
+      if (outcome?.blocked === true) {
+        throw new ToolBlockedError(outcome.reason || 'Tool output blocked by local safety hook.', {
+          code: outcome.code || 'TOOL_OUTPUT_BLOCKED',
+          rule: outcome.rule || null,
+        });
+      }
+      if (!isValidJsonRpcReply(outcome)) {
+        throw new Error('Invalid JSON-RPC response returned by tool invocation pipeline.');
+      }
+
       return outcome;
     } catch (error) {
       if (error instanceof ControlReplySignal) {
         return error.reply;
       }
       if (error instanceof ToolBlockedError) {
-        record('hook_blocked', {
+        safeRecord('hook_blocked', {
           tool: authorized.body.params?.name || 'unknown',
           code: error.code,
           ...(error.rule ? { rule: error.rule } : {}),
@@ -403,12 +499,12 @@ export function createToolDispatchPipeline({
       let reason = 'runtime_error';
       if (controller.signal.aborted) {
         reason = 'aborted';
-        record('tool_runtime_error', { reason });
+        safeRecord('tool_runtime_error', { reason });
         return makeRpcError(authorized.body.id, 'Local request was cancelled or expired.');
       }
       if (error instanceof ApprovalRecordTooLargeError) {
         reason = 'approval_record_too_large';
-        record('tool_runtime_error', { reason });
+        safeRecord('tool_runtime_error', { reason });
         return makeRpcError(
           authorized.body.id,
           'Request exceeds the local approval size limit. Reduce the request arguments or metadata.',
@@ -417,7 +513,7 @@ export function createToolDispatchPipeline({
       }
       if (/^[A-Z0-9_]{1,48}$/.test(error?.code || '')) reason = error.code;
       else if (error?.message?.includes('capacity') || error?.message?.includes('queue is full')) reason = 'local_capacity';
-      record('tool_runtime_error', { reason });
+      safeRecord('tool_runtime_error', { reason });
       return makeRpcError(authorized.body.id, 'Local policy or tool failed; request was not retried.');
     } finally {
       clearTimeout(deadlineTimer);

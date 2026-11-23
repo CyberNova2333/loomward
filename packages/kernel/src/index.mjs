@@ -13,8 +13,6 @@ export {
   compileUnitGrant,
 } from './policy-tree.mjs';
 export {
-  GUARD_UNIT_STATE,
-  resolveUnitState,
   unwrapCordisOriginal,
   createGuardedUnitState,
   KernelGuard,

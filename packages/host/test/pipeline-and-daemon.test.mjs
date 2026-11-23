@@ -382,4 +382,157 @@ test('stop_command lane remains isolated when normal lane is saturated and cloud
   const wsResp = sentFrames.find(f => f.type === 'response' && f.id === 'ws_req_1');
   assert.deepEqual(wsResp?.body, { jsonrpc: '2.0', id: 42, result: {} });
   assert.equal(typeof slowAborted, 'boolean');
+
+  // Verify notifications/initialized over cloudflare-wss returns a response frame (body omitted) instead of hanging!
+  fakeSocket.emit('message', Buffer.from(JSON.stringify({
+    type: 'request',
+    id: 'ws_notify_1',
+    issuedAt: now,
+    deadline: now + 30000,
+    authorization: { userId: 'owner', clientId: 'remote-client', scope: ['computer:read'] },
+    body: { jsonrpc: '2.0', method: 'notifications/initialized' },
+  })), false);
+  await new Promise(resolve => setTimeout(resolve, 25));
+  const wsNotifyReply = sentFrames.find(f => f.type === 'response' && f.id === 'ws_notify_1');
+  assert.ok(wsNotifyReply, 'notifications/initialized must emit a response frame to complete HTTP 202');
+  assert.equal(wsNotifyReply.body, undefined);
+});
+
+test('Wave 2 hardening: sandbox lockdown blocks before approval, forceApproval claims durable receipts, output redaction strips structuredContent, and localIngress enforces running state', async t => {
+  const { applyOutputRedaction } = await import('@loomward/shared');
+  const { stateDir, workspace } = await makeTempState(t);
+
+  let lockedDown = false;
+  const sandboxRuntime = {
+    isLockedDown: () => lockedDown,
+    async handleRpc(body) {
+      if (body.method === 'tools/list') return { jsonrpc: '2.0', id: body.id ?? null, result: { tools: [] } };
+      return {
+        jsonrpc: '2.0',
+        id: body.id ?? null,
+        result: {
+          content: [{ type: 'text', text: 'raw-secret-output' }],
+          structuredContent: { stdout: 'raw-secret-output' },
+        },
+      };
+    },
+    async close() {},
+  };
+
+  const daemon = await startLoomWardDaemon({
+    rootDir: REPO_ROOT,
+    stateDir,
+    origin: 'https://bridge.example.test/',
+    workspaceRoots: [workspace],
+    sandboxRuntime,
+    enableMcpHub: false,
+  });
+  t.after(() => daemon.stop());
+
+  // 1. Cleanup-failure lockdown blocks read_file at policy stage BEFORE creating an approval record.
+  lockedDown = true;
+  const lockedRead = await daemon.localIngress.dispatchRpc(
+    { jsonrpc: '2.0', id: 'lock-1', method: 'tools/call', params: { name: 'read_file', arguments: { path: 'a.txt' } } },
+    { requestId: 'req_lock_read_1', timeoutMs: 5000.75 },
+  );
+  assert.equal(lockedRead.error.data.code, 'CAPABILITY_DISABLED');
+  assert.equal(lockedRead.error.data.capability, 'cleanup_failed');
+  // command_status remains enabled during lockdown!
+  const lockedStatus = await daemon.localIngress.dispatchRpc(
+    { jsonrpc: '2.0', id: 'lock-2', method: 'tools/call', params: { name: 'command_status', arguments: { command_id: '00000000-0000-0000-0000-000000000001' } } },
+    { requestId: 'req_lock_status_1' },
+  );
+  assert.ok(lockedStatus.result);
+  lockedDown = false;
+
+  // 2. Output-stage redaction helper redacts BOTH content and structuredContent, and after-hook block maps to ToolBlockedError.
+  let forceExempt = false;
+  let blockOutput = false;
+  await daemon.control.mountExtensionUnit({
+    contract: {
+      schemaVersion: 1,
+      id: 'mod-hook-ext',
+      kind: 'extension-plugin',
+      version: '3.0.0-alpha.0',
+      executionBoundary: 'out-of-process',
+      writes: {
+        hooks: [
+          { slot: 'tool:invoke@1', phase: 'before' },
+          { slot: 'tool:invoke@1', phase: 'after' },
+        ],
+        intercepts: [],
+        isolateProvides: [],
+      },
+    },
+    trust: { autoApproveTrusted: true },
+    load: () => ({
+      name: 'mod-hook-ext',
+      apply(ctx) {
+        const slot = ctx.get('tool:invoke@1');
+        slot.hook('before', input => {
+          // Verify invocation.body is deeply frozen so hooks cannot mutate arguments in-place.
+          assert.throws(() => { input.body.params.arguments.injected = true; }, TypeError);
+          if (forceExempt) return { ...input, forceApproval: true };
+          return input;
+        });
+        slot.hook('after', out => {
+          if (blockOutput) {
+            return { ...out, blocked: true, code: 'MOD_OUTPUT_BLOCKED', rule: 'MOD-OUT-1', reason: 'Output blocked by moderation.' };
+          }
+          return applyOutputRedaction(out, {
+            protocolVersion: 1,
+            decision: 'redact',
+            categories: ['pii'],
+            ruleId: 'MOD-REDACT-1',
+            redactedPayload: '[REDACTED]',
+          });
+        });
+      },
+    }),
+  });
+
+  // Exempt tool with forceApproval=true pauses for local approval WITHOUT burning the request ID,
+  // and after approval claims a durable receipt and applies output redaction to both content & structuredContent!
+  forceExempt = true;
+  const forced1 = await daemon.localIngress.dispatchRpc(
+    { jsonrpc: '2.0', id: 'f-1', method: 'tools/call', params: { name: 'computer_context', arguments: {} } },
+    { requestId: 'req_force_exempt_same_id' },
+  );
+  assert.equal(forced1.error.data.code, 'LOCAL_APPROVAL_REQUIRED');
+  await approvePendingOnDisk(stateDir, forced1.error.data.approval_id);
+
+  // Re-sending with the SAME requestId succeeds now that it's approved (proving pre-approval did not burn the ID),
+  // and a third attempt with the same requestId is rejected by the durable 24h RequestReceipts ledger!
+  const forced2 = await daemon.localIngress.dispatchRpc(
+    { jsonrpc: '2.0', id: 'f-1', method: 'tools/call', params: { name: 'computer_context', arguments: {} } },
+    { requestId: 'req_force_exempt_same_id' },
+  );
+  assert.equal(forced2.result.content[0].text, '[REDACTED]');
+  assert.equal(forced2.result.structuredContent.text, '[REDACTED]');
+  assert.equal(forced2.result.structuredContent.stdout, undefined);
+
+  const forcedReplay = await daemon.localIngress.dispatchRpc(
+    { jsonrpc: '2.0', id: 'f-1', method: 'tools/call', params: { name: 'computer_context', arguments: {} } },
+    { requestId: 'req_force_exempt_same_id' },
+  );
+  assert.ok(['already_attempted', 'request_id_conflict'].includes(forcedReplay.error.data.reason));
+  forceExempt = false;
+
+  // Output-stage block returns structured JSON-RPC error instead of leaking raw output.
+  blockOutput = true;
+  const outBlocked = await daemon.localIngress.dispatchRpc(
+    { jsonrpc: '2.0', id: 'ob-1', method: 'tools/call', params: { name: 'computer_context', arguments: {} } },
+    { requestId: 'req_out_blocked_1' },
+  );
+  assert.equal(outBlocked.error.data.code, 'MOD_OUTPUT_BLOCKED');
+  assert.equal(outBlocked.error.data.rule, 'MOD-OUT-1');
+  blockOutput = false;
+
+  // After localIngress.stop(), dispatchRpc refuses new calls cleanly.
+  await daemon.localIngress.stop();
+  const afterStop = await daemon.localIngress.dispatchRpc(
+    { jsonrpc: '2.0', id: 'stop-1', method: 'ping' },
+    { requestId: 'req_after_stop_1' },
+  );
+  assert.equal(afterStop.error.code, -32001);
 });

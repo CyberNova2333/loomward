@@ -16,9 +16,17 @@ export { createLocalMcpIngress } from './ingress-local.mjs';
 
 export const name = 'host';
 
+function canonicalizeOrigin(rawOrigin) {
+  try {
+    return new URL(rawOrigin).origin;
+  } catch {
+    return 'http://127.0.0.1';
+  }
+}
+
 export function apply(ctx, config = {}) {
   const stateDir = config.stateDir ?? null;
-  const origin = config.origin || 'http://127.0.0.1';
+  const origin = canonicalizeOrigin(config.origin || config.relay?.origin || 'http://127.0.0.1');
 
   const vaultSlot = ctx.get(VAULT_SLOT);
   const policySlot = ctx.get('policy:rule@1');
@@ -40,11 +48,13 @@ export function apply(ctx, config = {}) {
   }
 
   const approvals = config.approvals ?? (stateDir ? new LocalApprovals(stateDir, origin) : null);
+  approvals?.ready?.catch(() => {});
   if (approvalSlot && approvals) {
     approvalSlot.register('local-approvals', approvals);
   }
 
   const receipts = config.receipts ?? (stateDir ? new RequestReceipts(stateDir) : null);
+  receipts?.ready?.catch(() => {});
   const controlReceipts = config.controlReceipts ?? new TransientReceipts();
   const stopReceipts = config.stopReceipts ?? new StopReceipts();
 
@@ -88,9 +98,11 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  ctx.effect(() => () => {
-    void localIngress.stop();
-    if (relayIngress) void relayIngress.stop();
+  ctx.effect(() => async () => {
+    await Promise.allSettled([
+      localIngress.stop(),
+      relayIngress ? relayIngress.stop() : Promise.resolve(),
+    ]);
   }, 'host:stop-ingresses');
 
   ctx.provide('host:vault', Object.freeze({

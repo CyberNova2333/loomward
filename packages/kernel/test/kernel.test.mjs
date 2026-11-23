@@ -376,3 +376,120 @@ test('evaluateGuard rejects tool:invoke@1@replace to prevent bypassing approval 
   assert.equal(res.decision, 'deny');
   assert.equal(res.code, REJECT_CODES.GUARD_POLICY_CLOSED);
 });
+
+test('KernelGuard blocks Cordis context escapes (ctx.root/reflect/registry/events/proto/cordis.original), root-plugin spoofing, and hung-root BootDeadline deadlock', async () => {
+  // 1. Hung root plugin during boot with hung dispose does not deadlock withDeadline.
+  const hungBytes = new TextEncoder().encode('hung-root');
+  const hungHash = await sha256Tagged(hungBytes);
+  const hungContract = validateContractDecl({
+    schemaVersion: 1,
+    id: 'hung-root',
+    kind: 'root-plugin',
+    version: '3.0.0-alpha.0',
+    executionBoundary: 'in-process-root',
+  });
+  const hungRpm = await createFrozenRpm({
+    target: 'runtime',
+    rootPlugins: [{ id: 'hung-root', version: '3.0.0-alpha.0', entryHash: hungHash, provides: [] }],
+  });
+  await assert.rejects(
+    () => createLoomWardKernel({
+      rpm: hungRpm,
+      timeoutMs: 80,
+      roots: [{
+        id: 'hung-root',
+        contract: hungContract,
+        bytes: async () => hungBytes,
+        load: async () => ({
+          name: 'hung-root',
+          async apply() {
+            await new Promise(() => {});
+          },
+        }),
+      }],
+    }),
+    err => err.name === 'BootDeadlineError',
+  );
+
+  // 2. mountExtensionUnit rejects contract with kind="root-plugin".
+  const { control } = await bootMinimalKernel();
+  await assert.rejects(
+    () => control.mountExtensionUnit({
+      contract: {
+        schemaVersion: 1,
+        id: 'spoofed-root',
+        kind: 'root-plugin',
+        version: '3.0.0-alpha.0',
+        executionBoundary: 'in-process-root',
+      },
+      load: () => ({ name: 'spoofed-root', apply() {} }),
+    }),
+    err => err instanceof StartupRejectedError && err.code === REJECT_CODES.GUARD_CONTRACT_MISMATCH,
+  );
+
+  // 3. Mounted extension facade hides root/reflect/registry/events, blocks null-proto escape & cordis.original, and blocks after unmount.
+  let extCtx;
+  let extProviderSlot;
+  let extService;
+  await control.mountExtensionUnit({
+    contract: {
+      schemaVersion: 1,
+      id: 'escape-probe-ext',
+      kind: 'extension-plugin',
+      version: '3.0.0-alpha.0',
+      executionBoundary: 'out-of-process',
+      consumes: ['tool:provider@1', 'demo:service'],
+      registers: [{ slot: 'tool:provider@1', name: 'probe-prov' }],
+    },
+    trust: { autoApproveTrusted: true },
+    serviceMethods: {
+      'demo:service': {
+        readInfo: { policy: 'public', mode: 'read' },
+      },
+    },
+    load: () => ({
+      name: 'escape-probe-ext',
+      apply(ctx) {
+        extCtx = ctx;
+        extProviderSlot = ctx.get('tool:provider@1');
+        extService = ctx.get('demo:service');
+      },
+    }),
+  });
+
+  assert.equal(extCtx.root, undefined);
+  assert.equal(extCtx.reflect, undefined);
+  assert.equal(extCtx.registry, undefined);
+  assert.equal(extCtx.events, undefined);
+  assert.equal(Object.getPrototypeOf(extCtx), null);
+  assert.deepEqual(Object.getOwnPropertySymbols(extCtx), []);
+  assert.equal(extProviderSlot[Symbol.for('cordis.original')], undefined);
+  assert.equal(extProviderSlot.registerBuiltin, undefined);
+  assert.equal(extProviderSlot.entries, undefined);
+  assert.equal(extService[Symbol.for('cordis.original')], undefined);
+  assert.throws(() => extCtx.on('internal/service', () => {}), SlotError);
+  assert.throws(() => extCtx.get('sandbox:docker'), SlotError);
+  // Unlisted method on demo:service fails closed.
+  assert.throws(() => extService.syncDanger(), SlotError);
+  assert.equal(extService.readInfo(), 'ok');
+
+  // After unmount, captured service proxy & context fail closed.
+  await control.unmountExtensionUnit('escape-probe-ext');
+  assert.throws(() => extService.readInfo(), SlotError);
+  assert.throws(() => extCtx.get('demo:service'), SlotError);
+
+  await control.stop();
+  await assert.rejects(
+    () => control.mountExtensionUnit({
+      contract: {
+        schemaVersion: 1,
+        id: 'post-stop-ext',
+        kind: 'extension-plugin',
+        version: '3.0.0-alpha.0',
+        executionBoundary: 'out-of-process',
+      },
+      load: () => ({ name: 'post-stop-ext', apply() {} }),
+    }),
+    StartupRejectedError,
+  );
+});

@@ -29,12 +29,20 @@ export function createCloudflareRelayIngress({
   const wsUrl = new URL('/bridge', url);
   wsUrl.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
 
+  const safeRecord = (event, fields) => {
+    try { record(event, fields); } catch {}
+  };
+  const safeStatus = (live, opts) => {
+    try { return status(live, opts); } catch { return undefined; }
+  };
+
   let running = false;
   let retries = 0;
   let timer = null;
   let activeSocket = null;
   let starting = null;
-  const socketRequests = new Map();
+  let startEpoch = 0;
+  const socketRequests = new Set();
 
   function schedule() {
     if (!running) return;
@@ -42,6 +50,7 @@ export function createCloudflareRelayIngress({
     retries += 1;
     const delay = Math.min(30000, 1000 * 2 ** Math.min(retries - 1, 5)) + Math.floor(Math.random() * 500);
     timer = setTimeout(connect, delay);
+    timer.unref?.();
   }
 
   function connect() {
@@ -69,18 +78,21 @@ export function createCloudflareRelayIngress({
 
       socket.on('open', () => {
         if (!running || activeSocket !== socket) { socket.terminate(); return; }
-        record('connected', { route: candidate ? 'proxy' : 'direct', ingress: 'cloudflare-wss' });
-        status(false, { force: true });
-        socket.send('{"type":"ping"}');
+        safeRecord('connected', { route: candidate ? 'proxy' : 'direct', ingress: 'cloudflare-wss' });
+        safeStatus(false, { force: true });
+        try { socket.send('{"type":"ping"}'); } catch {}
         beat = setInterval(() => {
           if (Date.now() - lastPong > HEARTBEAT_MAX_AGE_MS) return socket.terminate();
-          if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ping' }));
-          status(Date.now() - lastPong <= HEARTBEAT_MAX_AGE_MS);
+          if (socket.readyState === WebSocket.OPEN) {
+            try { socket.send(JSON.stringify({ type: 'ping' })); } catch {}
+          }
+          safeStatus(Date.now() - lastPong <= HEARTBEAT_MAX_AGE_MS);
         }, HEARTBEAT_INTERVAL_MS);
+        beat.unref?.();
       });
 
       socket.on('unexpected-response', (_request, response) => {
-        record('socket_unexpected_response', { status: Number(response?.statusCode) || 0 });
+        safeRecord('socket_unexpected_response', { status: Number(response?.statusCode) || 0 });
         try { response?.resume(); } catch {}
       });
 
@@ -92,28 +104,51 @@ export function createCloudflareRelayIngress({
           message = JSON.parse(data.toString());
           if (!message || Array.isArray(message) || typeof message !== 'object') throw new Error();
         } catch {
-          socket.close(1003, 'Invalid bridge frame');
+          try { socket.close(1003, 'Invalid bridge frame'); } catch {}
           return;
         }
         if (message.type === 'pong') {
           retries = 0;
           lastPong = Date.now();
-          status(true);
+          safeStatus(true);
           return;
         }
         if (message.type === 'cancel' && typeof message.id === 'string') {
-          pipeline.abort(message.id);
+          for (const active of socketRequests) {
+            if (active.socket === socket && active.id === message.id) {
+              active.controller.abort();
+            }
+          }
           return;
         }
         if (message.type !== 'request') return;
 
         const reqController = new AbortController();
-        const reqKey = typeof message.id === 'string' ? message.id : Symbol('req');
-        socketRequests.set(reqKey, { socket, controller: reqController });
+        const entry = {
+          id: typeof message.id === 'string' ? message.id : null,
+          socket,
+          controller: reqController,
+        };
+        socketRequests.add(entry);
         try {
           const body = await pipeline.handleRequest(message, { signal: reqController.signal });
-          if (socket.readyState !== WebSocket.OPEN || body === undefined) return;
-          let encoded = JSON.stringify({ type: 'response', id: message.id, body });
+          if (socket.readyState !== WebSocket.OPEN) return;
+          // Note: when body === undefined (e.g., notifications/initialized), JSON.stringify omits `body`
+          // and sends `{"type":"response","id":"..."}` which completes Cloudflare Relay's HTTP 202.
+          let encoded;
+          try {
+            encoded = JSON.stringify({ type: 'response', id: message.id, body });
+          } catch {
+            encoded = JSON.stringify({
+              type: 'response',
+              id: message.id,
+              body: {
+                jsonrpc: '2.0',
+                id: message.body?.id ?? null,
+                error: { code: -32603, message: 'Failed to serialize tool response.' },
+              },
+            });
+          }
           if (Buffer.byteLength(encoded) > MAX_REPLY_BYTES) {
             encoded = JSON.stringify({
               type: 'response',
@@ -126,27 +161,32 @@ export function createCloudflareRelayIngress({
             });
           }
           socket.send(encoded);
+        } catch {
+          safeRecord('relay_dispatch_error', { ingress: 'cloudflare-wss' });
         } finally {
-          socketRequests.delete(reqKey);
+          socketRequests.delete(entry);
         }
       });
 
       socket.on('error', error => {
-        record('socket_error', { code: /^[A-Z0-9_]+$/.test(error.code || '') ? error.code : 'HANDSHAKE_OR_NETWORK' });
+        safeRecord('socket_error', { code: /^[A-Z0-9_]+$/.test(error.code || '') ? error.code : 'HANDSHAKE_OR_NETWORK' });
       });
 
       socket.on('close', code => {
         clearInterval(beat);
-        for (const active of socketRequests.values()) {
-          if (active.socket === socket) active.controller.abort();
+        for (const active of [...socketRequests]) {
+          if (active.socket === socket) {
+            active.controller.abort();
+            socketRequests.delete(active);
+          }
         }
         if (activeSocket !== socket) return;
-        status(false, { force: true });
-        record('disconnected', { code });
+        safeStatus(false, { force: true });
+        safeRecord('disconnected', { code });
         schedule();
       });
     } catch (error) {
-      record('connection_setup_failed', { code: /^[A-Z0-9_]{1,48}$/.test(error?.code || '') ? error.code : 'SETUP_ERROR' });
+      safeRecord('connection_setup_failed', { code: /^[A-Z0-9_]{1,48}$/.test(error?.code || '') ? error.code : 'SETUP_ERROR' });
       schedule();
     }
   }
@@ -158,12 +198,13 @@ export function createCloudflareRelayIngress({
     async start() {
       if (running) return starting;
       running = true;
+      const epoch = ++startEpoch;
       starting = (async () => {
         try {
           await pipeline.ready();
-          if (running) connect();
+          if (running && epoch === startEpoch) connect();
         } catch (error) {
-          running = false;
+          if (epoch === startEpoch) running = false;
           throw error;
         }
       })();
@@ -171,19 +212,27 @@ export function createCloudflareRelayIngress({
     },
     async stop() {
       running = false;
+      startEpoch += 1;
       clearTimeout(timer);
-      for (const active of socketRequests.values()) active.controller.abort();
-      pipeline.abortAll();
+      for (const active of [...socketRequests]) {
+        active.controller.abort();
+        socketRequests.delete(active);
+      }
       const socket = activeSocket;
+      activeSocket = null;
       if (socket && socket.readyState !== WebSocket.CLOSED) {
         await new Promise(resolve => {
           const closeTimer = setTimeout(() => { socket.terminate(); resolve(); }, 1500);
+          closeTimer.unref?.();
           socket.once('close', () => { clearTimeout(closeTimer); resolve(); });
-          if (socket.readyState === WebSocket.OPEN) socket.close(1000, 'Local connector stopped');
-          else socket.terminate();
+          if (socket.readyState === WebSocket.OPEN) {
+            try { socket.close(1000, 'Local connector stopped'); } catch { socket.terminate(); }
+          } else {
+            socket.terminate();
+          }
         });
       }
-      status(false, { force: true });
+      await Promise.resolve(safeStatus(false, { force: true })).catch(() => {});
     },
     health() {
       return {

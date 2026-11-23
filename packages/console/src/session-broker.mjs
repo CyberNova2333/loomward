@@ -41,14 +41,17 @@ export function createDualOriginSessionBroker({ onSessionsRevoked = () => {} } =
   const deriveConsoleCsrf = (kind, id) =>
     crypto.createHmac('sha256', consoleCsrfSecret).update(`console:${kind}:${id}`).digest('base64url');
 
-  function pruneMap(map, now = Date.now()) {
+  function pruneMap(map, now = Date.now(), onEvict = null) {
     for (const [key, item] of map) {
       if (item.expiresAt <= now || (item.lastSeenAt && now - item.lastSeenAt > SESSION_IDLE_MS)) {
-        map.delete(key);
+        if (onEvict) onEvict(key);
+        else map.delete(key);
       }
     }
     while (map.size >= MAX_SESSIONS) {
-      map.delete(map.keys().next().value);
+      const oldestKey = map.keys().next().value;
+      if (onEvict) onEvict(oldestKey);
+      else map.delete(oldestKey);
     }
   }
 
@@ -63,7 +66,7 @@ export function createDualOriginSessionBroker({ onSessionsRevoked = () => {} } =
 
   function createTrustSession(authMethod, authVersion, sessionPersistence = 'tab') {
     const now = Date.now();
-    pruneMap(trustSessions, now);
+    pruneMap(trustSessions, now, sid => revokeTrustSession(sid));
     const sid = crypto.randomBytes(32).toString('base64url');
     const csrfToken = deriveTrustCsrf('auth', sid);
     const tabToken = crypto.randomBytes(32).toString('base64url');
@@ -141,11 +144,16 @@ export function createDualOriginSessionBroker({ onSessionsRevoked = () => {} } =
     const now = Date.now();
     if (entry.expiresAt <= now) return null;
     const parent = trustSessions.get(entry.parentTrustSid);
-    if (!parent || parent.expiresAt <= now) return null;
+    if (!parent || parent.expiresAt <= now || (parent.lastSeenAt && now - parent.lastSeenAt > SESSION_IDLE_MS)) {
+      return null;
+    }
     if (!authRecord || authRecord.error || !authRecord.initialized) return null;
     if (entry.authVersion !== authRecord.authVersion) return null;
+    if ((authRecord.requirePasskey || (Array.isArray(authRecord.passkeys) && authRecord.passkeys.length > 0)) && entry.authMethod !== 'passkey') {
+      return null;
+    }
 
-    pruneMap(consoleSessions, now);
+    pruneMap(consoleSessions, now, csid => revokeConsoleSession(csid));
     const sid = crypto.randomBytes(32).toString('base64url');
     const csrfToken = deriveConsoleCsrf('auth', sid);
     const tabToken = crypto.randomBytes(32).toString('base64url');
@@ -199,6 +207,23 @@ export function createDualOriginSessionBroker({ onSessionsRevoked = () => {} } =
     }
     if (touch) session.lastSeenAt = now;
     return session;
+  }
+
+  function revokeChildConsoleSessions(trustSid) {
+    const revokedConsoleSids = [];
+    for (const [csid, cs] of consoleSessions) {
+      if (cs.parentTrustSid === trustSid) {
+        consoleSessions.delete(csid);
+        revokedConsoleSids.push(csid);
+      }
+    }
+    for (const [tok, entry] of handoffTickets) {
+      if (entry.parentTrustSid === trustSid) handoffTickets.delete(tok);
+    }
+    if (revokedConsoleSids.length) {
+      onSessionsRevoked({ trustSid: null, consoleSids: revokedConsoleSids, all: false });
+    }
+    return revokedConsoleSids;
   }
 
   function revokeTrustSession(trustSid) {
@@ -380,6 +405,7 @@ export function createDualOriginSessionBroker({ onSessionsRevoked = () => {} } =
     exchangeConsoleHandoffTicket,
     authenticateConsoleSession,
     revokeTrustSession,
+    revokeChildConsoleSessions,
     revokeConsoleSession,
     invalidateAllSessions,
     pruneOtherTrustSessions,

@@ -8,24 +8,37 @@ import { spawn } from 'node:child_process';
 
 const SERVICE_ROOT = path.resolve(import.meta.dirname, '..', 'service');
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const VALID_TOPIC_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+function formatLoopbackHostForUrl(host) {
+  const trimmed = String(host || '').trim();
+  const bare = trimmed.replace(/^\[|\]$/g, '');
+  return bare.includes(':') ? `[${bare}]` : bare;
+}
+
+export function assertLoopbackHost(rawHost) {
+  const bare = String(rawHost || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (bare !== '127.0.0.1' && bare !== 'localhost' && bare !== '::1') {
+    throw new Error(`Decisions ledger endpoint must bind strictly to loopback (got ${rawHost}).`);
+  }
+  return bare;
+}
 
 function assertLoopbackUrl(rawUrl) {
   const parsed = new URL(rawUrl);
   if (parsed.protocol !== 'http:') {
     throw new Error('Decisions ledger client only permits loopback http:// endpoints.');
   }
-  const host = parsed.hostname.toLowerCase();
-  if (host !== '127.0.0.1' && host !== 'localhost' && host !== '[::1]' && host !== '::1') {
-    throw new Error(`Decisions ledger endpoint must bind strictly to loopback (got ${host}).`);
-  }
+  assertLoopbackHost(parsed.hostname);
   return parsed.origin;
 }
 
 function findFreeLoopbackPort(host = '127.0.0.1') {
+  const safeHost = assertLoopbackHost(host);
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
     srv.once('error', reject);
-    srv.listen(0, host, () => {
+    srv.listen(0, safeHost, () => {
       const addr = srv.address();
       const port = typeof addr === 'object' && addr ? addr.port : 0;
       srv.close(err => (err ? reject(err) : resolve(port)));
@@ -45,9 +58,15 @@ function sanitizedServiceEnv() {
   return env;
 }
 
+function normalizeTimeoutMs(raw, fallback = 10000) {
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.max(500, Math.trunc(n)) : fallback;
+}
+
 function httpJsonRequest(baseUrl, pathname, { method = 'GET', body, timeoutMs = 10000, signal } = {}) {
   const origin = assertLoopbackUrl(baseUrl);
   const parsed = new URL(pathname, origin);
+  const effectiveTimeout = normalizeTimeoutMs(timeoutMs, 10000);
   const payloadBuf = body !== undefined ? Buffer.from(JSON.stringify(body), 'utf8') : null;
   const headers = {
     Accept: 'application/json',
@@ -62,10 +81,11 @@ function httpJsonRequest(baseUrl, pathname, { method = 'GET', body, timeoutMs = 
       return;
     }
     let settled = false;
+    let timer = null;
     const done = (err, value) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       if (signal) signal.removeEventListener('abort', onAbort);
       if (err) reject(err);
       else resolve(value);
@@ -77,7 +97,7 @@ function httpJsonRequest(baseUrl, pathname, { method = 'GET', body, timeoutMs = 
       path: parsed.pathname + parsed.search,
       method,
       headers,
-      timeout: timeoutMs,
+      timeout: effectiveTimeout,
     }, res => {
       const chunks = [];
       let bytes = 0;
@@ -105,15 +125,38 @@ function httpJsonRequest(baseUrl, pathname, { method = 'GET', body, timeoutMs = 
     };
     if (signal) signal.addEventListener('abort', onAbort, { once: true });
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       req.destroy();
-      done(new Error(`Decisions service request timed out after ${timeoutMs}ms.`));
-    }, Math.max(500, timeoutMs));
+      done(new Error(`Decisions service request timed out after ${effectiveTimeout}ms.`));
+    }, effectiveTimeout);
     timer.unref?.();
 
     req.on('error', err => done(err));
     if (payloadBuf) req.write(payloadBuf);
     req.end();
+  });
+}
+
+function terminateChildProcess(proc) {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
+    return Promise.resolve();
+  }
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGKILL'); } catch {}
+      resolve();
+    }, 2000);
+    timer.unref?.();
+    proc.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    try {
+      proc.kill('SIGTERM');
+    } catch {
+      clearTimeout(timer);
+      resolve();
+    }
   });
 }
 
@@ -126,6 +169,8 @@ export function createDecisionsServiceClient({
   spawnService = false,
   timeoutMs = 10000,
 } = {}) {
+  const safeHost = assertLoopbackHost(host);
+  const boundedTimeoutMs = normalizeTimeoutMs(timeoutMs, 10000);
   let activeBaseUrl = baseUrl ? assertLoopbackUrl(baseUrl) : null;
   let child = null;
   let starting = null;
@@ -133,59 +178,88 @@ export function createDecisionsServiceClient({
 
   async function ensureRunning({ signal } = {}) {
     if (closed) throw new Error('Decisions ledger plugin is closed.');
+    if (signal?.aborted) throw new Error('Decisions service request cancelled.');
     if (activeBaseUrl && !spawnService) return activeBaseUrl;
-    if (activeBaseUrl && child && child.exitCode === null) return activeBaseUrl;
+    if (activeBaseUrl && child && child.exitCode === null && child.signalCode === null) return activeBaseUrl;
     if (!spawnService) {
       throw new Error('Decisions ledger service baseUrl is not configured.');
     }
     if (!configPath) {
       throw new Error('Decisions ledger spawnService requires an explicit configPath.');
     }
-    if (starting) return starting;
 
-    starting = (async () => {
-      const targetPort = port > 0 ? port : await findFreeLoopbackPort(host);
-      const url = assertLoopbackUrl(`http://${host}:${targetPort}`);
-      const proc = spawn(
-        pythonPath,
-        ['-B', '-m', 'core.server', '--config', path.resolve(configPath), '--host', host, '--port', String(targetPort), '--no-browser'],
-        {
-          cwd: SERVICE_ROOT,
-          shell: false,
-          windowsHide: true,
-          env: sanitizedServiceEnv(),
-          stdio: ['ignore', 'pipe', 'pipe'],
+    if (!starting) {
+      starting = (async () => {
+        const targetPort = port > 0 ? port : await findFreeLoopbackPort(safeHost);
+        if (closed) throw new Error('Decisions ledger plugin is closed.');
+        const url = assertLoopbackUrl(`http://${formatLoopbackHostForUrl(safeHost)}:${targetPort}`);
+        const proc = spawn(
+          pythonPath,
+          ['-B', '-m', 'core.server', '--config', path.resolve(configPath), '--host', safeHost, '--port', String(targetPort), '--no-browser'],
+          {
+            cwd: SERVICE_ROOT,
+            shell: false,
+            windowsHide: true,
+            env: sanitizedServiceEnv(),
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
+        child = proc;
+        let exited = false;
+        let spawnErr = null;
+        proc.on('error', err => {
+          spawnErr = err;
+          exited = true;
+        });
+        proc.once('exit', () => { exited = true; });
+        proc.stdout?.resume();
+        proc.stderr?.resume();
+
+        const deadline = Date.now() + Math.max(3000, boundedTimeoutMs);
+        while (Date.now() < deadline && !closed && !exited) {
+          try {
+            const probe = await httpJsonRequest(url, '/api/status', { timeoutMs: 1000 });
+            if (probe.status === 200 && probe.data?.status === 'ok') {
+              if (closed) break;
+              activeBaseUrl = url;
+              return url;
+            }
+          } catch {}
+          await new Promise(r => setTimeout(r, 120));
+        }
+        if (child === proc) child = null;
+        await terminateChildProcess(proc);
+        throw new Error(spawnErr ? `Failed to spawn Decisions service (${spawnErr.code || 'spawn_error'}).` : 'Failed to start out-of-process Decisions SQLite service.');
+      })().finally(() => {
+        starting = null;
+      });
+      starting.catch(() => {});
+    }
+
+    if (!signal) return starting;
+    return new Promise((resolve, reject) => {
+      const onAbort = () => reject(new Error('Decisions service request cancelled.'));
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+      starting.then(
+        val => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(val);
+        },
+        err => {
+          signal.removeEventListener('abort', onAbort);
+          reject(err);
         },
       );
-      child = proc;
-      let exited = false;
-      proc.once('exit', () => { exited = true; });
-      proc.stdout?.resume();
-      proc.stderr?.resume();
-
-      const deadline = Date.now() + Math.max(3000, timeoutMs);
-      while (Date.now() < deadline && !closed && !exited) {
-        if (signal?.aborted) break;
-        try {
-          const probe = await httpJsonRequest(url, '/api/status', { timeoutMs: 1000 });
-          if (probe.status === 200 && probe.data?.status === 'ok') {
-            activeBaseUrl = url;
-            return url;
-          }
-        } catch {}
-        await new Promise(r => setTimeout(r, 120));
-      }
-      try { proc.kill('SIGTERM'); } catch {}
-      throw new Error('Failed to start out-of-process Decisions SQLite service.');
-    })().finally(() => {
-      starting = null;
     });
-    return starting;
   }
 
   async function requestJson(pathname, opts = {}) {
     const url = await ensureRunning({ signal: opts.signal });
-    return httpJsonRequest(url, pathname, { timeoutMs, ...opts });
+    return httpJsonRequest(url, pathname, { timeoutMs: boundedTimeoutMs, ...opts });
   }
 
   async function getStatus(opts = {}) {
@@ -201,6 +275,11 @@ export function createDecisionsServiceClient({
   }
 
   async function exportContext({ module: mod, topicId, pathKeyword } = {}, opts = {}) {
+    if (topicId !== undefined && topicId !== null && topicId !== '') {
+      if (typeof topicId !== 'string' || !VALID_TOPIC_ID_RE.test(topicId) || topicId === '.' || topicId === '..') {
+        throw new Error('Invalid topic_id for exportContext.');
+      }
+    }
     const params = new URLSearchParams();
     if (mod) params.set('module', String(mod));
     if (topicId) params.set('topic_id', String(topicId));
@@ -218,40 +297,47 @@ export function createDecisionsServiceClient({
   }
 
   async function recordDecision({ action = 'create', topicId, payload = {}, expectedVersion, requestId } = {}, opts = {}) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error('Decisions record payload must be a plain object.');
+    }
     const body = {
       ...payload,
       ...(expectedVersion !== undefined ? { expected_version: expectedVersion } : {}),
       ...(requestId ? { request_id: requestId } : {}),
     };
     if (action === 'save') {
-      if (typeof topicId !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(topicId)) {
+      if (typeof topicId !== 'string' || !VALID_TOPIC_ID_RE.test(topicId) || topicId === '.' || topicId === '..') {
         throw new Error('Valid topic_id is required when action="save".');
       }
-      const res = await requestJson(`/api/topic/${encodeURIComponent(topicId)}/save`, { method: 'POST', body, ...opts });
-      return res;
+      return requestJson(`/api/topic/${encodeURIComponent(topicId)}/save`, { method: 'POST', body, ...opts });
     }
     if (action === 'create') {
-      const res = await requestJson('/api/topic/create', { method: 'POST', body, ...opts });
-      return res;
+      if (topicId !== undefined && topicId !== null && topicId !== '') {
+        if (typeof topicId !== 'string' || !VALID_TOPIC_ID_RE.test(topicId) || topicId === '.' || topicId === '..') {
+          throw new Error('Invalid topic_id for action="create".');
+        }
+        if (body.id === undefined) body.id = topicId;
+      }
+      if (body.id !== undefined && body.id !== null && body.id !== '') {
+        if (typeof body.id !== 'string' || !VALID_TOPIC_ID_RE.test(body.id) || body.id === '.' || body.id === '..') {
+          throw new Error('Invalid payload.id for action="create".');
+        }
+      }
+      return requestJson('/api/topic/create', { method: 'POST', body, ...opts });
     }
     throw new Error(`Unsupported decisions record action: ${String(action)}`);
   }
 
   async function close() {
     closed = true;
+    const inflight = starting;
+    if (inflight) {
+      await inflight.catch(() => {});
+    }
     const proc = child;
     child = null;
-    if (proc && proc.exitCode === null && proc.signalCode === null) {
-      await new Promise(resolve => {
-        const timer = setTimeout(() => {
-          try { proc.kill('SIGKILL'); } catch {}
-          resolve();
-        }, 2000);
-        timer.unref?.();
-        proc.once('exit', () => { clearTimeout(timer); resolve(); });
-        try { proc.kill('SIGTERM'); } catch { clearTimeout(timer); resolve(); }
-      });
-    }
+    activeBaseUrl = null;
+    await terminateChildProcess(proc);
   }
 
   return Object.freeze({

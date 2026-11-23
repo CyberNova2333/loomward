@@ -5,13 +5,16 @@ import { sanitizeConsolePanelSnapshot, validateConsolePanelDecl } from '@loomwar
 
 const PANEL_TIMEOUT_MS = 2000;
 
-async function withTimeout(promise, ms) {
+async function withTimeout(promise, ms, onTimeout) {
   let timer;
   try {
     return await Promise.race([
       promise,
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('Panel snapshot timed out.')), ms);
+        timer = setTimeout(() => {
+          try { onTimeout?.(); } catch {}
+          reject(new Error('Panel snapshot timed out.'));
+        }, ms);
         timer.unref?.();
       }),
     ]);
@@ -30,7 +33,7 @@ export function createConsolePanelCollector({ panelSlot = null, staticPanels = [
           const decl = validateConsolePanelDecl(entry.impl);
           if (seen.has(decl.id)) continue;
           seen.add(decl.id);
-          out.push(decl);
+          out.push({ decl, rootOwned: Boolean(entry.rootOwned) });
         } catch {
           // Malformed third-party panel declarations are silently ignored without affecting other panels.
         }
@@ -41,42 +44,53 @@ export function createConsolePanelCollector({ panelSlot = null, staticPanels = [
         const decl = validateConsolePanelDecl(raw);
         if (seen.has(decl.id)) continue;
         seen.add(decl.id);
-        out.push(decl);
+        out.push({ decl, rootOwned: false });
       } catch {}
     }
-    out.sort((a, b) => (a.order - b.order) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    out.sort((a, b) => (a.decl.order - b.decl.order) || (a.decl.id < b.decl.id ? -1 : a.decl.id > b.decl.id ? 1 : 0));
     return out;
   }
 
-  async function resolvePanel(decl, context) {
+  async function resolvePanel(item, context) {
+    const { decl, rootOwned } = item;
+    const boundaryOpts = { executionBoundary: rootOwned ? decl.executionBoundary : 'out-of-process' };
     if (typeof decl.getSnapshot !== 'function') {
-      return sanitizeConsolePanelSnapshot(decl, { status: 'idle', summary: [] });
+      return sanitizeConsolePanelSnapshot(decl, { status: 'idle', summary: [] }, boundaryOpts);
     }
+    const controller = new AbortController();
     try {
-      const raw = await withTimeout(Promise.resolve().then(() => decl.getSnapshot(context)), PANEL_TIMEOUT_MS);
-      return sanitizeConsolePanelSnapshot(decl, raw);
+      const panelContext = { ...(context && typeof context === 'object' ? context : {}), signal: controller.signal };
+      const raw = await withTimeout(
+        Promise.resolve().then(() => decl.getSnapshot(panelContext)),
+        PANEL_TIMEOUT_MS,
+        () => controller.abort(new Error('Panel snapshot timed out.')),
+      );
+      return sanitizeConsolePanelSnapshot(decl, raw, boundaryOpts);
     } catch {
       return sanitizeConsolePanelSnapshot(decl, {
         status: 'error',
         summary: [{ label: '状态', value: '面板快照读取失败', tone: 'err' }],
         notices: [{ tone: 'warn', text: '扩展面板暂时不可用；核心安全控制面不受影响。' }],
-      });
+      }, boundaryOpts);
     }
   }
 
   async function collectAll(context = {}) {
     const entries = listRawEntries();
-    return Promise.all(entries.map(decl => resolvePanel(decl, context)));
+    return Promise.all(entries.map(item => resolvePanel(item, context)));
   }
 
   async function collectById(id, context = {}) {
-    const decl = listRawEntries().find(item => item.id === id);
-    if (!decl) return null;
-    return resolvePanel(decl, context);
+    const item = listRawEntries().find(entry => entry.decl.id === id);
+    if (!item) return null;
+    return resolvePanel(item, context);
   }
 
   return Object.freeze({
-    listDeclarations: () => listRawEntries().map(({ getSnapshot: _drop, ...meta }) => meta),
+    listDeclarations: () => listRawEntries().map(({ decl: { getSnapshot: _drop, ...meta }, rootOwned }) => ({
+      ...meta,
+      executionBoundary: rootOwned ? meta.executionBoundary : 'out-of-process',
+    })),
     collectAll,
     collectById,
   });

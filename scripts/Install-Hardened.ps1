@@ -11,9 +11,11 @@ param(
 $ErrorActionPreference='Stop'
 . ([IO.Path]::Combine($PSScriptRoot, 'State-Safety.ps1'))
 $source=Split-Path -Parent $PSScriptRoot
+$workspaceItem=Get-Item -LiteralPath $Workspace -Force
+if(-not $workspaceItem.PSIsContainer -or ($workspaceItem.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Workspace must be an ordinary non-reparse directory.'}
 $workspacePath=(Resolve-Path -LiteralPath $Workspace).Path.TrimEnd('\')
 $statePath=Assert-PrivateState $StateDir
-if($statePath -ieq $workspacePath -or $statePath.StartsWith($workspacePath+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Private runtime must not be inside the mounted workspace.'}
+if($statePath -ieq $workspacePath -or $statePath.StartsWith($workspacePath+'\',[StringComparison]::OrdinalIgnoreCase) -or $workspacePath.StartsWith($statePath+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Private runtime must not overlap the mounted workspace.'}
 Assert-ConnectorStopped $statePath
 if(-not(Test-Path -LiteralPath (Join-Path $statePath 'secrets.dpapi'))){throw 'Set up protected credentials before installing the runtime.'}
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -38,6 +40,8 @@ $release='runtime-'+[DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')+'-'+[Guid]::N
 $destination=Join-Path $statePath $release
 New-Item -ItemType Directory -Path $destination | Out-Null
 function Copy-FilteredTree([string]$src,[string]$dst,[string[]]$skipDirs=@()){
+  $srcRootItem=Get-Item -LiteralPath $src -Force
+  if(-not $srcRootItem.PSIsContainer -or ($srcRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Runtime source root must be an ordinary non-reparse directory.'}
   New-Item -ItemType Directory -Path $dst -Force | Out-Null
   foreach($item in Get-ChildItem -LiteralPath $src -Force){
     if($item.Name.StartsWith('.') -or $item.Name -eq 'node_modules' -or $item.Name -eq '__pycache__'){continue}
@@ -61,18 +65,19 @@ foreach($file in @('package.json','pnpm-lock.yaml','pnpm-workspace.yaml')){
   if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Runtime manifest must not be a link.'}
   Copy-Item -LiteralPath $item.FullName -Destination $destination
 }
-$rpmManifestHash=$null
-$rpmGenerator=Join-Path $source 'scripts\generate-rpm.mjs'
-if((Test-Path -LiteralPath $rpmGenerator) -and (Test-Path -LiteralPath (Join-Path $destination 'packages\shared\src\index.mjs'))){
-  $rpmOut=(& $node $rpmGenerator --source $source --dest $destination | Out-String).Trim()
-  if($LASTEXITCODE -ne 0){throw 'Protected runtime RPM manifest generation failed.'}
-  $rpmManifestHash=($rpmOut | ConvertFrom-Json).manifestHash
-}
 Push-Location $destination
 try {
   & $node $pnpm install --frozen-lockfile --prod --ignore-scripts
   if($LASTEXITCODE -ne 0){throw 'Protected runtime dependency installation failed.'}
 } finally {Pop-Location}
+$rpmManifestHash=$null
+$rpmGenerator=Join-Path $source 'scripts\generate-rpm.mjs'
+if((Test-Path -LiteralPath $rpmGenerator) -and (Test-Path -LiteralPath (Join-Path $destination 'packages\shared\src\index.mjs'))){
+  $rpmOut=(& $node $rpmGenerator --source $source --dest $destination | Out-String).Trim()
+  if($LASTEXITCODE -ne 0 -or -not $rpmOut){throw 'Protected runtime RPM manifest generation failed.'}
+  $rpmManifestHash=($rpmOut | ConvertFrom-Json).manifestHash
+  if($rpmManifestHash -notmatch '^sha256:[a-f0-9]{64}$' -or -not(Test-Path -LiteralPath (Join-Path $destination 'rpm.json'))){throw 'Protected runtime RPM manifest verification failed.'}
+}
 $configFile=Join-Path $statePath 'config.json'
 $old=Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json
 Assert-ConnectorStopped $statePath
@@ -97,7 +102,7 @@ if(Test-Path -LiteralPath (Join-Path $destination 'scripts\Approve.ps1')) {
   [IO.File]::WriteAllText((Join-Path $statePath 'Approve.cmd'),$approve,[Text.UTF8Encoding]::new($false))
 }
 $manifest=@{installedAt=[DateTime]::UtcNow.ToString('o');runtime=$destination;workspace=$workspacePath;image=$imageId;rpmManifestHash=$rpmManifestHash;sha256=@{}}
-Get-ChildItem -LiteralPath $destination -File -Recurse | Where-Object {$_.FullName -notlike '*\node_modules\*' -and $_.FullName -notlike '*\__pycache__\*' -and -not $_.Name.EndsWith('.pyc',[StringComparison]::OrdinalIgnoreCase)} | ForEach-Object {$manifest.sha256[$_.FullName.Substring($destination.Length+1)]=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
+Get-ChildItem -LiteralPath $destination -File -Recurse | Where-Object {$_.FullName -notlike '*\node_modules\*' -and $_.FullName -notlike '*\__pycache__\*' -and -not $_.Name.EndsWith('.pyc',[StringComparison]::OrdinalIgnoreCase)} | ForEach-Object {$manifest.sha256[$_.FullName.Substring($destination.Length+1).Replace('\','/')]=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
 $tmpManifest=Join-Path $statePath ('installation-'+[Guid]::NewGuid().ToString('N')+'.tmp')
 try {
   [IO.File]::WriteAllText($tmpManifest,($manifest|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))

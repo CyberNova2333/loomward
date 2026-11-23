@@ -63,7 +63,8 @@ async function runMutation(fn) {
       stopLiveResources();
       client.clearTabToken();
       state.snapshot = null;
-      await refreshAuthState();
+      state.reviewModal = null;
+      await refreshAuthState().catch(() => {});
     }
   } finally {
     state.busy = false;
@@ -86,6 +87,25 @@ async function refreshAuthState() {
   render();
 }
 
+function updateLiveCountdowns() {
+  const nodes = root.querySelectorAll('[data-countdown-expires]');
+  for (const node of nodes) {
+    const exp = Date.parse(node.getAttribute('data-countdown-expires') || '');
+    if (!Number.isFinite(exp)) continue;
+    const leftSec = Math.max(0, Math.ceil((exp - Date.now()) / 1000));
+    const threshold = Number(node.getAttribute('data-warn-threshold') || '30');
+    node.textContent = `剩余 ${leftSec}s`;
+    node.className = `lw-pill ${leftSec <= threshold ? 'lw-pill-err' : 'lw-pill-warn'}`;
+  }
+  const btns = root.querySelectorAll('[data-countdown-disable-expires]');
+  for (const btn of btns) {
+    const exp = Date.parse(btn.getAttribute('data-countdown-disable-expires') || '');
+    if (!Number.isFinite(exp)) continue;
+    const leftSec = Math.max(0, Math.ceil((exp - Date.now()) / 1000));
+    if (leftSec <= 0) btn.disabled = true;
+  }
+}
+
 function startLiveStream() {
   stopLiveResources();
   state.stopSse = client.connectSse('/api/events', {
@@ -93,8 +113,10 @@ function startLiveStream() {
       state.sseStatus = status;
       if (status === 'unauthorized') {
         stopLiveResources();
+        client.clearTabToken();
         state.snapshot = null;
-        void refreshAuthState();
+        state.reviewModal = null;
+        void refreshAuthState().catch(() => {});
       } else {
         render();
       }
@@ -108,13 +130,22 @@ function startLiveStream() {
   });
   state.countdownTimer = setInterval(() => {
     if (state.snapshot?.approvals?.pendingCount > 0 || state.reviewModal) {
-      render();
+      updateLiveCountdowns();
     }
   }, 1000);
 }
 
+function ensureWebAuthnLocalhostOrigin() {
+  if (window.location.hostname === '127.0.0.1') {
+    const target = `http://localhost:${window.location.port}${window.location.pathname}${window.location.search}`;
+    window.location.replace(target);
+    throw new Error(`WebAuthn PassKey 需通过 localhost 域名访问，正在跳转至 ${target}`);
+  }
+}
+
 async function handlePasskeyLogin() {
   await runMutation(async () => {
+    ensureWebAuthnLocalhostOrigin();
     const opt = await client.api('/api/auth/passkey/login/options', { method: 'POST', body: {} });
     const pubKey = {
       ...opt.publicKey,
@@ -144,6 +175,7 @@ async function handlePasskeyLogin() {
 
 async function handlePasskeyEnroll(setupToken, label) {
   await runMutation(async () => {
+    ensureWebAuthnLocalhostOrigin();
     const opt = await client.api('/api/auth/setup/passkey/options', {
       method: 'POST',
       body: { ...(setupToken ? { setupToken } : {}) },
@@ -182,8 +214,12 @@ async function handleOpenConsole() {
   await runMutation(async () => {
     const issued = await client.api('/api/trust/issue-console-ticket', { method: 'POST', body: {} });
     if (issued.handoffUrl) {
-      window.open(issued.handoffUrl, '_blank', 'noopener');
-      setNotice('已签发一次性 60 秒只读观测票据并打开 Console Origin。');
+      const win = window.open(issued.handoffUrl, '_blank', 'noopener');
+      if (win) {
+        setNotice('已签发一次性 60 秒只读观测票据并打开 Console Origin。');
+      } else {
+        setNotice(`已签发一次性 60 秒只读观测票据（若浏览器拦截弹窗，请手动访问：${issued.handoffUrl}）。`);
+      }
     }
   });
 }
@@ -250,7 +286,14 @@ function renderTopbar() {
 
 function renderAuthGate() {
   const auth = state.auth || {};
-  const needPasskey = Boolean(auth.requirePasskey || auth.hostPasskeySupported || (auth.passkeys?.length > 0));
+  const needPasskey = Boolean(
+    auth.passkeyRequired
+    || auth.requirePasskey
+    || auth.mode === 'passkey'
+    || auth.hostPasskeySupported
+    || (auth.passkeyCount > 0)
+    || (auth.passkeys?.length > 0),
+  );
   const pwInput = el('input', { type: 'password', class: 'lw-input', placeholder: '输入本机强密码（≥14 位）', autocomplete: 'current-password' });
   const ticketInput = el('input', { type: 'text', class: 'lw-input lw-mono', placeholder: '终端 webui-auth init 签发的一次性 setupToken' });
   const labelInput = el('input', { type: 'text', class: 'lw-input', placeholder: 'PassKey 备注名称（如 YubiKey / Touch ID）' });
@@ -329,7 +372,7 @@ function renderAuthGate() {
       ]),
       el('span', { class: 'lw-pill lw-pill-warn', text: auth.initialized ? '已锁定' : '待初始化' }),
     ]),
-    el('div', { style: 'display:flex;flex-direction:column;gap:10px;max-width:480px;' }, body),
+    el('div', { class: 'lw-auth-form' }, body),
   ]);
 }
 
@@ -339,9 +382,14 @@ function renderApprovalsCard() {
     ? items.map(item => {
         const leftSec = Math.max(0, Math.ceil((Date.parse(item.expiresAt) - Date.now()) / 1000));
         return el('div', { class: 'lw-approval-item' }, [
-          el('div', { class: 'lw-row', style: 'justify-content:space-between;' }, [
+          el('div', { class: 'lw-row lw-between' }, [
             el('strong', { class: 'lw-mono', text: `${item.tool}  #${item.idShort}` }),
-            el('span', { class: `lw-pill ${leftSec <= 30 ? 'lw-pill-err' : 'lw-pill-warn'}`, text: `剩余 ${leftSec}s` }),
+            el('span', {
+              class: `lw-pill ${leftSec <= 30 ? 'lw-pill-err' : 'lw-pill-warn'}`,
+              'data-countdown-expires': item.expiresAt,
+              'data-warn-threshold': '30',
+              text: `剩余 ${leftSec}s`,
+            }),
           ]),
           el('div', { class: 'lw-muted lw-mono', text: `client=${item.clientId || 'unknown'} · ${item.alreadyApproved ? '已签发待消费' : '等待人工复核'}` }),
           el('div', { class: 'lw-row' }, [
@@ -350,6 +398,7 @@ function renderApprovalsCard() {
                   type: 'button',
                   class: 'lw-btn lw-btn-trust',
                   disabled: state.busy || leftSec <= 0,
+                  'data-countdown-disable-expires': item.expiresAt,
                   text: '复核完整参数',
                   onClick: () => runMutation(async () => {
                     const review = await client.api('/api/approvals/review', { method: 'POST', body: { id: item.id } });
@@ -383,7 +432,7 @@ function renderApprovalsCard() {
       ]),
       el('span', { class: `lw-pill ${items.length ? 'lw-pill-warn' : 'lw-pill-ok'}`, text: `${items.length} 条待审` }),
     ]),
-    el('div', { style: 'display:flex;flex-direction:column;gap:10px;' }, list),
+    el('div', { class: 'lw-stack-sm' }, list),
   ]);
 }
 
@@ -443,7 +492,7 @@ function renderSessionAndServiceCard() {
       ]),
       el('span', { class: 'lw-pill lw-pill-info', text: persistence === 'tab' ? '标签页隔离' : '浏览器会话' }),
     ]),
-    el('div', { class: 'lw-row', style: 'margin-bottom:12px;' }, [
+    el('div', { class: 'lw-row lw-mb-md' }, [
       el('button', {
         type: 'button',
         class: `lw-btn ${persistence === 'tab' ? 'lw-btn-trust' : ''}`,
@@ -483,13 +532,18 @@ function renderReviewModal() {
   const leftSec = Math.max(0, Math.ceil((Date.parse(modal.expiresAt) - Date.now()) / 1000));
   return el('div', { class: 'lw-modal-backdrop', role: 'dialog', 'aria-modal': 'true' }, [
     el('div', { class: 'lw-modal' }, [
-      el('div', { class: 'lw-row', style: 'justify-content:space-between;' }, [
+      el('div', { class: 'lw-row lw-between' }, [
         el('h3', { text: `精确参数复核 · ${modal.tool}` }),
-        el('span', { class: `lw-pill ${leftSec <= 20 ? 'lw-pill-err' : 'lw-pill-warn'}`, text: `剩余 ${leftSec}s` }),
+        el('span', {
+          class: `lw-pill ${leftSec <= 20 ? 'lw-pill-err' : 'lw-pill-warn'}`,
+          'data-countdown-expires': modal.expiresAt,
+          'data-warn-threshold': '20',
+          text: `剩余 ${leftSec}s`,
+        }),
       ]),
       el('div', { class: 'lw-muted lw-mono', text: `policyDigest: ${modal.digest}` }),
       el('pre', { class: 'lw-pre', text: modal.requestText }),
-      el('div', { class: 'lw-row', style: 'justify-content:flex-end;' }, [
+      el('div', { class: 'lw-row lw-end' }, [
         el('button', {
           type: 'button',
           class: 'lw-btn',
@@ -500,6 +554,7 @@ function renderReviewModal() {
           type: 'button',
           class: 'lw-btn lw-btn-trust',
           disabled: state.busy || leftSec <= 0,
+          'data-countdown-disable-expires': modal.expiresAt,
           text: '确认批准一次',
           onClick: () => runMutation(async () => {
             const res = await client.api('/api/approvals/approve', {

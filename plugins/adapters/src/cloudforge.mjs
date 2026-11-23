@@ -13,8 +13,16 @@ import {
 
 export const CLOUDFORGE_TOOL_PREFIX = 'mcp__cloudforge__';
 const VALID_REMOTE_TOOL_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
-const WRITE_OR_MODERATOR_HINT =
-  /(?:^|[_.-])(create|update|delete|remove|merge|push|close|reopen|approve|reject|moderate|moderator|ban|unban|grant|revoke|trigger|dispatch|release|publish|edit|write|set|add|commit|review|comment|label|assign|archive|transfer|admin)(?:$|[_.-])/i;
+// Strict read-only allowlist: any remote tool not matching an explicit read-only prefix defaults to 'write'.
+const READ_ONLY_PREFIX_ALLOWLIST =
+  /^(?:get|list|search|read|describe|inspect|show|view|check|status|diff|log|blame|stats|health)(?:$|[_.-])/i;
+const WRITE_OVERRIDE_DENYLIST =
+  /(?:^|[_.-])(create|update|delete|remove|merge|push|close|reopen|approve|reject|moderate|moderator|ban|unban|grant|revoke|trigger|dispatch|release|publish|edit|write|set|add|commit|review|comment|label|assign|archive|transfer|admin|fork|deploy|run|cancel|lock|unlock|revert|rotate|invite|patch|sync|import|purge)(?:$|[_.-])/i;
+const UNSAFE_TEXT_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200e\u200f\u061c\u202a-\u202e\u2066-\u2069]/g;
+const PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const MAX_SCHEMA_BYTES = 32 * 1024;
+const DEFAULT_CACHE_TTL_MS = 30_000;
+const PROBE_CACHE_TTL_MS = 5_000;
 
 function base64Url(bytes) {
   return Buffer.from(bytes)
@@ -35,7 +43,53 @@ export function generatePkcePair() {
 }
 
 export function classifyCloudForgeToolRisk(remoteName) {
-  return WRITE_OR_MODERATOR_HINT.test(String(remoteName || '')) ? 'write' : 'read';
+  const name = String(remoteName || '');
+  if (WRITE_OVERRIDE_DENYLIST.test(name)) return 'write';
+  if (READ_ONLY_PREFIX_ALLOWLIST.test(name)) return 'read';
+  return 'write';
+}
+
+function sanitizeDescription(raw, fallback) {
+  if (typeof raw !== 'string') return fallback;
+  const cleaned = raw.replace(UNSAFE_TEXT_RE, ' ').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return fallback;
+  return cleaned.length > 400 ? `${cleaned.slice(0, 399)}…` : cleaned;
+}
+
+function sanitizeInputSchema(rawSchema, depth = 0) {
+  if (depth > 8 || !rawSchema || typeof rawSchema !== 'object' || Array.isArray(rawSchema)) {
+    return { type: 'object', properties: {} };
+  }
+  const clean = {};
+  for (const [k, v] of Object.entries(rawSchema)) {
+    if (PROTO_KEYS.has(k)) continue;
+    if (v === null || typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v))) {
+      clean[k] = v;
+    } else if (typeof v === 'string') {
+      clean[k] = v.replace(UNSAFE_TEXT_RE, '').slice(0, 400);
+    } else if (Array.isArray(v)) {
+      clean[k] = v.slice(0, 64).map(item => (typeof item === 'string' ? item.replace(UNSAFE_TEXT_RE, '').slice(0, 120) : item));
+    } else if (typeof v === 'object') {
+      clean[k] = sanitizeInputSchema(v, depth + 1);
+    }
+  }
+  if (depth === 0) {
+    if (clean.type !== 'object') clean.type = 'object';
+    if (!clean.properties || typeof clean.properties !== 'object') clean.properties = {};
+    if (Buffer.byteLength(JSON.stringify(clean), 'utf8') > MAX_SCHEMA_BYTES) {
+      return { type: 'object', properties: {} };
+    }
+  }
+  return clean;
+}
+
+function normalizeIssuer(rawIssuer) {
+  try {
+    const u = new URL(String(rawIssuer || '').trim());
+    return `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    return '';
+  }
 }
 
 export function createCloudForgeClient({
@@ -44,13 +98,17 @@ export function createCloudForgeClient({
   fetchImpl = globalThis.fetch,
   allowLoopbackHttp = false,
   allowPrivateNetwork = false,
+  blockedOrigins = [],
+  dnsLookup = null,
   timeoutMs = 10_000,
+  cacheTtlMs = DEFAULT_CACHE_TTL_MS,
   maxBytes = DEFAULT_MAX_RESPONSE_BYTES,
   clientInfo = { name: 'loomward-cloudforge-adapter', version: '3.0.0-alpha.0' },
 } = {}) {
   const safeOrigin = assertSafeIntegrationOrigin(origin, {
     allowLoopbackHttp,
     allowPrivateNetwork,
+    blockedOrigins,
     label: 'CloudForge',
   });
   const boundedTimeout = Math.min(Math.max(100, Number(timeoutMs) || 10_000), 15_000);
@@ -58,7 +116,10 @@ export function createCloudForgeClient({
 
   let nextRpcId = 1;
   let cachedTools = null;
+  let cachedToolsAt = 0;
   let lastProbe = null;
+  let lastProbeAt = 0;
+  let inflightProbe = null;
   let lastError = null;
   let callCount = 0;
 
@@ -68,83 +129,107 @@ export function createCloudForgeClient({
     return typeof token === 'string' && token.trim() ? token.trim() : null;
   }
 
-  async function probeWellKnown({ diagnostic = false } = {}) {
+  async function probeWellKnown({ diagnostic = false, refresh = false, signal = null, timeoutOverrideMs = null } = {}) {
+    if (!diagnostic && !refresh && lastProbe && Date.now() - lastProbeAt < PROBE_CACHE_TTL_MS) {
+      return lastProbe;
+    }
+    if (!diagnostic && !refresh && inflightProbe) {
+      return inflightProbe;
+    }
     const suffix = diagnostic ? '/.well-known/cloudforge?diagnostic=1' : '/.well-known/cloudforge';
     const url = `${safeOrigin}${suffix}`;
-    try {
-      const res = await fetchBounded(url, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-        timeoutMs: boundedTimeout,
-        maxBytes,
-        fetchImpl,
-      });
-      if (!res.ok) {
+    const effTimeout = timeoutOverrideMs ? Math.min(boundedTimeout, timeoutOverrideMs) : boundedTimeout;
+    const runProbe = (async () => {
+      try {
+        const res = await fetchBounded(url, {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          timeoutMs: effTimeout,
+          maxBytes,
+          fetchImpl,
+          signal,
+          allowLoopbackHttp,
+          allowPrivateNetwork,
+          dnsLookup,
+        });
+        if (!res.ok) {
+          const snapshot = {
+            reachable: false,
+            status: res.status,
+            latencyMs: res.latencyMs,
+            installationId: null,
+            version: null,
+            schemaDigest: null,
+            accessRuntime: null,
+            error: `HTTP ${res.status}`,
+          };
+          lastProbe = snapshot;
+          lastProbeAt = Date.now();
+          lastError = snapshot.error;
+          return snapshot;
+        }
+        const parsed = JSON.parse(res.text);
+        const accessRuntime = parsed?.accessRuntime && typeof parsed.accessRuntime === 'object'
+          ? {
+              protocol: parsed.accessRuntime.protocol ?? null,
+              ready: Boolean(parsed.accessRuntime.ready),
+              minimumProtocol: parsed.accessRuntime.minimumProtocol ?? null,
+              schemaMode: typeof parsed.accessRuntime.schemaMode === 'string' ? parsed.accessRuntime.schemaMode : null,
+              rolePublishingEnabled: typeof parsed.accessRuntime.rolePublishingEnabled === 'boolean'
+                ? parsed.accessRuntime.rolePublishingEnabled
+                : null,
+              revision: parsed.accessRuntime.revision ?? null,
+              reason: typeof parsed.accessRuntime.reason === 'string' ? parsed.accessRuntime.reason : null,
+            }
+          : null;
         const snapshot = {
-          reachable: false,
+          reachable: true,
           status: res.status,
           latencyMs: res.latencyMs,
+          installationId: typeof parsed?.installationId === 'string' ? parsed.installationId : null,
+          version: typeof parsed?.version === 'string' ? parsed.version : null,
+          schemaDigest: typeof parsed?.schemaDigest === 'string' ? parsed.schemaDigest : null,
+          accessRuntime,
+          error: null,
+        };
+        lastProbe = snapshot;
+        lastProbeAt = Date.now();
+        lastError = null;
+        return snapshot;
+      } catch (error) {
+        const snapshot = {
+          reachable: false,
+          status: 0,
+          latencyMs: 0,
           installationId: null,
           version: null,
           schemaDigest: null,
           accessRuntime: null,
-          error: `HTTP ${res.status}`,
+          error: error.message || 'CloudForge metadata probe failed.',
         };
         lastProbe = snapshot;
+        lastProbeAt = Date.now();
         lastError = snapshot.error;
         return snapshot;
+      } finally {
+        inflightProbe = null;
       }
-      const parsed = JSON.parse(res.text);
-      const accessRuntime = parsed?.accessRuntime && typeof parsed.accessRuntime === 'object'
-        ? {
-            protocol: parsed.accessRuntime.protocol ?? null,
-            ready: Boolean(parsed.accessRuntime.ready),
-            minimumProtocol: parsed.accessRuntime.minimumProtocol ?? null,
-            schemaMode: typeof parsed.accessRuntime.schemaMode === 'string' ? parsed.accessRuntime.schemaMode : null,
-            rolePublishingEnabled: typeof parsed.accessRuntime.rolePublishingEnabled === 'boolean'
-              ? parsed.accessRuntime.rolePublishingEnabled
-              : null,
-            revision: parsed.accessRuntime.revision ?? null,
-            reason: typeof parsed.accessRuntime.reason === 'string' ? parsed.accessRuntime.reason : null,
-          }
-        : null;
-      const snapshot = {
-        reachable: true,
-        status: res.status,
-        latencyMs: res.latencyMs,
-        installationId: typeof parsed?.installationId === 'string' ? parsed.installationId : null,
-        version: typeof parsed?.version === 'string' ? parsed.version : null,
-        schemaDigest: typeof parsed?.schemaDigest === 'string' ? parsed.schemaDigest : null,
-        accessRuntime,
-        error: null,
-      };
-      lastProbe = snapshot;
-      lastError = null;
-      return snapshot;
-    } catch (error) {
-      const snapshot = {
-        reachable: false,
-        status: 0,
-        latencyMs: 0,
-        installationId: null,
-        version: null,
-        schemaDigest: null,
-        accessRuntime: null,
-        error: error.message || 'CloudForge metadata probe failed.',
-      };
-      lastProbe = snapshot;
-      lastError = snapshot.error;
-      return snapshot;
-    }
+    })();
+    if (!diagnostic) inflightProbe = runProbe;
+    return runProbe;
   }
 
-  async function discoverOAuth() {
+  async function discoverOAuth({ signal = null } = {}) {
     const prmRes = await fetchBounded(`${safeOrigin}/.well-known/oauth-protected-resource/mcp`, {
       method: 'GET',
       headers: { Accept: 'application/json' },
       timeoutMs: boundedTimeout,
       maxBytes,
       fetchImpl,
+      signal,
+      allowLoopbackHttp,
+      allowPrivateNetwork,
+      dnsLookup,
     });
     if (!prmRes.ok) {
       throw new Error(`CloudForge protected resource metadata unavailable (HTTP ${prmRes.status}).`);
@@ -158,6 +243,7 @@ export function createCloudForgeClient({
     const issuerOrigin = assertSafeIntegrationOrigin(issuerUrl.origin, {
       allowLoopbackHttp,
       allowPrivateNetwork,
+      blockedOrigins,
       label: 'CloudForge OAuth issuer',
     });
     const issuerPath = issuerUrl.pathname.replace(/\/+$/, '');
@@ -173,6 +259,10 @@ export function createCloudForgeClient({
         timeoutMs: boundedTimeout,
         maxBytes,
         fetchImpl,
+        signal,
+        allowLoopbackHttp,
+        allowPrivateNetwork,
+        dnsLookup,
       });
       if (res.ok) {
         authServer = JSON.parse(res.text);
@@ -181,6 +271,10 @@ export function createCloudForgeClient({
     }
     if (!authServer || typeof authServer !== 'object') {
       throw new Error('CloudForge OAuth authorization server metadata unavailable.');
+    }
+    // RFC 8414 §3.3 issuer mix-up defense
+    if (authServer.issuer && normalizeIssuer(authServer.issuer) !== normalizeIssuer(issuerRaw)) {
+      throw new Error('CloudForge OAuth authorization server issuer mismatch.');
     }
     const methods = Array.isArray(authServer.code_challenge_methods_supported)
       ? authServer.code_challenge_methods_supported
@@ -191,17 +285,23 @@ export function createCloudForgeClient({
     const authorizationEndpoint = assertSafeEndpointUrl(authServer.authorization_endpoint, {
       allowLoopbackHttp,
       allowPrivateNetwork,
+      blockedOrigins,
+      expectedOrigin: issuerOrigin,
       label: 'CloudForge authorization_endpoint',
     });
     const tokenEndpoint = assertSafeEndpointUrl(authServer.token_endpoint, {
       allowLoopbackHttp,
       allowPrivateNetwork,
+      blockedOrigins,
+      expectedOrigin: issuerOrigin,
       label: 'CloudForge token_endpoint',
     });
     const registrationEndpoint = authServer.registration_endpoint
       ? assertSafeEndpointUrl(authServer.registration_endpoint, {
           allowLoopbackHttp,
           allowPrivateNetwork,
+          blockedOrigins,
+          expectedOrigin: issuerOrigin,
           label: 'CloudForge registration_endpoint',
         })
       : null;
@@ -227,6 +327,7 @@ export function createCloudForgeClient({
     const safeEndpoint = assertSafeEndpointUrl(authorizationEndpoint, {
       allowLoopbackHttp,
       allowPrivateNetwork,
+      blockedOrigins,
       label: 'CloudForge authorization_endpoint',
     });
     if (!clientId || !redirectUri || !state) {
@@ -244,10 +345,11 @@ export function createCloudForgeClient({
     return { url: url.toString(), pkce };
   }
 
-  async function exchangeCode({ tokenEndpoint, clientId, code, redirectUri, codeVerifier }) {
+  async function exchangeCode({ tokenEndpoint, clientId, code, redirectUri, codeVerifier, signal = null }) {
     const safeEndpoint = assertSafeEndpointUrl(tokenEndpoint, {
       allowLoopbackHttp,
       allowPrivateNetwork,
+      blockedOrigins,
       label: 'CloudForge token_endpoint',
     });
     const body = new URLSearchParams({
@@ -268,6 +370,10 @@ export function createCloudForgeClient({
       timeoutMs: boundedTimeout,
       maxBytes,
       fetchImpl,
+      signal,
+      allowLoopbackHttp,
+      allowPrivateNetwork,
+      dnsLookup,
     });
     if (!res.ok) {
       throw new Error(`CloudForge token exchange failed (HTTP ${res.status}).`);
@@ -279,10 +385,11 @@ export function createCloudForgeClient({
     return parsed;
   }
 
-  async function refreshToken({ tokenEndpoint, clientId, refreshToken: token }) {
+  async function refreshToken({ tokenEndpoint, clientId, refreshToken: token, signal = null }) {
     const safeEndpoint = assertSafeEndpointUrl(tokenEndpoint, {
       allowLoopbackHttp,
       allowPrivateNetwork,
+      blockedOrigins,
       label: 'CloudForge token_endpoint',
     });
     const body = new URLSearchParams({
@@ -301,6 +408,10 @@ export function createCloudForgeClient({
       timeoutMs: boundedTimeout,
       maxBytes,
       fetchImpl,
+      signal,
+      allowLoopbackHttp,
+      allowPrivateNetwork,
+      dnsLookup,
     });
     if (!res.ok) {
       throw new Error(`CloudForge token refresh failed (HTTP ${res.status}).`);
@@ -308,7 +419,7 @@ export function createCloudForgeClient({
     return JSON.parse(res.text);
   }
 
-  async function mcpRequest(method, params = {}) {
+  async function mcpRequest(method, params = {}, { signal = null } = {}) {
     const token = await resolveToken();
     const id = nextRpcId++;
     const headers = {
@@ -323,6 +434,10 @@ export function createCloudForgeClient({
       timeoutMs: boundedTimeout,
       maxBytes,
       fetchImpl,
+      signal,
+      allowLoopbackHttp,
+      allowPrivateNetwork,
+      dnsLookup,
     });
     if (res.status === 401) {
       const challenge = res.headers?.get?.('www-authenticate') || '';
@@ -341,9 +456,11 @@ export function createCloudForgeClient({
     let payload;
     if (contentType.includes('text/event-stream')) {
       const frames = parseSseJsonRpcFrames(res.text);
-      payload = frames.find(frame => frame && frame.id === id) || frames[frames.length - 1];
+      payload = frames.find(
+        frame => frame && frame.id === id && (Object.hasOwn(frame, 'result') || Object.hasOwn(frame, 'error')),
+      );
       if (!payload) {
-        throw new Error('CloudForge SSE stream returned no JSON-RPC response frame.');
+        throw new Error('CloudForge SSE stream returned no matching JSON-RPC response frame.');
       }
     } else {
       payload = JSON.parse(res.text);
@@ -357,17 +474,19 @@ export function createCloudForgeClient({
     return payload?.result;
   }
 
-  async function initialize() {
+  async function initialize({ signal = null } = {}) {
     return mcpRequest('initialize', {
       protocolVersion: '2025-03-26',
       capabilities: {},
       clientInfo,
-    });
+    }, { signal });
   }
 
-  async function listTools({ refresh = false } = {}) {
-    if (cachedTools && !refresh) return cachedTools;
-    const result = await mcpRequest('tools/list', {});
+  async function listTools({ refresh = false, signal = null } = {}) {
+    if (cachedTools && !refresh && Date.now() - cachedToolsAt < cacheTtlMs) {
+      return cachedTools;
+    }
+    const result = await mcpRequest('tools/list', {}, { signal });
     const remoteTools = Array.isArray(result?.tools) ? result.tools : [];
     const normalized = [];
     for (const tool of remoteTools) {
@@ -376,10 +495,8 @@ export function createCloudForgeClient({
       normalized.push({
         name: `${CLOUDFORGE_TOOL_PREFIX}${tool.name}`,
         remoteName: tool.name,
-        description: String(tool.description || `CloudForge tool ${tool.name}`),
-        inputSchema: tool.inputSchema && typeof tool.inputSchema === 'object'
-          ? tool.inputSchema
-          : { type: 'object', properties: {} },
+        description: sanitizeDescription(tool.description, `CloudForge tool ${tool.name}`),
+        inputSchema: sanitizeInputSchema(tool.inputSchema),
         annotations: {
           risk,
           readOnlyHint: risk === 'read',
@@ -388,10 +505,11 @@ export function createCloudForgeClient({
       });
     }
     cachedTools = normalized;
+    cachedToolsAt = Date.now();
     return cachedTools;
   }
 
-  async function callTool(namespacedName, args = {}) {
+  async function callTool(namespacedName, args = {}, { signal = null } = {}) {
     if (typeof namespacedName !== 'string' || !namespacedName.startsWith(CLOUDFORGE_TOOL_PREFIX)) {
       return {
         isError: true,
@@ -410,7 +528,7 @@ export function createCloudForgeClient({
       const result = await mcpRequest('tools/call', {
         name: remoteName,
         arguments: args && typeof args === 'object' && !Array.isArray(args) ? args : {},
-      });
+      }, { signal });
       if (result && Array.isArray(result.content)) {
         return {
           ...(result.isError ? { isError: true } : {}),
@@ -421,6 +539,7 @@ export function createCloudForgeClient({
         content: [{ type: 'text', text: JSON.stringify(result ?? null, null, 2) }],
       };
     } catch (error) {
+      if (signal?.aborted) throw error;
       lastError = error.message;
       return {
         isError: true,
@@ -470,11 +589,12 @@ export function createCloudForgeToolProvider(client) {
     ownsTool(toolName) {
       if (closed || typeof toolName !== 'string' || !toolName.startsWith(CLOUDFORGE_TOOL_PREFIX)) return false;
       const cached = client.getCachedTools();
-      if (!cached.length) return VALID_REMOTE_TOOL_NAME.test(toolName.slice(CLOUDFORGE_TOOL_PREFIX.length));
+      if (!cached.length) return false;
       return cached.some(tool => tool.name === toolName);
     },
     getToolScopes() {
       const map = new Map();
+      if (closed) return map;
       for (const tool of client.getCachedTools()) {
         map.set(
           tool.name,
@@ -494,16 +614,27 @@ export function createCloudForgeToolProvider(client) {
       }
       return { enabled: true, capability: 'cloudforge' };
     },
-    async listTools() {
+    async listTools({ signal } = {}) {
       if (closed) return [];
-      const tools = await client.listTools();
-      return tools.map(({ remoteName: _remote, ...pub }) => structuredClone(pub));
+      try {
+        const tools = await client.listTools({ signal });
+        return tools.map(({ remoteName: _remote, ...pub }) => structuredClone(pub));
+      } catch {
+        // Fault isolation: unauthenticated or unreachable CloudForge returns cached tools without crashing global tools/list.
+        return client.getCachedTools().map(({ remoteName: _remote, ...pub }) => structuredClone(pub));
+      }
     },
-    async callTool(toolName, args) {
+    async callTool(toolName, args, { signal } = {}) {
       if (closed) {
         return { isError: true, content: [{ type: 'text', text: 'CloudForge adapter is closed.' }] };
       }
-      return client.callTool(toolName, args);
+      return client.callTool(toolName, args, { signal });
+    },
+    health() {
+      return {
+        status: closed ? 'closed' : 'ready',
+        executionBoundary: 'out-of-process',
+      };
     },
     async close() {
       closed = true;
@@ -517,7 +648,7 @@ export function createCloudForgePanel(client, { origin = null } = {}) {
     title: 'CloudForge · 独立仓库适配',
     subtitle: '独立维护的 Git / OAuth 2.1 MCP 托管平台（只读观测 + 经本机审批的工具聚合）',
     order: 40,
-    async getSnapshot() {
+    async getSnapshot(context = {}) {
       if (!client) {
         return {
           status: 'idle',
@@ -530,7 +661,10 @@ export function createCloudForgePanel(client, { origin = null } = {}) {
           ],
         };
       }
-      const probe = await client.probeWellKnown();
+      const probe = await client.probeWellKnown({
+        signal: context?.signal || null,
+        timeoutOverrideMs: 1500,
+      });
       const stats = client.getStats();
       const runtime = probe.accessRuntime;
       const runtimeState = !probe.reachable
@@ -561,10 +695,12 @@ export function createCloudForgePanel(client, { origin = null } = {}) {
           text: `已识别 ${stats.writeTools} 项写/审核类 CloudForge 工具，全部经 LoomWard 本机逐参人工审批与 24h 防重放账本门控。`,
         });
       }
+      const mainTable = { title: 'CloudForge 实例摘要', columns: ['字段', '值'], rows };
       return {
-        status: !probe.reachable ? 'error' : runtime?.ready ? 'ok' : 'degraded',
+        status: !probe.reachable ? 'error' : runtime?.ready ? 'ok' : 'warn',
         summary,
-        tables: [{ title: 'CloudForge 实例摘要', columns: ['字段', '值'], rows }],
+        table: mainTable,
+        tables: [mainTable],
         notices,
         links: origin || stats.origin ? [{ label: '打开 CloudForge 控制台', href: origin || stats.origin }] : [],
       };

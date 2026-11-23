@@ -9,12 +9,18 @@ import {
 } from './network.mjs';
 
 export const MODELBRIDGE_MAX_TIMEOUT_MS = 12_000;
-const SECRET_FIELD_HINT = /(token|secret|password|apikey|api_key|authorization|cookie|credential)/i;
+const SNAPSHOT_CACHE_TTL_MS = 5_000;
+const SECRET_FIELD_HINT =
+  /(token|secret|password|passphrase|api[_-]?key|private[_-]?key|access[_-]?key|authorization|cookie|credential|jwt|bearer|session[_-]?id)/i;
+const INLINE_SECRET_RE = /\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{8,}/gi;
 
 function sanitizeTelemetryValue(value, depth = 0) {
   if (depth > 3 || value === null || value === undefined) return null;
-  if (typeof value === 'number' || typeof value === 'boolean') return value;
-  if (typeof value === 'string') return value.slice(0, 120);
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    return value.replace(INLINE_SECRET_RE, '$1 [REDACTED]').slice(0, 120);
+  }
   if (Array.isArray(value)) {
     return value.slice(0, 16).map(item => sanitizeTelemetryValue(item, depth + 1));
   }
@@ -35,12 +41,15 @@ export function createModelBridgeClient({
   fetchImpl = globalThis.fetch,
   allowLoopbackHttp = false,
   allowPrivateNetwork = false,
+  blockedOrigins = [],
+  dnsLookup = null,
   timeoutMs = 8_000,
   maxBytes = DEFAULT_MAX_RESPONSE_BYTES,
 } = {}) {
   const safeOrigin = assertSafeIntegrationOrigin(origin, {
     allowLoopbackHttp,
     allowPrivateNetwork,
+    blockedOrigins,
     label: 'ModelBridge',
   });
   const requestedTimeout = Number(timeoutMs);
@@ -49,14 +58,23 @@ export function createModelBridgeClient({
   }
   const boundedTimeout = Math.floor(requestedTimeout);
 
-  async function probeStatus() {
+  let cachedSnapshot = null;
+  let cachedAt = 0;
+  let inflightSnapshot = null;
+
+  async function probeStatus({ signal = null, timeoutOverrideMs = null } = {}) {
+    const effTimeout = timeoutOverrideMs ? Math.min(boundedTimeout, timeoutOverrideMs) : boundedTimeout;
     try {
       const res = await fetchBounded(`${safeOrigin}/api/auth/status`, {
         method: 'GET',
         headers: { Accept: 'application/json' },
-        timeoutMs: boundedTimeout,
+        timeoutMs: effTimeout,
         maxBytes,
         fetchImpl,
+        signal,
+        allowLoopbackHttp,
+        allowPrivateNetwork,
+        dnsLookup,
       });
       if (!res.ok) {
         return { reachable: false, isSetup: false, status: res.status, latencyMs: res.latencyMs, error: `HTTP ${res.status}` };
@@ -80,14 +98,19 @@ export function createModelBridgeClient({
     }
   }
 
-  async function fetchUsageSummary() {
+  async function fetchUsageSummary({ signal = null, timeoutOverrideMs = null } = {}) {
+    const effTimeout = timeoutOverrideMs ? Math.min(boundedTimeout, timeoutOverrideMs) : boundedTimeout;
     try {
       const res = await fetchBounded(`${safeOrigin}/api/usage/summary`, {
         method: 'GET',
         headers: { Accept: 'application/json' },
-        timeoutMs: boundedTimeout,
+        timeoutMs: effTimeout,
         maxBytes,
         fetchImpl,
+        signal,
+        allowLoopbackHttp,
+        allowPrivateNetwork,
+        dnsLookup,
       });
       if (!res.ok) {
         return { ok: false, status: res.status, latencyMs: res.latencyMs, summary: null, error: `HTTP ${res.status}` };
@@ -111,24 +134,29 @@ export function createModelBridgeClient({
     }
   }
 
-  async function listModels() {
+  async function listModels({ signal = null, timeoutOverrideMs = null } = {}) {
     if (typeof getApiKey !== 'function') {
       return { queried: false, ok: false, count: 0, models: [], error: null };
     }
-    const key = await getApiKey();
-    if (typeof key !== 'string' || !key.trim()) {
-      return { queried: false, ok: false, count: 0, models: [], error: null };
-    }
+    const effTimeout = timeoutOverrideMs ? Math.min(boundedTimeout, timeoutOverrideMs) : boundedTimeout;
     try {
+      const key = await getApiKey();
+      if (typeof key !== 'string' || !key.trim()) {
+        return { queried: false, ok: false, count: 0, models: [], error: null };
+      }
       const res = await fetchBounded(`${safeOrigin}/v1/models`, {
         method: 'GET',
         headers: {
           Accept: 'application/json',
           Authorization: `Bearer ${key.trim()}`,
         },
-        timeoutMs: boundedTimeout,
+        timeoutMs: effTimeout,
         maxBytes,
         fetchImpl,
+        signal,
+        allowLoopbackHttp,
+        allowPrivateNetwork,
+        dnsLookup,
       });
       if (!res.ok) {
         return { queried: true, ok: false, count: 0, models: [], status: res.status, error: `HTTP ${res.status}` };
@@ -143,30 +171,48 @@ export function createModelBridgeClient({
           ownedBy: typeof item.owned_by === 'string' ? item.owned_by.slice(0, 40) : 'unknown',
         }));
       return { queried: true, ok: true, count: list.length, models, status: res.status, error: null };
-    } catch (error) {
+    } catch {
       return {
         queried: true,
         ok: false,
         count: 0,
         models: [],
-        error: error.message || 'ModelBridge model catalog query failed.',
+        error: 'ModelBridge model catalog query failed.',
       };
     }
   }
 
-  async function getSnapshot() {
-    const [status, usage, catalog] = await Promise.all([
-      probeStatus(),
-      fetchUsageSummary(),
-      listModels(),
-    ]);
-    return Object.freeze({
-      origin: safeOrigin,
-      timeoutMs: boundedTimeout,
-      status,
-      usage,
-      catalog,
-    });
+  async function getSnapshot({ refresh = false, signal = null, timeoutOverrideMs = null } = {}) {
+    if (!refresh && cachedSnapshot && Date.now() - cachedAt < SNAPSHOT_CACHE_TTL_MS) {
+      return cachedSnapshot;
+    }
+    if (!refresh && inflightSnapshot) {
+      return inflightSnapshot;
+    }
+    const run = (async () => {
+      try {
+        const opts = { signal, timeoutOverrideMs };
+        const [status, usage, catalog] = await Promise.all([
+          probeStatus(opts),
+          fetchUsageSummary(opts),
+          listModels(opts),
+        ]);
+        const snap = Object.freeze({
+          origin: safeOrigin,
+          timeoutMs: boundedTimeout,
+          status,
+          usage,
+          catalog,
+        });
+        cachedSnapshot = snap;
+        cachedAt = Date.now();
+        return snap;
+      } finally {
+        inflightSnapshot = null;
+      }
+    })();
+    inflightSnapshot = run;
+    return run;
   }
 
   return Object.freeze({
@@ -185,7 +231,7 @@ export function createModelBridgePanel(client, { origin = null } = {}) {
     title: 'ModelBridge · 模型网关状态',
     subtitle: '独立维护的多协议边缘模型网关（只读观测，保留四态密钥隔离与 12s 超时边界）',
     order: 45,
-    async getSnapshot() {
+    async getSnapshot(context = {}) {
       if (!client) {
         return {
           status: 'idle',
@@ -198,7 +244,10 @@ export function createModelBridgePanel(client, { origin = null } = {}) {
           ],
         };
       }
-      const snap = await client.getSnapshot();
+      const snap = await client.getSnapshot({
+        signal: context?.signal || null,
+        timeoutOverrideMs: 1500,
+      });
       const online = snap.status.reachable;
       const summary = [
         { label: '网关连通', value: online ? (snap.status.isSetup ? '在线已初始化' : '在线未初始化') : '不可达', tone: online ? 'ok' : 'err' },
@@ -220,7 +269,8 @@ export function createModelBridgePanel(client, { origin = null } = {}) {
           }
         }
       }
-      const tables = [{ title: 'ModelBridge 运行观测', columns: ['指标', '值'], rows }];
+      const mainTable = { title: 'ModelBridge 运行观测', columns: ['指标', '值'], rows };
+      const tables = [mainTable];
       if (snap.catalog.ok && snap.catalog.models.length > 0) {
         tables.push({
           title: '模型目录样本',
@@ -236,8 +286,9 @@ export function createModelBridgePanel(client, { origin = null } = {}) {
         notices.push({ tone: 'warn', text: `模型目录查询失败：${snap.catalog.error}` });
       }
       return {
-        status: !online ? 'error' : snap.usage.ok ? 'ok' : 'degraded',
+        status: !online ? 'error' : snap.usage.ok ? 'ok' : 'warn',
         summary,
+        table: mainTable,
         tables,
         notices,
         links: origin || snap.origin ? [{ label: '打开 ModelBridge 网关', href: origin || snap.origin }] : [],

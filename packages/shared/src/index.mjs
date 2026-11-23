@@ -32,6 +32,7 @@ export {
 export {
   VAULT_SLOT,
   CLOSED_SLOTS,
+  ROOT_ONLY_SERVICES,
   AUDIT_CODES,
   REJECT_CODES,
   FORBIDDEN_AUDIT_KEYS,
@@ -54,6 +55,8 @@ export {
   CONTENT_INSPECT_PROTOCOL_VERSION,
   CONTENT_INSPECT_STAGES,
   CONTENT_INSPECT_DECISIONS,
+  ToolBlockedError,
   buildContentInspectRequest,
   validateContentInspectVerdict,
+  applyOutputRedaction,
 } from './content-guard.mjs';

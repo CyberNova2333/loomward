@@ -44,9 +44,16 @@ for _s in (sys.stdin, sys.stdout, sys.stderr):
 
 # GUARD_POLICY 只为沙盒测试而设: 指向一份临时 policy(临时缓存路径/临时种子)，就能在不碰安装目录的前提下
 # 验证来源枚举与解析逻辑。生产路径不设它，永远读安装目录里那份。
-POLICY = json.load(open(os.environ.get('GUARD_POLICY') or '/root/.claude/policy/policy.json', encoding='utf-8'))
-CACHE = POLICY['private_cache']
-SEED = POLICY.get('private_seed', '/root/.claude/private-seed.json')
+_ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
+_POLICY_PATH = (
+    os.environ.get('LOOMWARD_ANTILEAK_POLICY')
+    or os.environ.get('GUARD_POLICY')
+    or ('/root/.claude/policy/policy.json' if os.path.exists('/root/.claude/policy/policy.json') else os.path.join(_ENGINE_DIR, 'policy.json'))
+)
+with open(_POLICY_PATH, encoding='utf-8') as _pf:
+    POLICY = json.load(_pf)
+CACHE = os.environ.get('LOOMWARD_ANTILEAK_CACHE') or POLICY['private_cache']
+SEED = os.environ.get('LOOMWARD_ANTILEAK_SEED') or POLICY.get('private_seed', '/root/.claude/private-seed.json')
 EXPECTED = set(POLICY.get('expected_owners', []))
 TTL = int(POLICY.get('private_cache_ttl', 300))
 

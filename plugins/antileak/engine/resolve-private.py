@@ -25,9 +25,16 @@ for _s in (sys.stdin, sys.stdout, sys.stderr):
     if hasattr(_s, 'reconfigure'):
         _s.reconfigure(encoding='utf-8', errors='replace')
 
-POLICY = json.load(open(os.environ.get('GUARD_POLICY') or '/root/.claude/policy/policy.json', encoding='utf-8'))   # GUARD_POLICY 仅供沙盒测试
-CACHE = POLICY['private_cache']; NEG = CACHE + '.resolve.json'
-SEED = POLICY.get('private_seed', '')
+_ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
+_POLICY_PATH = (
+    os.environ.get('LOOMWARD_ANTILEAK_POLICY')
+    or os.environ.get('GUARD_POLICY')
+    or ('/root/.claude/policy/policy.json' if os.path.exists('/root/.claude/policy/policy.json') else os.path.join(_ENGINE_DIR, 'policy.json'))
+)
+with open(_POLICY_PATH, encoding='utf-8') as _pf:
+    POLICY = json.load(_pf)
+CACHE = os.environ.get('LOOMWARD_ANTILEAK_CACHE') or POLICY['private_cache']; NEG = CACHE + '.resolve.json'
+SEED = os.environ.get('LOOMWARD_ANTILEAK_SEED') or POLICY.get('private_seed', '')
 NEG_TTL = int(POLICY.get('resolve_cache_ttl', 86400))
 PER_CALL_TIMEOUT = 3
 CNB_API = POLICY.get('cnb_api', 'https://api.cnb.cool').rstrip('/')

@@ -42,6 +42,7 @@ import {
 import {
   appendSanitizedConnectorLog,
   applySecurityHeaders,
+  formatLoopbackOrigin,
   parseCookieHeader,
   readBodyJson,
   readTrustedJsonFile,
@@ -103,7 +104,7 @@ export async function createTrustOriginServer({
   let serviceActionInFlight = false;
   let actualPort = port;
 
-  const getTrustOrigin = () => `http://${host === '127.0.0.1' ? '127.0.0.1' : host}:${actualPort}`;
+  const getTrustOrigin = () => formatLoopbackOrigin(host, actualPort);
 
   function checkRateLimit(res) {
     const retrySec = broker.getLockoutRemainingSec();
@@ -328,6 +329,7 @@ export async function createTrustOriginServer({
 
       if (req.method === 'GET' && reqUrl.pathname === '/api/auth/state') {
         if (!verifyFetchSiteSameOriginOrNone(req, false)) return sendJson(res, 403, { error: 'Cross-site request rejected.' });
+        if (req.headers.origin && !verifyOriginForPort(req, actualPort)) return sendJson(res, 403, { error: 'Cross-origin request rejected.' });
         const authRecord = loadCurrentAuthRecord();
         const session = broker.authenticateTrustSession(req, authRecord);
         if (session) return sendJson(res, 200, formatAuthStatePayload(authRecord, session));
@@ -776,6 +778,7 @@ export async function createTrustOriginServer({
         if (targetMode === 'tab') {
           session.tabToken = rotatedTabToken;
           broker.pruneOtherTrustSessions(session.sid);
+          broker.revokeChildConsoleSessions?.(session.sid);
           dropStreamsForSid(null);
         }
         return sendJson(res, 200, {
@@ -805,6 +808,7 @@ export async function createTrustOriginServer({
         }
         session.authVersion = updated.authVersion;
         broker.pruneOtherTrustSessions(session.sid);
+        broker.revokeChildConsoleSessions?.(session.sid);
         appendSanitizedConnectorLog(stateDir, 'webui_auth', { outcome: 'passkey_deleted' });
         const snap = await refreshSnapshot({ force: true });
         return sendJson(res, 200, {

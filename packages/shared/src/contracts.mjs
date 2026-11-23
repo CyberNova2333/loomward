@@ -88,6 +88,9 @@ export function validateContractDecl(decl) {
     if (!SLOT_POLICIES.includes(slot.policy)) {
       throw new Error(`Invalid mechanismSlot policy in ${decl.id}: ${String(slot.policy)}`);
     }
+    if (slot.allowReplace !== undefined && typeof slot.allowReplace !== 'boolean') {
+      throw new Error(`Invalid mechanismSlot allowReplace in ${decl.id}: must be boolean.`);
+    }
     if (seenSlots.has(slot.name)) throw new Error(`Duplicate slot in ${decl.id}: ${slot.name}`);
     seenSlots.add(slot.name);
   }
@@ -142,8 +145,16 @@ export function validateContractDecl(decl) {
     executionBoundary: decl.executionBoundary,
     provides: Object.freeze([...(decl.provides ?? [])]),
     consumes: Object.freeze([...(decl.consumes ?? [])]),
-    implSlots: Object.freeze(implSlots.map(s => Object.freeze({ ...s }))),
-    mechanismSlots: Object.freeze(mechanismSlots.map(s => Object.freeze({ ...s }))),
+    implSlots: Object.freeze(implSlots.map(s => Object.freeze({
+      name: s.name,
+      cardinality: s.cardinality,
+      policy: s.policy,
+    }))),
+    mechanismSlots: Object.freeze(mechanismSlots.map(s => Object.freeze({
+      name: s.name,
+      policy: s.policy,
+      ...(typeof s.allowReplace === 'boolean' ? { allowReplace: s.allowReplace } : {}),
+    }))),
     registers: Object.freeze(registers.map(r => Object.freeze({ slot: r.slot, name: r.name }))),
     writes: Object.freeze({
       hooks: Object.freeze(rawHooks.map(h => Object.freeze({ slot: h.slot, phase: h.phase }))),

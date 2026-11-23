@@ -1,5 +1,5 @@
 (() => {
-  // web/shared/client.mjs
+  // packages/console/web/shared/client.mjs
   function readMeta(name) {
     return document.querySelector(`meta[name="${name}"]`)?.getAttribute("content") || "";
   }
@@ -118,31 +118,35 @@
             signal: activeController.signal
           });
           if (!res.ok || !res.body) {
-            onStatus?.(res.status === 401 ? "unauthorized" : "disconnected");
-            return;
-          }
-          onStatus?.("connected");
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
-          while (!closed) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let idx;
-            while ((idx = buffer.indexOf("\n\n")) !== -1) {
-              const block = buffer.slice(0, idx);
-              buffer = buffer.slice(idx + 2);
-              let eventName = "message";
-              const dataLines = [];
-              for (const line of block.split("\n")) {
-                if (line.startsWith("event:")) eventName = line.slice(6).trim();
-                else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
-              }
-              if (dataLines.length) {
-                try {
-                  onEvent?.(eventName, JSON.parse(dataLines.join("\n")));
-                } catch {
+            if (res.status === 401 || res.status === 403) {
+              onStatus?.("unauthorized");
+              return;
+            }
+            onStatus?.("disconnected");
+          } else {
+            onStatus?.("connected");
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            while (!closed) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              let idx;
+              while ((idx = buffer.indexOf("\n\n")) !== -1) {
+                const block = buffer.slice(0, idx);
+                buffer = buffer.slice(idx + 2);
+                let eventName = "message";
+                const dataLines = [];
+                for (const line of block.split("\n")) {
+                  if (line.startsWith("event:")) eventName = line.slice(6).trim();
+                  else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+                }
+                if (dataLines.length) {
+                  try {
+                    onEvent?.(eventName, JSON.parse(dataLines.join("\n")));
+                  } catch {
+                  }
                 }
               }
             }
@@ -171,7 +175,7 @@
     };
   }
 
-  // web/console/main.mjs
+  // packages/console/web/console/main.mjs
   var client = createOriginClient({ storageKey: "loomward_console_tab_token" });
   var theme = initThemeToggle();
   var root = document.getElementById("app");
@@ -211,6 +215,7 @@
           stopStream();
           client.clearTabToken();
           state.snapshot = null;
+          state.liveKernelEvents = [];
           if (state.session) state.session.authenticated = false;
         }
         render();
@@ -228,11 +233,11 @@
     });
   }
   async function boot() {
+    const handoffTicket = extractAndScrubTicketFromHash();
     try {
       const sess = await client.api("/api/console/session");
       state.session = sess;
       if (sess.trustOrigin) state.trustOrigin = sess.trustOrigin;
-      const handoffTicket = extractAndScrubTicketFromHash();
       if (handoffTicket) {
         const exchanged = await client.api("/api/console/session/exchange", {
           method: "POST",
@@ -263,6 +268,7 @@
     }
     client.clearTabToken();
     state.snapshot = null;
+    state.liveKernelEvents = [];
     if (state.session) state.session.authenticated = false;
     render();
   }
@@ -346,8 +352,8 @@
     const cap = snap.capabilities || {};
     const kernel = snap.kernel || { roots: [], units: [] };
     const pending = snap.approvals?.pendingCount || 0;
-    return el("div", { style: "display:flex;flex-direction:column;gap:16px;" }, [
-      pending > 0 ? el("div", { class: "lw-banner lw-banner-warn lw-row", style: "justify-content:space-between;" }, [
+    return el("div", { class: "lw-stack-md" }, [
+      pending > 0 ? el("div", { class: "lw-banner lw-banner-warn lw-row lw-between" }, [
         el("span", { text: `\u5F53\u524D\u6709 ${pending} \u6761\u5F85\u4EBA\u5DE5\u590D\u6838\u5BA1\u6279\u7684\u5DE5\u5177\u8BF7\u6C42\uFF0C\u8BF7\u524D\u5F80\u72EC\u7ACB Trust Origin \u590D\u6838\u53C2\u6570\u3002` }),
         state.trustOrigin ? el("a", { class: "lw-btn lw-btn-trust", href: state.trustOrigin, target: "_blank", rel: "noopener noreferrer", text: "\u53BB Trust Origin \u5BA1\u6279" }) : null
       ]) : null,
@@ -398,7 +404,7 @@
       el("td", { class: "lw-mono", text: ev.type || "" }),
       el("td", { class: "lw-muted lw-mono", text: JSON.stringify(ev.meta || {}) })
     ]));
-    return el("div", { style: "display:flex;flex-direction:column;gap:16px;" }, [
+    return el("div", { class: "lw-stack-md" }, [
       el("section", { class: "lw-card" }, [
         el("div", { class: "lw-card-head" }, [
           el("div", {}, [
@@ -509,14 +515,19 @@
       if (panel.notices?.length) {
         for (const notice of panel.notices) {
           const cls = notice.tone === "err" ? "err" : notice.tone === "warn" ? "warn" : notice.tone === "ok" ? "ok" : "info";
-          cardChildren.push(el("div", { class: `lw-banner lw-banner-${cls}`, style: "margin-bottom:8px;", text: notice.text }));
+          cardChildren.push(el("div", { class: `lw-banner lw-banner-${cls} lw-mb-sm`, text: notice.text }));
         }
       }
-      if (panel.table?.columns?.length) {
-        cardChildren.push(el("div", { class: "lw-table-wrap", style: "margin-bottom:8px;" }, [
+      const tables = Array.isArray(panel.tables) && panel.tables.length ? panel.tables : panel.table?.columns?.length ? [panel.table] : [];
+      for (const table of tables) {
+        if (!table?.columns?.length) continue;
+        if (table.title) {
+          cardChildren.push(el("h4", { class: "lw-table-title", text: table.title }));
+        }
+        cardChildren.push(el("div", { class: "lw-table-wrap lw-mb-sm" }, [
           el("table", { class: "lw-table" }, [
-            el("thead", {}, [el("tr", {}, panel.table.columns.map((col) => el("th", { text: col })))]),
-            el("tbody", {}, (panel.table.rows || []).map((row) => el("tr", {}, row.map((cell) => el("td", { class: "lw-mono", text: cell })))))
+            el("thead", {}, [el("tr", {}, table.columns.map((col) => el("th", { text: col })))]),
+            el("tbody", {}, (table.rows || []).map((row) => el("tr", {}, row.map((cell) => el("td", { class: "lw-mono", text: cell })))))
           ])
         ]));
       }

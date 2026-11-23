@@ -115,7 +115,7 @@ export function createDecisionsToolProvider({ client } = {}) {
             topicId: args.topic_id,
             expectedVersion: args.expected_version,
             requestId: args.request_id,
-            payload: args.payload || {},
+            payload: args.payload,
           }, { signal });
           const isError = res.status < 200 || res.status >= 300;
           return {
@@ -126,6 +126,7 @@ export function createDecisionsToolProvider({ client } = {}) {
         }
         return { content: [{ type: 'text', text: `Unknown tool: ${toolName}` }], isError: true };
       } catch (err) {
+        if (signal?.aborted) throw err;
         return { content: [{ type: 'text', text: err?.message || 'Decisions ledger invocation failed.' }], isError: true };
       }
     },
@@ -166,17 +167,25 @@ export async function apply(ctx, config = {}) {
       category: 'integrations',
       order: 25,
       executionBoundary: 'out-of-process',
-      async getSnapshot() {
+      async getSnapshot(context = {}) {
+        // Read-only panel polls must never spawn a background subprocess as a side-effect.
+        const url = client.getBaseUrl();
+        if (!url || client.isClosed()) {
+          return {
+            status: 'idle',
+            summary: [{ label: '服务状态', value: '待按需启动', tone: 'neutral' }],
+            notices: [{ tone: 'info', text: '首次调用决策工具或启用 eagerStart 后自动同步只读台账状态。' }],
+          };
+        }
         try {
           const [statusData, topicsData] = await Promise.all([
-            client.getStatus(),
-            client.listTopics(),
+            client.getStatus({ timeoutMs: 1500, signal: context?.signal }),
+            client.listTopics({ timeoutMs: 1500, signal: context?.signal }),
           ]);
           const topics = Array.isArray(topicsData?.topics)
             ? topicsData.topics
             : Array.isArray(topicsData) ? topicsData : [];
           const consistent = statusData?.consistency?.consistent === true;
-          const url = client.getBaseUrl();
           return {
             status: consistent ? 'ok' : 'warn',
             summary: [
@@ -189,11 +198,11 @@ export async function apply(ctx, config = {}) {
               rows: topics.slice(0, 10).map(item => [
                 String(item.id || ''),
                 String(item.title || ''),
-                String(item.lifecycle_state || item.status || ''),
+                String(item.workflow_state || item.lifecycle_status || item.lifecycle_state || item.status || ''),
                 `v${item.version ?? 1}`,
               ]),
             },
-            ...(url ? { links: [{ label: '打开独立决策台账', href: url }] } : {}),
+            links: [{ label: '打开独立决策台账', href: url }],
           };
         } catch {
           return {
@@ -206,7 +215,7 @@ export async function apply(ctx, config = {}) {
     }));
   }
 
-  ctx.effect(() => () => {
-    void client.close();
+  ctx.effect(() => async () => {
+    await client.close();
   }, 'decisions:close');
 }

@@ -7,6 +7,8 @@ import {
   ImplSlot,
   MechanismSlot,
   REJECT_CODES,
+  ROOT_ONLY_SERVICES,
+  SlotError,
   VAULT_SLOT,
   computeManifestHash,
   isRpmShape,
@@ -16,7 +18,9 @@ import {
   withDeadline,
 } from '@loomward/shared';
 import { KernelGuard, createGuardedUnitState } from './guard.mjs';
-import { evaluateGuard } from './rules.mjs';
+import { createGuardPipeline, evaluateGuard } from './rules.mjs';
+
+const MAX_AUDIT_REPORT = 1000;
 
 export const PLATFORM_SLOTS = Object.freeze({
   vaultBackend: Object.freeze({ name: VAULT_SLOT, cardinality: 'single', policy: 'closed' }),
@@ -37,10 +41,37 @@ export class StartupRejectedError extends Error {
   }
 }
 
-export async function createLoomWardKernel({ rpm, roots = [], timeoutMs = BOOT_DEADLINE_MS } = {}) {
+function sameStringSet(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  return sa.every((val, i) => val === sb[i]);
+}
+
+function extractInjectNames(inject) {
+  if (!inject) return [];
+  if (Array.isArray(inject)) return inject.filter(x => typeof x === 'string');
+  if (typeof inject === 'object') {
+    const out = [];
+    for (const [k, v] of Object.entries(inject)) {
+      if (k === 'required' || k === 'optional') {
+        if (Array.isArray(v)) out.push(...v.filter(x => typeof x === 'string'));
+      } else {
+        out.push(k);
+      }
+    }
+    return out;
+  }
+  return [];
+}
+
+export async function createLoomWardKernel({ rpm, roots = [], expectedTarget = null, timeoutMs = BOOT_DEADLINE_MS } = {}) {
   return withDeadline(timeoutMs, async run => {
     if (!isRpmShape(rpm)) {
       throw new StartupRejectedError(REJECT_CODES.GUARD_RPM_INVALID_SHAPE, 'rpm');
+    }
+    if (expectedTarget && rpm.target !== expectedTarget) {
+      throw new StartupRejectedError(REJECT_CODES.GUARD_RPM_INVALID_SHAPE, 'rpm', `Expected RPM target ${expectedTarget}, got ${rpm.target}.`);
     }
     const expectedHash = await computeManifestHash(rpm);
     if (expectedHash !== rpm.manifestHash) {
@@ -64,9 +95,12 @@ export async function createLoomWardKernel({ rpm, roots = [], timeoutMs = BOOT_D
 
     const rootCtx = new Context();
     const rootFibers = new Set([rootCtx.fiber]);
+    const kernelCapability = Symbol('loomward.kernel.capability');
     const mountedRoots = [];
     const mountedUnits = new Map();
+    const inFlightMounts = new Set();
     const report = [];
+    let stopped = false;
 
     const recordAudit = (unitId, code, target, action) => {
       report.push(sanitizeAuditMetadata({
@@ -76,27 +110,33 @@ export async function createLoomWardKernel({ rpm, roots = [], timeoutMs = BOOT_D
         ...(action ? { action } : {}),
         at: Date.now(),
       }));
+      if (report.length > MAX_AUDIT_REPORT) {
+        report.splice(0, report.length - MAX_AUDIT_REPORT);
+      }
     };
 
     const guard = new KernelGuard({
       rootFibers,
       closedSlots: new Set([VAULT_SLOT]),
+      rootOnlyServices: new Set(ROOT_ONLY_SERVICES),
     });
     const disposeGetHook = guard.installGetHook(rootCtx);
 
     run.add(async () => {
+      stopped = true;
       disposeGetHook();
       await rootCtx.fiber.dispose();
+      rootFibers.clear();
     });
 
     const slots = {
-      vaultBackend: new ImplSlot(PLATFORM_SLOTS.vaultBackend, () => guard),
-      toolProvider: new ImplSlot(PLATFORM_SLOTS.toolProvider, () => guard),
+      vaultBackend: new ImplSlot(PLATFORM_SLOTS.vaultBackend, () => guard, { capability: kernelCapability }),
+      toolProvider: new ImplSlot(PLATFORM_SLOTS.toolProvider, () => guard, { capability: kernelCapability }),
       toolInvoke: new MechanismSlot(PLATFORM_SLOTS.toolInvoke, () => guard),
-      policyRule: new ImplSlot(PLATFORM_SLOTS.policyRule, () => guard),
-      approvalChannel: new ImplSlot(PLATFORM_SLOTS.approvalChannel, () => guard),
-      gatewayIngress: new ImplSlot(PLATFORM_SLOTS.gatewayIngress, () => guard),
-      consolePanel: new ImplSlot(PLATFORM_SLOTS.consolePanel, () => guard),
+      policyRule: new ImplSlot(PLATFORM_SLOTS.policyRule, () => guard, { capability: kernelCapability }),
+      approvalChannel: new ImplSlot(PLATFORM_SLOTS.approvalChannel, () => guard, { capability: kernelCapability }),
+      gatewayIngress: new ImplSlot(PLATFORM_SLOTS.gatewayIngress, () => guard, { capability: kernelCapability }),
+      consolePanel: new ImplSlot(PLATFORM_SLOTS.consolePanel, () => guard, { capability: kernelCapability }),
     };
 
     const slotRegistry = new Map();
@@ -114,7 +154,12 @@ export async function createLoomWardKernel({ rpm, roots = [], timeoutMs = BOOT_D
         throw new StartupRejectedError(REJECT_CODES.GUARD_INDETERMINATE, entry.id, 'Missing root module loader.');
       }
       const contract = validateContractDecl(ref.contract);
-      if (contract.id !== entry.id || contract.kind !== 'root-plugin' || contract.version !== entry.version) {
+      if (
+        contract.id !== entry.id
+        || contract.kind !== 'root-plugin'
+        || contract.version !== entry.version
+        || !sameStringSet(contract.provides, entry.provides)
+      ) {
         throw new StartupRejectedError(REJECT_CODES.GUARD_CONTRACT_MISMATCH, entry.id);
       }
       const actualHash = await sha256Tagged(await ref.bytes());
@@ -123,14 +168,18 @@ export async function createLoomWardKernel({ rpm, roots = [], timeoutMs = BOOT_D
       }
       run.live();
       const mod = await ref.load();
-      // Cordis plugin() constructs fiber synchronously and invokes apply(fiber.ctx);
-      // pre-register fiber before awaiting so synchronous slot registrations inside apply() are authorized.
+      const applyFn = typeof mod === 'function'
+        ? mod
+        : (mod && typeof mod === 'object' && typeof mod.apply === 'function' ? mod.apply : null);
+      if (!applyFn) {
+        throw new StartupRejectedError(REJECT_CODES.GUARD_INDETERMINATE, entry.id, 'Root plugin missing apply function.');
+      }
       const fiber = rootCtx.plugin({
-        name: mod.name || entry.id,
-        inject: mod.inject,
+        name: (mod && typeof mod === 'object' && mod.name) || entry.id,
+        inject: mod && typeof mod === 'object' ? mod.inject : undefined,
         apply(ctx, cfg) {
           rootFibers.add(ctx.fiber);
-          return mod.apply(ctx, cfg);
+          return applyFn(ctx, cfg);
         },
       }, ref.config);
       rootFibers.add(fiber.ctx.fiber);
@@ -139,6 +188,9 @@ export async function createLoomWardKernel({ rpm, roots = [], timeoutMs = BOOT_D
         rootFibers.delete(fiber.ctx.fiber);
       });
       await fiber;
+      if (fiber.state !== 2) {
+        throw new StartupRejectedError(REJECT_CODES.GUARD_INDETERMINATE, entry.id, 'Root plugin did not reach ACTIVE state.');
+      }
       mountedRoots.push({ id: entry.id, version: entry.version, provides: [...entry.provides] });
       recordAudit(entry.id, AUDIT_CODES.AUDIT_ROOT_MOUNTED);
     }
@@ -154,15 +206,22 @@ export async function createLoomWardKernel({ rpm, roots = [], timeoutMs = BOOT_D
       escalateRuntime,
       serviceMethods = {},
       extraNodes = [],
-      pipeline,
+      extraRules = [],
     }) {
+      if (stopped) {
+        throw new StartupRejectedError(REJECT_CODES.GUARD_INDETERMINATE, String(rawContract?.id || 'unknown'), 'Kernel has been stopped.');
+      }
       const contract = validateContractDecl(rawContract);
-      if (mountedUnits.has(contract.id)) {
+      if (contract.kind !== 'extension-plugin') {
+        throw new StartupRejectedError(REJECT_CODES.GUARD_CONTRACT_MISMATCH, contract.id, 'Extension mount requires kind="extension-plugin".');
+      }
+      if (mountedUnits.has(contract.id) || inFlightMounts.has(contract.id)) {
         throw new StartupRejectedError(REJECT_CODES.GUARD_UNIT_ALREADY_MOUNTED, contract.id);
       }
+      const effectivePipeline = createGuardPipeline(Array.isArray(extraRules) ? extraRules : []);
       const evaluation = evaluateGuard(
         { contract, slotRegistry, trust, isolated },
-        { ...(pipeline ? { pipeline } : {}), extraNodes, serviceMethods },
+        { pipeline: effectivePipeline, extraNodes, serviceMethods, expectedKind: 'extension-plugin' },
       );
       if (evaluation.decision !== 'allow') {
         const err = new StartupRejectedError(
@@ -177,6 +236,7 @@ export async function createLoomWardKernel({ rpm, roots = [], timeoutMs = BOOT_D
         throw err;
       }
 
+      inFlightMounts.add(contract.id);
       const state = createGuardedUnitState({
         contract,
         grant: evaluation.grant,
@@ -189,14 +249,39 @@ export async function createLoomWardKernel({ rpm, roots = [], timeoutMs = BOOT_D
       let fiber;
       try {
         const mod = typeof load === 'function' ? await load() : load;
-        fiber = unitCtx.plugin(mod, config);
+        const applyFn = typeof mod === 'function'
+          ? mod
+          : (mod && typeof mod === 'object' && typeof mod.apply === 'function' ? mod.apply : null);
+        if (!applyFn) {
+          throw new StartupRejectedError(REJECT_CODES.GUARD_INDETERMINATE, contract.id, 'Extension plugin missing apply function.');
+        }
+        // Reject undeclared or closed services in plugin.inject to prevent implicit Fiber intercept bypass.
+        if (mod && typeof mod === 'object' && mod.inject) {
+          for (const reqName of extractInjectNames(mod.inject)) {
+            if (guard.isClosedSlot(reqName) || guard.isRootOnlyService(reqName) || !contract.consumes.includes(reqName)) {
+              throw new SlotError(`Extension unit ${contract.id} inject references undeclared or forbidden service: ${reqName}.`);
+            }
+          }
+        }
+        fiber = unitCtx.plugin({
+          name: (mod && typeof mod === 'object' && mod.name) || contract.id,
+          apply(childCtx, cfg) {
+            const facade = guard.createRestrictedFacade(childCtx, rootCtx, state);
+            return applyFn(facade, cfg);
+          },
+        }, config);
         await fiber;
+        if (stopped) {
+          throw new StartupRejectedError(REJECT_CODES.GUARD_INDETERMINATE, contract.id, 'Kernel stopped during extension mount.');
+        }
       } catch (error) {
         guard.unregisterUnit(contract.id);
         if (fiber) {
           await fiber.dispose().catch(() => {});
         }
         throw error;
+      } finally {
+        inFlightMounts.delete(contract.id);
       }
 
       const record = {
@@ -227,8 +312,20 @@ export async function createLoomWardKernel({ rpm, roots = [], timeoutMs = BOOT_D
       return true;
     }
 
+    const frozenRpmView = Object.freeze({
+      format: rpm.format,
+      target: rpm.target,
+      manifestHash: rpm.manifestHash,
+      rootPlugins: Object.freeze(rpm.rootPlugins.map(p => Object.freeze({
+        id: p.id,
+        version: p.version,
+        entryHash: p.entryHash,
+        provides: Object.freeze([...p.provides]),
+      }))),
+    });
+
     const control = Object.freeze({
-      rpm: Object.freeze({ ...rpm }),
+      rpm: frozenRpmView,
       roots: () => mountedRoots.map(item => ({ ...item, provides: [...item.provides] })),
       units: () => [...mountedUnits.values()].map(item => ({
         id: item.id,
@@ -242,11 +339,14 @@ export async function createLoomWardKernel({ rpm, roots = [], timeoutMs = BOOT_D
       mountExtensionUnit,
       unmountExtensionUnit,
       stop: async () => {
+        if (stopped) return;
+        stopped = true;
         for (const unitId of [...mountedUnits.keys()].reverse()) {
           await unmountExtensionUnit(unitId).catch(() => {});
         }
         disposeGetHook();
         await rootCtx.fiber.dispose();
+        rootFibers.clear();
       },
     });
 

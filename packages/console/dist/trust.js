@@ -1,5 +1,5 @@
 (() => {
-  // web/shared/client.mjs
+  // packages/console/web/shared/client.mjs
   function readMeta(name) {
     return document.querySelector(`meta[name="${name}"]`)?.getAttribute("content") || "";
   }
@@ -131,31 +131,35 @@
             signal: activeController.signal
           });
           if (!res.ok || !res.body) {
-            onStatus?.(res.status === 401 ? "unauthorized" : "disconnected");
-            return;
-          }
-          onStatus?.("connected");
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
-          while (!closed) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let idx;
-            while ((idx = buffer.indexOf("\n\n")) !== -1) {
-              const block = buffer.slice(0, idx);
-              buffer = buffer.slice(idx + 2);
-              let eventName = "message";
-              const dataLines = [];
-              for (const line of block.split("\n")) {
-                if (line.startsWith("event:")) eventName = line.slice(6).trim();
-                else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
-              }
-              if (dataLines.length) {
-                try {
-                  onEvent?.(eventName, JSON.parse(dataLines.join("\n")));
-                } catch {
+            if (res.status === 401 || res.status === 403) {
+              onStatus?.("unauthorized");
+              return;
+            }
+            onStatus?.("disconnected");
+          } else {
+            onStatus?.("connected");
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            while (!closed) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              let idx;
+              while ((idx = buffer.indexOf("\n\n")) !== -1) {
+                const block = buffer.slice(0, idx);
+                buffer = buffer.slice(idx + 2);
+                let eventName = "message";
+                const dataLines = [];
+                for (const line of block.split("\n")) {
+                  if (line.startsWith("event:")) eventName = line.slice(6).trim();
+                  else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+                }
+                if (dataLines.length) {
+                  try {
+                    onEvent?.(eventName, JSON.parse(dataLines.join("\n")));
+                  } catch {
+                  }
                 }
               }
             }
@@ -184,7 +188,7 @@
     };
   }
 
-  // web/trust/main.mjs
+  // packages/console/web/trust/main.mjs
   var client = createOriginClient({ storageKey: "loomward_trust_tab_token" });
   var theme = initThemeToggle();
   var root = document.getElementById("app");
@@ -233,7 +237,9 @@
         stopLiveResources();
         client.clearTabToken();
         state.snapshot = null;
-        await refreshAuthState();
+        state.reviewModal = null;
+        await refreshAuthState().catch(() => {
+        });
       }
     } finally {
       state.busy = false;
@@ -254,6 +260,24 @@
     }
     render();
   }
+  function updateLiveCountdowns() {
+    const nodes = root.querySelectorAll("[data-countdown-expires]");
+    for (const node of nodes) {
+      const exp = Date.parse(node.getAttribute("data-countdown-expires") || "");
+      if (!Number.isFinite(exp)) continue;
+      const leftSec = Math.max(0, Math.ceil((exp - Date.now()) / 1e3));
+      const threshold = Number(node.getAttribute("data-warn-threshold") || "30");
+      node.textContent = `\u5269\u4F59 ${leftSec}s`;
+      node.className = `lw-pill ${leftSec <= threshold ? "lw-pill-err" : "lw-pill-warn"}`;
+    }
+    const btns = root.querySelectorAll("[data-countdown-disable-expires]");
+    for (const btn of btns) {
+      const exp = Date.parse(btn.getAttribute("data-countdown-disable-expires") || "");
+      if (!Number.isFinite(exp)) continue;
+      const leftSec = Math.max(0, Math.ceil((exp - Date.now()) / 1e3));
+      if (leftSec <= 0) btn.disabled = true;
+    }
+  }
   function startLiveStream() {
     stopLiveResources();
     state.stopSse = client.connectSse("/api/events", {
@@ -261,8 +285,11 @@
         state.sseStatus = status;
         if (status === "unauthorized") {
           stopLiveResources();
+          client.clearTabToken();
           state.snapshot = null;
-          void refreshAuthState();
+          state.reviewModal = null;
+          void refreshAuthState().catch(() => {
+          });
         } else {
           render();
         }
@@ -276,12 +303,20 @@
     });
     state.countdownTimer = setInterval(() => {
       if (state.snapshot?.approvals?.pendingCount > 0 || state.reviewModal) {
-        render();
+        updateLiveCountdowns();
       }
     }, 1e3);
   }
+  function ensureWebAuthnLocalhostOrigin() {
+    if (window.location.hostname === "127.0.0.1") {
+      const target = `http://localhost:${window.location.port}${window.location.pathname}${window.location.search}`;
+      window.location.replace(target);
+      throw new Error(`WebAuthn PassKey \u9700\u901A\u8FC7 localhost \u57DF\u540D\u8BBF\u95EE\uFF0C\u6B63\u5728\u8DF3\u8F6C\u81F3 ${target}`);
+    }
+  }
   async function handlePasskeyLogin() {
     await runMutation(async () => {
+      ensureWebAuthnLocalhostOrigin();
       const opt = await client.api("/api/auth/passkey/login/options", { method: "POST", body: {} });
       const pubKey = {
         ...opt.publicKey,
@@ -310,6 +345,7 @@
   }
   async function handlePasskeyEnroll(setupToken, label) {
     await runMutation(async () => {
+      ensureWebAuthnLocalhostOrigin();
       const opt = await client.api("/api/auth/setup/passkey/options", {
         method: "POST",
         body: { ...setupToken ? { setupToken } : {} }
@@ -347,8 +383,12 @@
     await runMutation(async () => {
       const issued = await client.api("/api/trust/issue-console-ticket", { method: "POST", body: {} });
       if (issued.handoffUrl) {
-        window.open(issued.handoffUrl, "_blank", "noopener");
-        setNotice("\u5DF2\u7B7E\u53D1\u4E00\u6B21\u6027 60 \u79D2\u53EA\u8BFB\u89C2\u6D4B\u7968\u636E\u5E76\u6253\u5F00 Console Origin\u3002");
+        const win = window.open(issued.handoffUrl, "_blank", "noopener");
+        if (win) {
+          setNotice("\u5DF2\u7B7E\u53D1\u4E00\u6B21\u6027 60 \u79D2\u53EA\u8BFB\u89C2\u6D4B\u7968\u636E\u5E76\u6253\u5F00 Console Origin\u3002");
+        } else {
+          setNotice(`\u5DF2\u7B7E\u53D1\u4E00\u6B21\u6027 60 \u79D2\u53EA\u8BFB\u89C2\u6D4B\u7968\u636E\uFF08\u82E5\u6D4F\u89C8\u5668\u62E6\u622A\u5F39\u7A97\uFF0C\u8BF7\u624B\u52A8\u8BBF\u95EE\uFF1A${issued.handoffUrl}\uFF09\u3002`);
+        }
       }
     });
   }
@@ -411,7 +451,9 @@
   }
   function renderAuthGate() {
     const auth = state.auth || {};
-    const needPasskey = Boolean(auth.requirePasskey || auth.hostPasskeySupported || auth.passkeys?.length > 0);
+    const needPasskey = Boolean(
+      auth.passkeyRequired || auth.requirePasskey || auth.mode === "passkey" || auth.hostPasskeySupported || auth.passkeyCount > 0 || auth.passkeys?.length > 0
+    );
     const pwInput = el("input", { type: "password", class: "lw-input", placeholder: "\u8F93\u5165\u672C\u673A\u5F3A\u5BC6\u7801\uFF08\u226514 \u4F4D\uFF09", autocomplete: "current-password" });
     const ticketInput = el("input", { type: "text", class: "lw-input lw-mono", placeholder: "\u7EC8\u7AEF webui-auth init \u7B7E\u53D1\u7684\u4E00\u6B21\u6027 setupToken" });
     const labelInput = el("input", { type: "text", class: "lw-input", placeholder: "PassKey \u5907\u6CE8\u540D\u79F0\uFF08\u5982 YubiKey / Touch ID\uFF09" });
@@ -488,7 +530,7 @@
         ]),
         el("span", { class: "lw-pill lw-pill-warn", text: auth.initialized ? "\u5DF2\u9501\u5B9A" : "\u5F85\u521D\u59CB\u5316" })
       ]),
-      el("div", { style: "display:flex;flex-direction:column;gap:10px;max-width:480px;" }, body)
+      el("div", { class: "lw-auth-form" }, body)
     ]);
   }
   function renderApprovalsCard() {
@@ -496,9 +538,14 @@
     const list = items.length ? items.map((item) => {
       const leftSec = Math.max(0, Math.ceil((Date.parse(item.expiresAt) - Date.now()) / 1e3));
       return el("div", { class: "lw-approval-item" }, [
-        el("div", { class: "lw-row", style: "justify-content:space-between;" }, [
+        el("div", { class: "lw-row lw-between" }, [
           el("strong", { class: "lw-mono", text: `${item.tool}  #${item.idShort}` }),
-          el("span", { class: `lw-pill ${leftSec <= 30 ? "lw-pill-err" : "lw-pill-warn"}`, text: `\u5269\u4F59 ${leftSec}s` })
+          el("span", {
+            class: `lw-pill ${leftSec <= 30 ? "lw-pill-err" : "lw-pill-warn"}`,
+            "data-countdown-expires": item.expiresAt,
+            "data-warn-threshold": "30",
+            text: `\u5269\u4F59 ${leftSec}s`
+          })
         ]),
         el("div", { class: "lw-muted lw-mono", text: `client=${item.clientId || "unknown"} \xB7 ${item.alreadyApproved ? "\u5DF2\u7B7E\u53D1\u5F85\u6D88\u8D39" : "\u7B49\u5F85\u4EBA\u5DE5\u590D\u6838"}` }),
         el("div", { class: "lw-row" }, [
@@ -506,6 +553,7 @@
             type: "button",
             class: "lw-btn lw-btn-trust",
             disabled: state.busy || leftSec <= 0,
+            "data-countdown-disable-expires": item.expiresAt,
             text: "\u590D\u6838\u5B8C\u6574\u53C2\u6570",
             onClick: () => runMutation(async () => {
               const review = await client.api("/api/approvals/review", { method: "POST", body: { id: item.id } });
@@ -534,7 +582,7 @@
         ]),
         el("span", { class: `lw-pill ${items.length ? "lw-pill-warn" : "lw-pill-ok"}`, text: `${items.length} \u6761\u5F85\u5BA1` })
       ]),
-      el("div", { style: "display:flex;flex-direction:column;gap:10px;" }, list)
+      el("div", { class: "lw-stack-sm" }, list)
     ]);
   }
   function renderCapabilitiesCard() {
@@ -590,7 +638,7 @@
         ]),
         el("span", { class: "lw-pill lw-pill-info", text: persistence === "tab" ? "\u6807\u7B7E\u9875\u9694\u79BB" : "\u6D4F\u89C8\u5668\u4F1A\u8BDD" })
       ]),
-      el("div", { class: "lw-row", style: "margin-bottom:12px;" }, [
+      el("div", { class: "lw-row lw-mb-md" }, [
         el("button", {
           type: "button",
           class: `lw-btn ${persistence === "tab" ? "lw-btn-trust" : ""}`,
@@ -629,13 +677,18 @@
     const leftSec = Math.max(0, Math.ceil((Date.parse(modal.expiresAt) - Date.now()) / 1e3));
     return el("div", { class: "lw-modal-backdrop", role: "dialog", "aria-modal": "true" }, [
       el("div", { class: "lw-modal" }, [
-        el("div", { class: "lw-row", style: "justify-content:space-between;" }, [
+        el("div", { class: "lw-row lw-between" }, [
           el("h3", { text: `\u7CBE\u786E\u53C2\u6570\u590D\u6838 \xB7 ${modal.tool}` }),
-          el("span", { class: `lw-pill ${leftSec <= 20 ? "lw-pill-err" : "lw-pill-warn"}`, text: `\u5269\u4F59 ${leftSec}s` })
+          el("span", {
+            class: `lw-pill ${leftSec <= 20 ? "lw-pill-err" : "lw-pill-warn"}`,
+            "data-countdown-expires": modal.expiresAt,
+            "data-warn-threshold": "20",
+            text: `\u5269\u4F59 ${leftSec}s`
+          })
         ]),
         el("div", { class: "lw-muted lw-mono", text: `policyDigest: ${modal.digest}` }),
         el("pre", { class: "lw-pre", text: modal.requestText }),
-        el("div", { class: "lw-row", style: "justify-content:flex-end;" }, [
+        el("div", { class: "lw-row lw-end" }, [
           el("button", {
             type: "button",
             class: "lw-btn",
@@ -649,6 +702,7 @@
             type: "button",
             class: "lw-btn lw-btn-trust",
             disabled: state.busy || leftSec <= 0,
+            "data-countdown-disable-expires": modal.expiresAt,
             text: "\u786E\u8BA4\u6279\u51C6\u4E00\u6B21",
             onClick: () => runMutation(async () => {
               const res = await client.api("/api/approvals/approve", {

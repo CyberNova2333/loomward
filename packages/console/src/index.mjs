@@ -10,6 +10,7 @@ export {
   startDualOriginConsole,
 } from './server.mjs';
 
+import path from 'node:path';
 import { startDualOriginConsole } from './server.mjs';
 import { createControlChannel } from './control-channel.mjs';
 import { createConsolePanelCollector } from './panel-registry.mjs';
@@ -18,10 +19,11 @@ export const name = 'console';
 
 export async function apply(ctx, config = {}) {
   const panelSlot = ctx.get('console:panel@1');
+  const defaultSocketPath = config.enableControlSocket !== false && config.stateDir
+    ? (config.controlSocketPath || path.join(config.stateDir, 'control.sock'))
+    : null;
   const controlChannel = config.controlChannel ?? createControlChannel({
-    socketPath: config.enableControlSocket && config.stateDir
-      ? config.controlSocketPath
-      : null,
+    socketPath: defaultSocketPath,
   });
   const panelCollector = createConsolePanelCollector({
     panelSlot,
@@ -35,11 +37,13 @@ export async function apply(ctx, config = {}) {
       panelSlot,
       controlChannel,
     });
+  } else if (!config.controlChannel && defaultSocketPath) {
+    await controlChannel.startSocketServer(defaultSocketPath).catch(() => null);
   }
 
-  ctx.effect(() => () => {
-    if (instance) void instance.close();
-    else if (!config.controlChannel) void controlChannel.close();
+  ctx.effect(() => async () => {
+    if (instance) await instance.close();
+    if (!config.controlChannel) await controlChannel.close();
   }, 'console:close');
 
   ctx.provide('console:loopback', Object.freeze({

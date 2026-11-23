@@ -4,7 +4,11 @@
 import {
   AUDIT_CODES,
   CLOSED_SLOTS,
+  ImplSlot,
+  MechanismSlot,
+  ROOT_ONLY_SERVICES,
   SlotError,
+  VAULT_SLOT,
   formatActionNode,
   mechanismActionKind,
   serviceInvokeActionKind,
@@ -12,17 +16,36 @@ import {
 import { evaluatePermissionTree } from './policy-tree.mjs';
 
 const ORIGINAL = Symbol.for('cordis.original');
+const CALLER = Symbol.for('cordis.caller');
+const SHADOW = Symbol.for('cordis.shadow');
 const ISOLATE = Symbol.for('cordis.isolate');
 const GUARD_WRAPPED = Symbol('loomward.guard.wrapped');
-export const GUARD_UNIT_STATE = Symbol('loomward.guard.unit-state');
+const MAX_RUNTIME_WRITTEN = 256;
+
+const BLOCKED_CONTEXT_PROPS = new Set([
+  'root',
+  'reflect',
+  'registry',
+  'events',
+  'fiber',
+  'parent',
+  'scope',
+  'extend',
+  'plugin',
+  'base',
+  'lifecycle',
+  'symbols',
+  'runtime',
+  'state',
+  'constructor',
+  '__proto__',
+  'prototype',
+]);
+
+const BLOCKED_SYMBOLS = new Set([ORIGINAL, CALLER, SHADOW, ISOLATE]);
 
 function isolateOf(ctx) {
   return (ctx && typeof ctx === 'object' ? ctx[ISOLATE] : undefined) ?? {};
-}
-
-export function resolveUnitState(ctx) {
-  if (!ctx || typeof ctx !== 'object') return undefined;
-  return ctx[GUARD_UNIT_STATE];
 }
 
 export function unwrapCordisOriginal(obj) {
@@ -42,7 +65,7 @@ export function createGuardedUnitState({
     grant,
     subject,
     runtimeWritten: [],
-    approvedActions: new Set(grant.approvedActions ?? []),
+    approvedActions: new Set(),
     inflightEscalations: new Map(),
     active: true,
     onAudit,
@@ -50,23 +73,74 @@ export function createGuardedUnitState({
   };
 }
 
+function recordRuntimeWrite(state, entry) {
+  state.runtimeWritten.push(entry);
+  if (state.runtimeWritten.length > MAX_RUNTIME_WRITTEN) {
+    state.runtimeWritten.splice(0, state.runtimeWritten.length - MAX_RUNTIME_WRITTEN);
+  }
+}
+
 function resolveMethodRule(methodRules, method) {
-  return methodRules[method] ?? methodRules['*'];
+  if (Object.hasOwn(methodRules, method)) return methodRules[method];
+  if (Object.hasOwn(methodRules, '*')) return methodRules['*'];
+  return undefined;
+}
+
+function isDeclaredTarget(manifest, target) {
+  if (manifest.consumes.includes(target)) return true;
+  if (manifest.registers.some(r => r.slot === target)) return true;
+  if (manifest.writes.hooks.some(h => h.slot === target)) return true;
+  if (manifest.writes.intercepts.includes(target)) return true;
+  if (manifest.writes.isolateProvides.includes(target)) return true;
+  return false;
 }
 
 export class KernelGuard {
   #byUnit = new Map();
+  #unitStates = new WeakMap();
   #proxyCache = new WeakMap();
   #rootFibers;
   #closedSlots;
+  #rootOnlyServices;
 
-  constructor({ rootFibers = new Set(), closedSlots = new Set(CLOSED_SLOTS) } = {}) {
+  constructor({
+    rootFibers = new Set(),
+    closedSlots = new Set(CLOSED_SLOTS),
+    rootOnlyServices = new Set(ROOT_ONLY_SERVICES),
+  } = {}) {
     this.#rootFibers = rootFibers;
     this.#closedSlots = new Set(closedSlots);
+    this.#rootOnlyServices = new Set([...closedSlots, ...rootOnlyServices]);
   }
 
   isClosedSlot(name) {
     return this.#closedSlots.has(name);
+  }
+
+  isRootOnlyService(name) {
+    return this.#rootOnlyServices.has(name);
+  }
+
+  isRootCaller(caller) {
+    return Boolean(caller?.fiber && this.#rootFibers.has(caller.fiber) && !this.resolveState(caller));
+  }
+
+  bindContext(ctx, state) {
+    if (!ctx || typeof ctx !== 'object') return;
+    this.#unitStates.set(ctx, state);
+    if (ctx.fiber && typeof ctx.fiber === 'object') {
+      this.#unitStates.set(ctx.fiber, state);
+    }
+  }
+
+  resolveState(ctx) {
+    if (!ctx || typeof ctx !== 'object') return undefined;
+    const direct = this.#unitStates.get(ctx);
+    if (direct) return direct;
+    if (ctx.fiber && typeof ctx.fiber === 'object') {
+      return this.#unitStates.get(ctx.fiber);
+    }
+    return undefined;
   }
 
   registerUnit(state) {
@@ -85,94 +159,245 @@ export class KernelGuard {
     return this.#byUnit.get(unitId);
   }
 
+  #assertUnitActive(state, actionLabel = 'operation') {
+    if (!state || !state.active) {
+      throw new SlotError(`Extension unit ${state?.unitId || 'unknown'} is inactive and cannot perform ${actionLabel}.`);
+    }
+  }
+
+  #assertServiceReadable(prop, state) {
+    this.#assertUnitActive(state, `service.get:${prop}`);
+    if (this.#closedSlots.has(prop)) {
+      state.onAudit(AUDIT_CODES.AUDIT_VAULT_ACCESS_DENIED, prop, `service.get:${prop}`);
+      throw new SlotError(`Unit ${state.unitId} is forbidden from accessing closed slot ${prop}.`);
+    }
+    if (this.#rootOnlyServices.has(prop)) {
+      if (prop === VAULT_SLOT) {
+        state.onAudit(AUDIT_CODES.AUDIT_VAULT_ACCESS_DENIED, prop, `service.get:${prop}`);
+      }
+      throw new SlotError(`Unit ${state.unitId} is forbidden from accessing root-only service ${prop}.`);
+    }
+    if (!isDeclaredTarget(state.manifest, prop)) {
+      throw new SlotError(`Unit ${state.unitId} did not declare access to service/slot ${prop}.`);
+    }
+  }
+
   /** Install global Cordis `internal/get` waterfall interceptor on the root Context. */
   installGetHook(rootCtx) {
     return rootCtx.on('internal/get', (callerCtx, prop, _error, next) => {
       if (typeof prop !== 'string') return next();
-      const state = resolveUnitState(callerCtx);
+      const state = this.resolveState(callerCtx);
       if (!state) return next();
-      if (this.#closedSlots.has(prop)) {
-        state.onAudit(AUDIT_CODES.AUDIT_VAULT_ACCESS_DENIED, prop, `service.get:${prop}`);
-        throw new SlotError(`Unit ${state.unitId} is forbidden from accessing closed slot ${prop}.`);
-      }
+      this.#assertServiceReadable(prop, state);
       const value = next();
       if (value === undefined || value === null) return value;
-      return this.wrapService(prop, value, state);
+      return this.wrapResolvedValue(prop, value, callerCtx, state);
     }, { global: true });
   }
 
-  /** Build a guarded Cordis Context proxy for a single non-root extension unit. */
+  /** Wrap an ImplSlot or MechanismSlot into a restricted facade blocking cordis.original & registerBuiltin. */
+  wrapSlot(slotValue, rawCtx, state) {
+    const rawSlot = unwrapCordisOriginal(slotValue);
+    const guard = this;
+    if (rawSlot instanceof ImplSlot) {
+      const boundSlot = Object.create(rawSlot, {
+        ctx: { value: rawCtx, enumerable: false },
+        [ORIGINAL]: { value: rawSlot, enumerable: false },
+      });
+      const facade = Object.create(null);
+      facade.name = rawSlot.name;
+      facade.decl = rawSlot.decl;
+      facade.register = (name, impl) => {
+        guard.#assertUnitActive(state, `impl.register:${rawSlot.name}`);
+        return boundSlot.register(name, impl);
+      };
+      facade.select = name => {
+        guard.#assertUnitActive(state, `impl.select:${rawSlot.name}`);
+        return boundSlot.select(name);
+      };
+      facade.has = name => {
+        guard.#assertUnitActive(state, `impl.has:${rawSlot.name}`);
+        return rawSlot.has(name);
+      };
+      facade.names = () => {
+        guard.#assertUnitActive(state, `impl.names:${rawSlot.name}`);
+        return rawSlot.names();
+      };
+      if (rawSlot.decl.policy === 'public') {
+        facade.entries = () => {
+          guard.#assertUnitActive(state, `impl.entries:${rawSlot.name}`);
+          return boundSlot.entries();
+        };
+        facade.current = () => {
+          guard.#assertUnitActive(state, `impl.current:${rawSlot.name}`);
+          return boundSlot.current();
+        };
+      }
+      return Object.freeze(facade);
+    }
+
+    if (rawSlot instanceof MechanismSlot) {
+      const boundSlot = Object.create(rawSlot, {
+        ctx: { value: rawCtx, enumerable: false },
+        [ORIGINAL]: { value: rawSlot, enumerable: false },
+      });
+      const facade = Object.create(null);
+      facade.name = rawSlot.name;
+      facade.decl = rawSlot.decl;
+      facade.hook = (phase, handler, opts) => {
+        guard.#assertUnitActive(state, `mechanism.hook:${rawSlot.name}`);
+        return boundSlot.hook(phase, handler, opts);
+      };
+      facade.hasReplace = () => {
+        guard.#assertUnitActive(state, `mechanism.hasReplace:${rawSlot.name}`);
+        return rawSlot.hasReplace();
+      };
+      return Object.freeze(facade);
+    }
+
+    return null;
+  }
+
+  wrapResolvedValue(serviceName, value, rawCtx, state) {
+    const wrappedSlot = this.wrapSlot(value, rawCtx, state);
+    if (wrappedSlot) return wrappedSlot;
+    return this.wrapService(serviceName, value, state);
+  }
+
+  /** Build a guarded internal Cordis Context for attaching the extension's Fiber. */
   createUnitContext(ctx, base, state) {
+    const unitCtx = ctx.extend({});
+    this.bindContext(unitCtx, state);
+    return unitCtx;
+  }
+
+  /** Build a restricted null-prototype facade passed to extension `apply(ctx, cfg)`. */
+  createRestrictedFacade(rawCtx, base, state) {
     const baseIsolates = isolateOf(base);
     const guard = this;
+    this.bindContext(rawCtx, state);
 
-    const unitCtx = ctx.extend({
-      get(name, strict) {
-        if (typeof name === 'string' && guard.isClosedSlot(name)) {
-          state.onAudit(AUDIT_CODES.AUDIT_VAULT_ACCESS_DENIED, name, `service.get:${name}`);
-          throw new SlotError(`Unit ${state.unitId} is forbidden from accessing closed slot ${name}.`);
-        }
-        const original = Reflect.get(Object.getPrototypeOf(unitCtx), 'get', this);
-        const value = original.call(this, name, strict);
-        if (value === undefined || value === null) return value;
-        return guard.wrapService(name, value, state);
-      },
-      intercept(name, config) {
-        guard.assertWriteAction(
-          state,
-          { kind: 'service.intercept', target: name },
-          () => state.manifest.writes.intercepts.includes(name),
-          `Unit ${state.unitId} did not declare intercept write edge: ${name}.`,
-        );
-        const action = formatActionNode({ kind: 'service.intercept', target: name });
-        state.runtimeWritten.push({ kind: 'intercept', target: name, action });
-        if (state.grant.trustedActionNodes.includes(action)) {
-          state.onAudit(AUDIT_CODES.AUDIT_TRUSTED_WRITE_ON, name, action);
-        }
-        const original = Reflect.get(Object.getPrototypeOf(unitCtx), 'intercept', this);
-        return original.call(this, name, config);
-      },
-      provide(name, value, check) {
-        if (isolateOf(this)[name] === baseIsolates[name]) {
-          throw new SlotError(`Unit ${state.unitId} cannot call provide outside its own isolate: ${name}.`);
-        }
-        guard.assertWriteAction(
-          state,
-          { kind: 'service.isolate-provide', target: name },
-          () => state.manifest.writes.isolateProvides.includes(name),
-          `Unit ${state.unitId} did not declare isolate-provide write edge: ${name}.`,
-        );
-        const action = formatActionNode({ kind: 'service.isolate-provide', target: name });
-        state.runtimeWritten.push({ kind: 'isolate-provide', target: name, action });
-        const audited = state.grant.trustedActionNodes.includes(action);
-        if (audited) state.onAudit(AUDIT_CODES.AUDIT_TRUSTED_WRITE_ON, name, action);
-        const original = Reflect.get(Object.getPrototypeOf(unitCtx), 'provide', this);
-        const dispose = original.call(this, name, value, check);
-        if (!audited || typeof dispose !== 'function') return dispose;
-        return async () => {
-          try {
-            return await dispose();
-          } finally {
-            state.onAudit(AUDIT_CODES.AUDIT_TRUSTED_WRITE_OFF, name, action);
-          }
+    const methods = Object.create(null);
+    methods.get = (name, strict) => {
+      if (typeof name !== 'string') {
+        throw new SlotError(`Unit ${state.unitId} cannot query non-string service name.`);
+      }
+      guard.#assertServiceReadable(name, state);
+      const value = rawCtx.get(name, strict);
+      if (value === undefined || value === null) return value;
+      return guard.wrapResolvedValue(name, value, rawCtx, state);
+    };
+
+    methods.effect = (fn, label) => {
+      guard.#assertUnitActive(state, 'ctx.effect');
+      return rawCtx.effect(fn, label);
+    };
+
+    methods.on = (event, listener) => {
+      guard.#assertUnitActive(state, `ctx.on:${String(event)}`);
+      if (event !== 'dispose') {
+        throw new SlotError(`Extension unit ${state.unitId} may only listen to "dispose" lifecycle events.`);
+      }
+      return rawCtx.on('dispose', listener);
+    };
+
+    methods.intercept = (name, config) => {
+      guard.#assertUnitActive(state, `service.intercept:${name}`);
+      guard.assertWriteAction(
+        state,
+        { kind: 'service.intercept', target: name },
+        () => state.manifest.writes.intercepts.includes(name),
+        `Unit ${state.unitId} did not declare intercept write edge: ${name}.`,
+      );
+      const action = formatActionNode({ kind: 'service.intercept', target: name });
+      recordRuntimeWrite(state, { kind: 'intercept', target: name, action });
+      const audited = state.grant.trustedActionNodes.includes(action);
+      if (audited) state.onAudit(AUDIT_CODES.AUDIT_TRUSTED_WRITE_ON, name, action);
+      const dispose = rawCtx.intercept(name, config);
+      if (audited) {
+        let offEmitted = false;
+        const emitOff = () => {
+          if (offEmitted) return;
+          offEmitted = true;
+          state.onAudit(AUDIT_CODES.AUDIT_TRUSTED_WRITE_OFF, name, action);
         };
+        rawCtx.effect(() => () => emitOff(), `audit:intercept:${name}`);
+      }
+      return typeof dispose === 'function' ? () => dispose() : dispose;
+    };
+
+    methods.provide = (name, value, check) => {
+      guard.#assertUnitActive(state, `service.isolate-provide:${name}`);
+      if (isolateOf(rawCtx)[name] === baseIsolates[name]) {
+        throw new SlotError(`Unit ${state.unitId} cannot call provide outside its own isolate: ${name}.`);
+      }
+      guard.assertWriteAction(
+        state,
+        { kind: 'service.isolate-provide', target: name },
+        () => state.manifest.writes.isolateProvides.includes(name),
+        `Unit ${state.unitId} did not declare isolate-provide write edge: ${name}.`,
+      );
+      const action = formatActionNode({ kind: 'service.isolate-provide', target: name });
+      recordRuntimeWrite(state, { kind: 'isolate-provide', target: name, action });
+      const audited = state.grant.trustedActionNodes.includes(action);
+      if (audited) state.onAudit(AUDIT_CODES.AUDIT_TRUSTED_WRITE_ON, name, action);
+      const dispose = rawCtx.provide(name, value, check);
+      let offEmitted = false;
+      const emitOff = () => {
+        if (!audited || offEmitted) return;
+        offEmitted = true;
+        state.onAudit(AUDIT_CODES.AUDIT_TRUSTED_WRITE_OFF, name, action);
+      };
+      if (audited) {
+        rawCtx.effect(() => () => emitOff(), `audit:provide:${name}`);
+      }
+      if (typeof dispose !== 'function') return dispose;
+      return async () => {
+        try {
+          return await dispose();
+        } finally {
+          emitOff();
+        }
+      };
+    };
+
+    const backing = Object.create(null);
+    return new Proxy(backing, {
+      getPrototypeOf() {
+        return null;
+      },
+      setPrototypeOf() {
+        return false;
+      },
+      ownKeys() {
+        return ['get', 'effect', 'on', 'intercept', 'provide'];
+      },
+      get(_target, prop) {
+        if (typeof prop === 'symbol') return undefined;
+        if (Object.hasOwn(methods, prop)) return methods[prop];
+        if (BLOCKED_CONTEXT_PROPS.has(prop)) return undefined;
+        // Property-style service access (e.g. `ctx['vault:backend@1']`) goes through the exact same guard.
+        return methods.get(prop);
+      },
+      set() {
+        return false;
+      },
+      deleteProperty() {
+        return false;
       },
     });
-
-    Object.defineProperty(unitCtx, GUARD_UNIT_STATE, {
-      value: state,
-      enumerable: false,
-      configurable: true,
-    });
-    return unitCtx;
   }
 
   /** WriteAuthorizer for ImplSlot and MechanismSlot. */
   authorize(caller, request) {
-    if (caller?.fiber && this.#rootFibers.has(caller.fiber)) return;
-    const state = resolveUnitState(caller);
+    if (this.isRootCaller(caller)) return;
+    const state = this.resolveState(caller);
     if (!state || !state.active) {
-      throw new SlotError(`Unauthorized slot write (${request.kind}:${request.slot}) from untracked or inactive caller.`);
+      throw new SlotError(`Unauthorized slot access (${request.kind}:${request.slot}) from untracked or inactive caller.`);
+    }
+
+    if (request.kind === 'read') {
+      throw new SlotError(`Unit ${state.unitId} is forbidden from reading raw registrations on ${request.slot}.`);
     }
 
     if (request.kind === 'select') {
@@ -197,7 +422,7 @@ export class KernelGuard {
         `Unit ${state.unitId} did not declare register write edge: ${request.slot}#${request.name}.`,
       );
       const node = formatActionNode(actionReq);
-      state.runtimeWritten.push({ kind: 'impl', target: request.slot, action: node });
+      recordRuntimeWrite(state, { kind: 'impl', target: request.slot, action: node });
       if (state.grant.trustedActionNodes.includes(node)) {
         state.onAudit(AUDIT_CODES.AUDIT_TRUSTED_WRITE_ON, request.slot, node);
       }
@@ -214,7 +439,7 @@ export class KernelGuard {
         `Unit ${state.unitId} did not declare hook write edge: ${request.slot}@${request.phase}.`,
       );
       const node = formatActionNode(actionReq);
-      state.runtimeWritten.push({ kind: 'mechanism', target: request.slot, action: node });
+      recordRuntimeWrite(state, { kind: 'mechanism', target: request.slot, action: node });
       if (state.grant.trustedActionNodes.includes(node)) {
         state.onAudit(AUDIT_CODES.AUDIT_TRUSTED_WRITE_ON, request.slot, node);
       }
@@ -225,8 +450,8 @@ export class KernelGuard {
   }
 
   released(caller, request) {
-    if (caller?.fiber && this.#rootFibers.has(caller.fiber)) return;
-    const state = resolveUnitState(caller);
+    if (this.isRootCaller(caller)) return;
+    const state = this.resolveState(caller);
     if (!state) return;
     let action;
     if (request.kind === 'hook') {
@@ -266,37 +491,41 @@ export class KernelGuard {
     if (cached !== undefined) return cached;
 
     const guard = this;
+    const wrapMethodAccess = (target, prop) => {
+      if (prop === GUARD_WRAPPED) return true;
+      if (typeof prop === 'symbol') {
+        if (BLOCKED_SYMBOLS.has(prop)) return undefined;
+        return Reflect.get(target, prop, target);
+      }
+      const raw = Reflect.get(target, prop, target);
+      if (typeof raw !== 'function') return raw;
+      const rule = resolveMethodRule(methodRules, prop);
+      return function guardedMethod(...args) {
+        return guard.#invokeGuardedMethod(
+          state,
+          serviceName,
+          prop,
+          rule,
+          () => Reflect.apply(raw, target, args),
+        );
+      };
+    };
+
     let wrapped;
     if (typeof value === 'function') {
-      const rule = resolveMethodRule(methodRules, '$');
+      const callRule = resolveMethodRule(methodRules, '$');
       wrapped = new Proxy(value, {
-        get(target, prop, receiver) {
-          if (prop === GUARD_WRAPPED) return true;
-          return Reflect.get(target, prop, receiver);
-        },
+        get: wrapMethodAccess,
         apply(target, thisArg, args) {
-          return guard.#invokeGuardedMethod(state, serviceName, '$', rule, () => Reflect.apply(target, thisArg, args));
+          return guard.#invokeGuardedMethod(state, serviceName, '$', callRule, () => Reflect.apply(target, thisArg, args));
+        },
+        construct() {
+          throw new SlotError(`Unit ${state.unitId} cannot construct guarded service ${serviceName}.`);
         },
       });
     } else {
       wrapped = new Proxy(value, {
-        get(target, prop) {
-          if (prop === GUARD_WRAPPED) return true;
-          if (typeof prop === 'symbol') return Reflect.get(target, prop, target);
-          const raw = Reflect.get(target, prop, target);
-          if (typeof raw !== 'function') return raw;
-          const rule = resolveMethodRule(methodRules, prop);
-          if (!rule) return raw.bind(target);
-          return function guardedMethod(...args) {
-            return guard.#invokeGuardedMethod(
-              state,
-              serviceName,
-              prop,
-              rule,
-              () => Reflect.apply(raw, target, args),
-            );
-          };
-        },
+        get: wrapMethodAccess,
       });
     }
     byName.set(serviceName, wrapped);
@@ -304,7 +533,15 @@ export class KernelGuard {
   }
 
   #invokeGuardedMethod(state, serviceName, methodName, rule, exec) {
-    if (!rule) return exec();
+    if (!state.active) {
+      const err = new SlotError(`Unit ${state.unitId} was unmounted and can no longer invoke ${serviceName}#${methodName}.`);
+      if (rule?.async === true) return Promise.reject(err);
+      throw err;
+    }
+    if (!rule) {
+      // Fail closed on methods unlisted in methodRules (unless wildcard '*' was explicitly configured).
+      throw new SlotError(`Unit ${state.unitId} is denied invoking undeclared method ${serviceName}#${methodName}.`);
+    }
     const kind = serviceInvokeActionKind(rule.mode || 'read');
     const req = {
       kind,
@@ -314,9 +551,8 @@ export class KernelGuard {
       async: rule.async === true,
     };
     const node = formatActionNode(req);
-    const effect = state.approvedActions.has(node)
-      ? 'allow'
-      : evaluatePermissionTree(state.grant.tree, state.subject, req, { defaultEffect: 'deny' }).effect;
+    // Always evaluate PolicyTree first so approvedActions can NEVER override closed or explicit deny rules.
+    const effect = evaluatePermissionTree(state.grant.tree, state.subject, req, { defaultEffect: 'deny' }).effect;
 
     if (effect === 'allow') return exec();
 
@@ -330,6 +566,8 @@ export class KernelGuard {
     if (rule.async !== true) {
       throw new SlotError(`Synchronous method cannot escalate on use: ${serviceName}#${methodName}.`);
     }
+
+    if (state.approvedActions.has(node)) return exec();
 
     return (async () => {
       if (!state.active) {
@@ -345,23 +583,43 @@ export class KernelGuard {
         const detail = { node, kind, target: serviceName, method: methodName, mode: rule.mode || 'read' };
         inflight = Promise.resolve()
           .then(() => state.escalateRuntime(detail))
+          .then(
+            decision => {
+              const granted = decision === true;
+              if (!state.active) {
+                return { granted: false, unmounted: true };
+              }
+              if (granted) {
+                state.approvedActions.add(node);
+                state.onAudit(AUDIT_CODES.AUDIT_ESCALATION_APPROVED, serviceName, node);
+                if ((rule.mode || 'read') !== 'read') {
+                  state.onAudit(AUDIT_CODES.AUDIT_TRUSTED_WRITE_ON, serviceName, node);
+                }
+              } else {
+                state.onAudit(AUDIT_CODES.AUDIT_ESCALATION_DENIED, serviceName, node);
+              }
+              return { granted, unmounted: false };
+            },
+            () => {
+              if (state.active) {
+                state.onAudit(AUDIT_CODES.AUDIT_ESCALATION_DENIED, serviceName, node);
+              }
+              return { granted: false, unmounted: !state.active };
+            },
+          )
           .finally(() => {
             state.inflightEscalations.delete(node);
           });
         state.inflightEscalations.set(node, inflight);
       }
 
-      const approved = await inflight;
-      if (!state.active) {
+      const outcome = await inflight;
+      if (!state.active || outcome.unmounted) {
         throw new SlotError(`Unit ${state.unitId} was unmounted during permission escalation.`);
       }
-      if (!approved) {
-        state.onAudit(AUDIT_CODES.AUDIT_ESCALATION_DENIED, serviceName, node);
+      if (!outcome.granted) {
         throw new SlotError(`User denied unit ${state.unitId} invoking ${serviceName}#${methodName}.`);
       }
-      state.approvedActions.add(node);
-      state.onAudit(AUDIT_CODES.AUDIT_ESCALATION_APPROVED, serviceName, node);
-      state.onAudit(AUDIT_CODES.AUDIT_TRUSTED_WRITE_ON, serviceName, node);
       return exec();
     })();
   }
