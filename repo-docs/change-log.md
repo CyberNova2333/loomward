@@ -236,3 +236,17 @@ Synced through aa016c0（含 Phase 1 工作树改动）
 - 验证范围与边界：本机（Linux x86_64）运行 `pnpm run build:console`、`pnpm install --frozen-lockfile`、`pnpm run check`、`pnpm run layering`、`pnpm run test:ci`（覆盖既有 158 项回归 + 新增 `panel-schema`/`content-guard` 单测与 `dual-origin-console.test.mjs` 跨源隔离、ES256 PassKey、两步审批、`control.sock` 实时推送及模拟独立 LLM 内容审核插件联调）、`validate_repo_docs.py`、`docs-site` 构建、`repo_maintenance_guard.py status` 与 `sync_assets_licenses.py --check --dry-run`。既有 `local/webui*.mjs` 兼容保留，未改动本机 `~/.agentdock-bridge` 运行副本。
 
 Synced through 32ab5c1（含 Phase 2 工作树改动）
+
+## 2026-11-23（Phase 3）：整合归档项目落地进程外 `@loomward/plugin-antileak` 与 `@loomward/plugin-decisions`
+
+- 触发：按分阶段实施计划推进 Phase 3，将已归档的 `archive/claude-code-antileak-hooks` 与 `archive/agent-decisions-dashboard` 正式以严格 `out-of-process` 扩展插件形态集成入 LoomWard 微内核；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- `@loomward/plugin-antileak`（[plugins/antileak](../plugins/antileak/src/index.mjs)）：
+  - 从 `archive/claude-code-antileak-hooks` 引入离线 R1–R7 策略引擎至 `plugins/antileak/engine/{policy.json,check.py,doctor.py,refresh-private.py,resolve-private.py}`，支持通过 `LOOMWARD_ANTILEAK_POLICY` / `LOOMWARD_ANTILEAK_CACHE` 将私有名单种子与 6 小时动态缓存严格隔离在工作区外私有状态目录，绝不入仓。
+  - 新增 `runner.mjs`（`shell: false`、最小净化环境、绝不传递 `--net`、5 秒超时与 1 MiB 预算）对接 `ContentInspect v1` 协议并接入 `tool:invoke@1@before`（命中 R1/R4/R7 规则或私有缓存缺失/过期均在进入审批队列前 fail-closed 阻断），同时注册只读 `console:panel@1` 面板展示缓存新鲜度与拦截计数。
+- `@loomward/plugin-decisions`（[plugins/decisions](../plugins/decisions/src/index.mjs)）：
+  - 从 `archive/agent-decisions-dashboard` 引入零第三方依赖 Python 标准库 + SQLite 回环台账核心至 `plugins/decisions/service/core/*.py`。
+  - 新增 `service-manager.mjs`（严格限定回环地址、支持托管子进程按需启停与卸载清理），向 `tool:provider@1` 注册命名空间工具 `mcp__decisions__export_context`、`mcp__decisions__check_consistency` 与受本机人工审批保护的 `mcp__decisions__record`（透传 CAS `expected_version` 乐观锁冲突 `409` 与 `request_id` 幂等回执），并注册只读 `console:panel@1` 台账状态面板。
+- 测试与工作区脚本：更新根目录 `package.json` 使 `test:workspace` 与 `test:ci` 覆盖 `plugins/*/test/*.test.mjs`，并在 `.gitignore` 忽略 `__pycache__/` 与 `*.pyc`。
+- 验证范围与边界：本机（Linux x86_64）运行 `pnpm install --frozen-lockfile`、`pnpm run check`（含 Python `py_compile`）、`pnpm run layering`、`pnpm run test:ci`（覆盖既有 162 项 + 新增真实 Python 子进程 `antileak.test.mjs` 与真实 SQLite 回环服务 `decisions.test.mjs`）、`validate_repo_docs.py`、`docs-site` 构建、`repo_maintenance_guard.py status` 与 `sync_assets_licenses.py --check --dry-run`；不改动本机运行中的 `~/.agentdock-bridge` 副本或远端部署。
+
+Synced through c3d1cd2（含 Phase 3 工作树改动）

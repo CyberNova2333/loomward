@@ -27,8 +27,8 @@
 
 | 重要代码 | 功能 | 关键符号 | 调用方 / 使用方 |
 | --- | --- | --- | --- |
-| [防泄漏护栏插件](../plugins/antileak/src/contract.mjs) | 声明进程外 R1–R7 防泄漏策略与 `tool:invoke@1` 拦截契约（来源 `archive/claude-code-antileak-hooks`） | `createAntileakAdapterDescriptor` | 平台 `policy:rule@1` 与 `tool:invoke@1` 插槽 |
-| [人机决策台账插件](../plugins/decisions/src/contract.mjs) | 声明进程外决策台账与上下文导出契约（来源 `archive/agent-decisions-dashboard`） | `createDecisionsAdapterDescriptor` | 平台 `tool:provider@1` 与 `console:panel@1` 插槽 |
+| [防泄漏护栏插件](../plugins/antileak/src/index.mjs) | 承接 `archive/claude-code-antileak-hooks` 离线策略引擎（`plugins/antileak/engine/{check,doctor,refresh-private,resolve-private}.py`、`plugins/antileak/engine/policy.json`），以无 shell 离线子进程（零宿主凭据、禁 `--net`）将 R1–R7 校验经 `ContentInspect v1` 接入 `tool:invoke@1@before`（缓存缺失/过期 fail-closed 阻断于审批前），并注册只读 `console:panel@1` 缓存健康面板 | `createAntileakEngineRunner` / `extractInspectableText` / `apply` | Cordis `mountExtensionUnit`、`tool:invoke@1`、`console:panel@1` 与[防泄漏插件测试](../plugins/antileak/test/antileak.test.mjs) |
+| [人机决策台账插件](../plugins/decisions/src/index.mjs) | 承接 `archive/agent-decisions-dashboard` 纯标准库 Python + SQLite 回环台账服务（`service/core/*.py`），仅允许回环接入或托管子进程，向 `tool:provider@1` 暴露 `mcp__decisions__{export_context,check_consistency,record}`（含 CAS `expected_version` 乐观锁与 `request_id` 幂等，写入强制经本机审批），并注册只读 `console:panel@1` 台账面板 | `createDecisionsServiceClient` / `createDecisionsToolProvider` / `DECISIONS_TOOLS` / `apply` | Cordis `mountExtensionUnit`、`tool:provider@1`、`console:panel@1` 与[决策台账插件测试](../plugins/decisions/test/decisions.test.mjs) |
 | [第三方 MCP 聚合插件](../plugins/mcp-hub/src/index.mjs) | 以进程外扩展身份声明 `tool:provider@1` 注册写边，封装 `local/mcp-client.mjs` 为标准工具提供者并在卸载时清理子进程与 HTTP 会话 | `createMcpHubToolProvider` / `createMcpHubDescriptor` | Cordis `mountExtensionUnit` 与 `tool:provider@1` 插槽 |
 | [外部独立项目适配](../plugins/adapters/src/contract.mjs) | 声明对接独立仓库 `CloudForge` 与 `ModelBridge` 的受控接口契约 | `STANDALONE_INTEGRATIONS` | 平台 `tool:provider@1` 与 `console:panel@1` 插槽 |
 

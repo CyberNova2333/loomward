@@ -11,8 +11,8 @@
   "scripts": {
     "test": "pnpm run test:bridge && pnpm run test:workspace",
     "test:bridge": "node --test test/*.test.mjs cloud/*.test.mjs",
-    "test:workspace": "node --test packages/*/test/*.test.mjs",
-    "test:ci": "node --test --test-concurrency=1 test/*.test.mjs cloud/*.test.mjs packages/*/test/*.test.mjs",
+    "test:workspace": "node --test packages/*/test/*.test.mjs plugins/*/test/*.test.mjs",
+    "test:ci": "node --test --test-concurrency=1 test/*.test.mjs cloud/*.test.mjs packages/*/test/*.test.mjs plugins/*/test/*.test.mjs",
     "layering": "node --test packages/kernel/test/layering.test.mjs",
     "build:console": "pnpm --filter @loomward/console run build",
     "check:workspace": "pnpm -r --if-present run check",

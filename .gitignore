@@ -5,6 +5,8 @@ node_modules/
 !.env.example
 *.dpapi
 *-private.*
+!plugins/antileak/engine/refresh-private.py
+!plugins/antileak/engine/resolve-private.py
 coverage/
 artifacts/
 
@@ -16,3 +18,5 @@ artifacts/
 
 # 本机专用部署配置
 /wrangler.jsonc
+__pycache__/
+*.pyc

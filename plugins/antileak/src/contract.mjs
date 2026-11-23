@@ -9,6 +9,16 @@ export const contract = validateContractDecl({
   version: '3.0.0-alpha.0',
   executionBoundary: 'out-of-process',
   provides: ['policy:antileak'],
-  consumes: ['policy:rule@1', 'tool:invoke@1', 'console:panel@1'],
+  consumes: ['tool:invoke@1', 'console:panel@1'],
+  registers: [
+    { slot: 'console:panel@1', name: 'antileak' },
+  ],
+  writes: {
+    hooks: [
+      { slot: 'tool:invoke@1', phase: 'before' },
+    ],
+    intercepts: [],
+    isolateProvides: [],
+  },
   archiveSource: 'archive/claude-code-antileak-hooks',
 });

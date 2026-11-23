@@ -4,15 +4,17 @@
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
-  "description": "Out-of-process Human-Agent decision ledger, 3-axis state governance, and context export plugin (consolidated from archive/agent-decisions-dashboard)",
+  "description": "Out-of-process Human-Agent decision ledger, 3-axis state governance, CAS optimistic locking, and context export plugin (consolidated from archive/agent-decisions-dashboard)",
   "exports": {
     ".": "./src/index.mjs",
-    "./contract": "./src/contract.mjs"
+    "./contract": "./src/contract.mjs",
+    "./service-manager": "./src/service-manager.mjs"
   },
   "dependencies": {
     "@loomward/shared": "workspace:*"
   },
   "scripts": {
-    "check": "node --check src/index.mjs && node --check src/contract.mjs"
+    "check": "node --check src/index.mjs && node --check src/contract.mjs && node --check src/service-manager.mjs && python3 -B -m py_compile service/core/*.py",
+    "test": "node --test test/*.test.mjs"
   }
 }

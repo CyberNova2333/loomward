@@ -10,5 +10,14 @@ export const contract = validateContractDecl({
   executionBoundary: 'out-of-process',
   provides: ['decisions:ledger'],
   consumes: ['tool:provider@1', 'console:panel@1'],
+  registers: [
+    { slot: 'tool:provider@1', name: 'decisions' },
+    { slot: 'console:panel@1', name: 'decisions' },
+  ],
+  writes: {
+    hooks: [],
+    intercepts: [],
+    isolateProvides: [],
+  },
   archiveSource: 'archive/agent-decisions-dashboard',
 });

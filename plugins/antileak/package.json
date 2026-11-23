@@ -4,15 +4,17 @@
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
-  "description": "Out-of-process R1-R7 anti-leak policy engine and pre-invocation guardrail plugin (consolidated from archive/claude-code-antileak-hooks)",
+  "description": "Out-of-process R1-R7 offline anti-leak guardrail engine and ContentInspect v1 hook plugin (consolidated from archive/claude-code-antileak-hooks)",
   "exports": {
     ".": "./src/index.mjs",
-    "./contract": "./src/contract.mjs"
+    "./contract": "./src/contract.mjs",
+    "./runner": "./src/runner.mjs"
   },
   "dependencies": {
     "@loomward/shared": "workspace:*"
   },
   "scripts": {
-    "check": "node --check src/index.mjs && node --check src/contract.mjs"
+    "check": "node --check src/index.mjs && node --check src/contract.mjs && node --check src/runner.mjs && python3 -B -m py_compile engine/check.py engine/doctor.py engine/refresh-private.py engine/resolve-private.py",
+    "test": "node --test test/*.test.mjs"
   }
 }

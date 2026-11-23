@@ -1,0 +1,75 @@
+{
+  "_comment": "rev4: 本文件随 CDN 分发，不得含任何私有仓名/业务域名/内部标识。R1(私有仓名) 与 R4(业务标识正则) 全部来自 private-repos.json 动态缓存；缓存由 refresh-private.py 从 本机私有种子(owners/private/patterns, 不随包分发) + CNB 平台(主来源: cnb_token_file 或环境变量 CNB_TOKEN) + GitHub(可选: 环境变量 GH_TOKEN_n 与 gh) 生成。",
+  "forbidden_patterns": [
+    "Claude[^A-Za-z]{0,3}Session",
+    "claude\\.ai",
+    "Claude[ _-]?[A-Za-z]{1,8}[ _-]?[0-9]+(?:[._-][0-9]+)*",
+    "Claude[ _-]?[0-9]+(?:[._-][0-9]+)*",
+    "Claude[ _-]?(?:Opus|Sonnet|Haiku|Fable|Mythos|Instant)(?![A-Za-z])",
+    "(?<![A-Za-z])(?:Opus|Sonnet|Haiku|Fable|Mythos)[ _-]?[0-9]+(?:[._-][0-9]+)*",
+    "(?<![A-Za-z])GPT[ _-]?[0-9]+(?:[._-]?[0-9A-Za-z]+)*",
+    "OpenAI[ _-]?o[1-9](?![A-Za-z0-9])",
+    "(?<![A-Za-z0-9])o[1-9][ _-](?:mini|pro|preview)(?![A-Za-z])",
+    "Gemini[ _-]?[0-9]+(?:\\.[0-9]+)*(?:[ _-]?(?:Pro|Flash|Ultra|Nano))?",
+    "DeepSeek[ _-]?(?:V[0-9]+(?:\\.[0-9]+)*|R[0-9]+|Coder|Chat)(?![A-Za-z])",
+    "Kimi[ _-]?K[0-9]+(?![A-Za-z0-9])",
+    "Qwen[ _-]?[0-9]+(?:\\.[0-9]+)*",
+    "Llama[ _-]?[0-9]+(?:\\.[0-9]+)*",
+    "Grok[ _-]?[0-9]+(?:\\.[0-9]+)*",
+    "Mistral[ _-]?(?:Large|Medium|Small|[0-9]+)(?![A-Za-z])"
+  ],
+  "agent_branch_prefixes": [
+    "claude/",
+    "codex/",
+    "chatgpt/",
+    "gpt/",
+    "openai/",
+    "agent/",
+    "deepseek/",
+    "kimi/",
+    "copilot/",
+    "cursor/",
+    "devin/",
+    "gemini/",
+    "jules/",
+    "aider/",
+    "anthropic/"
+  ],
+  "agent_signing_fingerprint": "SHA256:32dP45eSMmVSt/G/CGvcxl/P+MO3Nwj9xeTh/GSA2wc",
+  "signing_instructions": "规则6：提交必须用【你自己生成的】SSH Signing Key 签名。请执行：ssh-keygen -t ed25519 -N '' -C signing -f ~/.ssh/signing_ed25519 ；然后 git config --global gpg.format ssh && git config --global user.signingkey ~/.ssh/signing_ed25519.pub && git config --global commit.gpgsign true ；最后把 ~/.ssh/signing_ed25519.pub 的【完整内容】发给我，我手动添加到 GitHub 账号后再重试提交。",
+  "agent_provider_emails": [
+    "noreply@anthropic.com",
+    "noreply@openai.com",
+    "noreply@deepseek.com",
+    "noreply@moonshot.cn"
+  ],
+  "secret_regexes": [
+    "gh[pousr]_[A-Za-z0-9]{20,}",
+    "github_pat_[A-Za-z0-9_]{20,}",
+    "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    "AKIA[0-9A-Z]{16}",
+    "sk-[A-Za-z0-9_-]{20,}",
+    "xox[baprs]-[A-Za-z0-9-]{10,}",
+    "(?<![0-9A-Za-z_-])AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])",
+    "glpat-[A-Za-z0-9_-]{20,}",
+    "npm_[A-Za-z0-9]{30,}"
+  ],
+  "private_cache": "/root/.claude/hooks/private-repos.json",
+  "private_seed": "/root/.claude/private-seed.json",
+  "private_cache_ttl": 21600,
+  "refresh_script": "/root/.claude/hooks/refresh-private.py",
+  "expected_owners": [],
+  "resolve_script": "/root/.claude/hooks/resolve-private.py",
+  "resolve_budget": 30,
+  "resolve_cache_ttl": 86400,
+  "cnb_api": "https://api.cnb.cool",
+  "cnb_token_file": "/root/.cnb-auth-token",
+
+  "_cnb_note": "名单的主来源: CNB(云原生构建)平台。cnb_token_file 指向本机令牌文件(不随包分发, 格式为一行 `Token: <值>`), 或用环境变量 CNB_TOKEN。文件存在即启用并必须成功(语义同 GH_TOKEN_n); 不存在即跳过。resolve-private.py 只向 refresh 成功过的来源(缓存 sources 字段)提问: GitHub 登录态失效时 gh/token 不会再被咨询, 由 CNB 单独作答, 不会因为一家平台哑火而把所有推送拦死。",
+
+  "_expected_owners_note": "expected_owners 必须在部署时按实际情况填写(本文件随 CDN 分发，不能带具体 owner 名，所以这里留空)。留空的后果: refresh-private.py 的完整性校验 EXPECTED-covered 恒真,若 gh/token 因 scope 不足只看得到公开仓,就会写出 private:[] 的空名单并报成功,R1 于是静默放行一切。rev4.1 起 refresh 对『空 expected_owners + 没看到任何私有仓』额外判失败以兜底,但那只是保险,正确做法仍是在部署时填上本项(或在私有种子 private-seed.json 里列出 owners)。",
+
+  "_patterns_note": "R4 业务标识(域名/内部流水线名)正则只能来自本机私有种子 private-seed.json 的 patterns 字段——CNB、gh 与 GH_TOKEN_n 都提供不了这类信息。没有种子文件时 patterns 为空,R4 整条规则不生效,只剩 R1 挡私有仓名。要 R4 就必须部署种子。",
+
+  "_sources_note": "私有仓名单取各来源的并集: CNB 平台是主来源, GitHub(环境变量 GH_TOKEN_n 与 gh CLI)是可选来源, 只在仍有私有仓托管在 GitHub 时才需要配置。各来源对等合并而非主备: 令牌配置了就必须成功(否则不回写), 没配置就跳过, 至少要有一个来源成功。GitHub 内部的 gh 与 GH_TOKEN_n 也是对等的, 可见范围可能不同; resolve-private.py 在所有 token 都答不上来时也会问 gh(rev4.1 修正)。"
+}
