@@ -4,15 +4,16 @@
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
-  "description": "Cloudflare Workers OAuth 2.1 edge gateway and BridgeRelay ingress root package for LoomWard",
+  "description": "Cloudflare Workers OAuth 2.1 edge gateway and BridgeRelay protocol root package for LoomWard",
   "exports": {
     ".": "./src/index.mjs",
-    "./contract": "./src/contract.mjs"
+    "./contract": "./src/contract.mjs",
+    "./protocol": "./src/protocol.mjs"
   },
   "dependencies": {
     "@loomward/shared": "workspace:*"
   },
   "scripts": {
-    "check": "node --check src/index.mjs && node --check src/contract.mjs"
+    "check": "node --check src/index.mjs && node --check src/contract.mjs && node --check src/protocol.mjs"
   }
 }

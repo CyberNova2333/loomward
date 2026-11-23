@@ -29,3 +29,16 @@ export {
   ImplSlot,
   MechanismSlot,
 } from './slots.mjs';
+export {
+  VAULT_SLOT,
+  CLOSED_SLOTS,
+  AUDIT_CODES,
+  REJECT_CODES,
+  FORBIDDEN_AUDIT_KEYS,
+  mechanismActionKind,
+  serviceInvokeActionKind,
+  formatActionNode,
+  buildPermissionSubject,
+  isSafeUnicodeString,
+  sanitizeAuditMetadata,
+} from './guard-types.mjs';

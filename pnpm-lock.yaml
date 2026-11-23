@@ -203,9 +203,18 @@ importers:
 
   packages/host:
     dependencies:
+      '@loomward/kernel':
+        specifier: workspace:*
+        version: link:../kernel
       '@loomward/shared':
         specifier: workspace:*
         version: link:../shared
+      https-proxy-agent:
+        specifier: 9.1.0
+        version: 9.1.0(supports-color@10.2.2)
+      ws:
+        specifier: 8.22.0
+        version: 8.22.0
 
   packages/kernel:
     dependencies:

@@ -16,9 +16,12 @@
 
 | 重要代码 | 功能 | 关键符号 | 调用方 / 使用方 |
 | --- | --- | --- | --- |
-| [共享契约与原语](../packages/shared/src/index.mjs) | 零宿主、零运行时依赖的契约校验、RPM JCS+SHA-256、60 秒 `BootRun` 回滚与插槽原语 | `validateContractDecl` / `createFrozenRpm` / `withDeadline` / `ImplSlot` / `MechanismSlot` | `@loomward/kernel` 与全部根包/插件；[共享原语测试](../packages/shared/test/shared.test.mjs) |
-| [Cordis 微内核](../packages/kernel/src/index.mjs) | 基于 Cordis 4 的 RPM 校验启动、标准插槽注册与 `PolicyTree` 策略树求值 | `createLoomWardKernel` / `PLATFORM_SLOTS` / `evaluatePermissionTree` | 启动入口；[内核测试](../packages/kernel/test/kernel.test.mjs)与[机械分层守卫](../packages/kernel/test/layering.test.mjs) |
-| [核心业务根包骨架](../packages/host/src/contract.mjs) | 声明 `cloud-relay`、`sandbox`、`host`、`console` 四个根插件契约，渐进承接原根目录模块 | `packages/{cloud-relay,sandbox,host,console}/src/contract.mjs` | RPM 装配与分层守卫 |
+| [共享契约与原语](../packages/shared/src/index.mjs) | 零宿主、零运行时依赖的契约校验（含 `registers`/`writes` 写边）、守卫错误与审计脱敏码（`guard-types.mjs`）、RPM JCS+SHA-256、60 秒 `BootRun` 回滚与插槽原语 | `validateContractDecl` / `createFrozenRpm` / `withDeadline` / `ImplSlot` / `MechanismSlot` / `VAULT_SLOT` / `sanitizeAuditMetadata` | `@loomward/kernel` 与全部根包/插件；[共享原语测试](../packages/shared/test/shared.test.mjs) |
+| [Cordis 微内核与守卫](../packages/kernel/src/index.mjs) | 基于 Cordis 4 的 7 大标准插槽（含闭锁 `vault:backend@1`）、`KernelGuard` AOP 拦截与单飞异步提权（`guard.mjs`）、无状态规则管线（`rules.mjs`）、`PolicyTree`（`policy-tree.mjs`）及冻结 RPM 构造/核验（`rpm-builder.mjs`） | `createLoomWardKernel` / `PLATFORM_SLOTS` / `KernelGuard` / `evaluateGuard` / `buildWorkspaceRpm` / `verifyWorkspaceRpm` | `@loomward/host` 守护入口；[内核测试](../packages/kernel/test/kernel.test.mjs)与[机械分层守卫](../packages/kernel/test/layering.test.mjs) |
+| [云端中继协议根包](../packages/cloud-relay/src/index.mjs) | 提供与 `cloud/security.mjs`、`cloud/liveness.mjs` 对齐的规范协议上限、OAuth 作用域、心跳窗口与桥接 URL 校验 | `assertValidBridgeOrigin` / `buildBridgeWebSocketUrl` / `BUILTIN_TOOL_SCOPES` | Cordis `relay:cloud-worker` 服务与中继入口 |
+| [沙箱运行器根包](../packages/sandbox/src/index.mjs) | 将自包含 `local/sandbox.mjs` 适配为 `tool:provider@1` 的内置 `sandbox-docker` 实现并托管容器关闭清理 | `createSandboxToolProvider` / `BUILTIN_SANDBOX_TOOLS` | Cordis `tool:provider@1` 与 `sandbox:docker` 服务 |
+| [宿主核心与调度流水线](../packages/host/src/index.mjs) | 提供闭锁凭据后端（`vault.mjs`）、统一安全调度流水线（`pipeline.mjs`：`policy:rule@1` → `tool:invoke@1@before` → 精确本机批准先删后记 24h 账本 → 专用 `stop_command` 通道 → `tool:provider@1` → `tool:invoke@1@after`）、远程 WSS/本地直连双入口（`ingress-relay.mjs` / `ingress-local.mjs`）与完整守护装配（`daemon.mjs`） | `createHostVaultBackend` / `createToolDispatchPipeline` / `createCloudflareRelayIngress` / `createLocalMcpIngress` / `startLoomWardDaemon` | Cordis `host:dispatch` / `gateway:ingress@1` 与[调度守护集成测试](../packages/host/test/pipeline-and-daemon.test.mjs) |
+| [双源控制台根包骨架](../packages/console/src/contract.mjs) | 声明回环控制台与独立 Trust Origin 根插件契约（Phase 2 承接 `local/webui*.mjs`） | `packages/console/src/contract.mjs` | RPM 装配与分层守卫 |
 
 ## `plugins/`
 
@@ -26,7 +29,7 @@
 | --- | --- | --- | --- |
 | [防泄漏护栏插件](../plugins/antileak/src/contract.mjs) | 声明进程外 R1–R7 防泄漏策略与 `tool:invoke@1` 拦截契约（来源 `archive/claude-code-antileak-hooks`） | `createAntileakAdapterDescriptor` | 平台 `policy:rule@1` 与 `tool:invoke@1` 插槽 |
 | [人机决策台账插件](../plugins/decisions/src/contract.mjs) | 声明进程外决策台账与上下文导出契约（来源 `archive/agent-decisions-dashboard`） | `createDecisionsAdapterDescriptor` | 平台 `tool:provider@1` 与 `console:panel@1` 插槽 |
-| [第三方 MCP 聚合插件](../plugins/mcp-hub/src/contract.mjs) | 声明进程外 `stdio` / `Streamable HTTP` 聚合器契约（承接 `local/mcp-*.mjs`） | `createMcpHubDescriptor` | 平台 `tool:provider@1` 与 `console:panel@1` 插槽 |
+| [第三方 MCP 聚合插件](../plugins/mcp-hub/src/index.mjs) | 以进程外扩展身份声明 `tool:provider@1` 注册写边，封装 `local/mcp-client.mjs` 为标准工具提供者并在卸载时清理子进程与 HTTP 会话 | `createMcpHubToolProvider` / `createMcpHubDescriptor` | Cordis `mountExtensionUnit` 与 `tool:provider@1` 插槽 |
 | [外部独立项目适配](../plugins/adapters/src/contract.mjs) | 声明对接独立仓库 `CloudForge` 与 `ModelBridge` 的受控接口契约 | `STANDALONE_INTEGRATIONS` | 平台 `tool:provider@1` 与 `console:panel@1` 插槽 |
 
 ## `cloud/`
@@ -69,7 +72,7 @@
 
 | 重要代码 | 功能 | 关键符号 | 调用方 / 使用方 |
 | --- | --- | --- | --- |
-| [POSIX 统一宿主管理](../scripts/host-cli.mjs) | 在 Linux 与 macOS 执行 `setup`/`install`/`start`/`stop`/`status`/`webui`/`webui-auth`/`service`/`approve`/`password`/`rotate-secrets` 并生成 `0700` 包装器 | `setupHost` / `installHardened` / `runSupervisor` / `runWebUi` / `manageWebUiAuth` / `manageSystemdUserServices` | `~/.agentdock-bridge/{start,stop,status,run-service,webui,webui-auth,service,approve,password}`、user systemd 单元与[POSIX 宿主测试](../test/posix-host.test.mjs) |
+| [POSIX 统一宿主管理](../scripts/host-cli.mjs) | 在 Linux 与 macOS 执行 `setup`/`install`/`start`/`stop`/`status`/`webui`/`webui-auth`/`service`/`approve`/`password`/`rotate-secrets`，安装阶段同步复制 `pnpm-workspace.yaml`、`packages/`、`plugins/`、生成冻结 `rpm.json`（摘要记入 `installation.json`）并生成 `0700` 包装器 | `setupHost` / `installHardened` / `runSupervisor` / `runWebUi` / `manageWebUiAuth` / `manageSystemdUserServices` | `~/.agentdock-bridge/{start,stop,status,run-service,webui,webui-auth,service,approve,password}`、user systemd 单元与[POSIX 宿主测试](../test/posix-host.test.mjs) |
 | [初始化与受保护安装](../scripts/Install-Hardened.ps1) | Windows 初始化配置与凭据、校验并安装私有固定 Node，生成受保护副本与 `.cmd` 入口 | `Setup.ps1` / `Install-NodeRuntime.ps1` / `Install-Hardened.ps1` | Windows 维护者显式安装；[管理安全测试](../test/management-safety.test.mjs) |
 | [状态守护与进程管理](../scripts/Manage.ps1) | 检查完整祖先路径与所有者 ACL、生成防 PID 复用的托管进程并响应停机标记 | `Assert-PrivateState` / `Assert-PinnedNode` / `OwnedProcess` | 根目录与状态目录下的 `.cmd` 入口、`State-Safety.ps1`、`Approve.ps1` |
 | [凭据加密与轮换](../scripts/Secrets.ps1) | 通过 Windows DPAPI 生成、导出、弹窗展示、上传与双步安全轮换本地与云端密钥 | `Secrets.ps1` / `Rotate-Secrets.ps1` | Windows 连接器启动、`ShowPassword.cmd` 与运维轮换；[凭据子进程测试](../test/secret-process.test.mjs) |

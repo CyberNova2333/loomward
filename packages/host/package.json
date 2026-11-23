@@ -4,15 +4,24 @@
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
-  "description": "Cross-platform hardened host runtime, credential vault, approval ledger, and CLI launchers for LoomWard",
+  "description": "Cross-platform hardened host runtime, credential vault, ToolDispatchPipeline, gateway ingresses, and daemon launcher for LoomWard",
   "exports": {
     ".": "./src/index.mjs",
-    "./contract": "./src/contract.mjs"
+    "./contract": "./src/contract.mjs",
+    "./vault": "./src/vault.mjs",
+    "./pipeline": "./src/pipeline.mjs",
+    "./ingress-relay": "./src/ingress-relay.mjs",
+    "./ingress-local": "./src/ingress-local.mjs",
+    "./daemon": "./src/daemon.mjs"
   },
   "dependencies": {
-    "@loomward/shared": "workspace:*"
+    "@loomward/kernel": "workspace:*",
+    "@loomward/shared": "workspace:*",
+    "https-proxy-agent": "9.1.0",
+    "ws": "8.22.0"
   },
   "scripts": {
-    "check": "node --check src/index.mjs && node --check src/contract.mjs"
+    "check": "node --check src/index.mjs && node --check src/contract.mjs && node --check src/vault.mjs && node --check src/pipeline.mjs && node --check src/ingress-relay.mjs && node --check src/ingress-local.mjs && node --check src/daemon.mjs",
+    "test": "node --test test/*.test.mjs"
   }
 }

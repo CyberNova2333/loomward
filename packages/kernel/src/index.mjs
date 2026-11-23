@@ -10,4 +10,27 @@ export {
   matchPermissionNode,
   matchesCondition,
   evaluatePermissionTree,
+  compileUnitGrant,
 } from './policy-tree.mjs';
+export {
+  GUARD_UNIT_STATE,
+  resolveUnitState,
+  unwrapCordisOriginal,
+  createGuardedUnitState,
+  KernelGuard,
+} from './guard.mjs';
+export {
+  executionBoundaryRule,
+  closedSlotRule,
+  slotDeclarationRule,
+  trustedApprovalRule,
+  BUILTIN_GUARD_RULES,
+  createGuardPipeline,
+  evaluateGuard,
+} from './rules.mjs';
+export {
+  DEFAULT_ROOT_PLUGIN_SPECS,
+  buildWorkspaceRpm,
+  verifyWorkspaceRpm,
+  loadWorkspaceRootRefs,
+} from './rpm-builder.mjs';

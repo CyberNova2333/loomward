@@ -8,7 +8,14 @@ export const contract = validateContractDecl({
   kind: 'root-plugin',
   version: '3.0.0-alpha.0',
   executionBoundary: 'in-process-root',
-  provides: ['host:platform', 'host:vault', 'host:approval-ledger'],
-  consumes: ['approval:channel@1', 'policy:rule@1'],
+  provides: ['host:platform', 'host:vault', 'host:approval-ledger', 'host:dispatch'],
+  consumes: [
+    'vault:backend@1',
+    'approval:channel@1',
+    'policy:rule@1',
+    'tool:provider@1',
+    'tool:invoke@1',
+    'gateway:ingress@1',
+  ],
   archiveSource: 'archive/agentdock-worker-remote',
 });

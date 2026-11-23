@@ -10,10 +10,11 @@
     "./contracts": "./src/contracts.mjs",
     "./rpm": "./src/rpm.mjs",
     "./deadline": "./src/deadline.mjs",
-    "./slots": "./src/slots.mjs"
+    "./slots": "./src/slots.mjs",
+    "./guard-types": "./src/guard-types.mjs"
   },
   "scripts": {
-    "check": "node --check src/index.mjs && node --check src/contracts.mjs && node --check src/rpm.mjs && node --check src/deadline.mjs && node --check src/slots.mjs",
+    "check": "node --check src/index.mjs && node --check src/contracts.mjs && node --check src/rpm.mjs && node --check src/deadline.mjs && node --check src/slots.mjs && node --check src/guard-types.mjs",
     "test": "node --test test/*.test.mjs"
   }
 }

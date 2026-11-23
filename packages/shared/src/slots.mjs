@@ -51,7 +51,8 @@ export class ImplSlot {
     if (!caller || typeof caller.effect !== 'function') {
       throw new SlotError('ImplSlot.register requires a tracked Cordis caller context.');
     }
-    self.#authorizer()?.authorize(caller, { kind: 'register', slot: self.#decl.name, name });
+    const req = { kind: 'register', slot: self.#decl.name, name };
+    self.#authorizer()?.authorize(caller, req);
     if (self.#entries.has(name)) {
       throw new SlotError(`ImplSlot ${self.#decl.name} already has ${name}.`);
     }
@@ -62,6 +63,7 @@ export class ImplSlot {
         if (self.#entries.get(name) !== entry) return;
         self.#entries.delete(name);
         if (self.#userPick === name) self.#userPick = undefined;
+        self.#authorizer()?.released?.(caller, req);
       };
     }, `slot:${self.#decl.name}#${name}`);
     return () => {
@@ -100,6 +102,10 @@ export class ImplSlot {
   names() {
     return [...own(this).#entries.keys()];
   }
+
+  has(name) {
+    return own(this).#entries.has(name);
+  }
 }
 
 export class MechanismSlot {
@@ -114,8 +120,16 @@ export class MechanismSlot {
     this.#authorizer = authorizer;
   }
 
+  get decl() {
+    return own(this).#decl;
+  }
+
   get name() {
     return own(this).#decl.name;
+  }
+
+  hasReplace() {
+    return own(this).#hooks.replace.length > 0;
   }
 
   hook(phase, handler) {

@@ -208,3 +208,17 @@ Synced through 4bff65b（含二轮对抗性审查全量修复与验证）
 - 验证边界：将执行 `pnpm install` 锁定 `cordis@4.0.0-rc.11` 与 workspace 链接，验证 `pnpm run check`、`pnpm run test:ci`（既有桥接套件 + 新增 `packages/shared` 与 `packages/kernel` 单元与分层守卫测试）、`validate_repo_docs.py`、`docs-site` 构建、`repo_maintenance_guard.py status` 与 `sync_assets_licenses.py --check --dry-run`。远端仓库改名与本地目录路径重命名留待用户下一步显式执行。
 
 Synced through f74b7f56d1fd88a97df322c8cd4df95f9aaff279（本节对应其后的 LoomWard 更名与 monorepo 骨架工作树）
+
+## 2026-11-23（Phase 1）：Cordis 4 KernelGuard、冻结 RPM、统一调度流水线与 Monorepo 受保护安装器
+
+- 触发：按既定分阶段实施计划落地 Phase 1（Cordis 4 微内核运行时化、核心根插件与进程外 `mcp-hub` 接线、受保护安装器 monorepo 适配）；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 共享原语与微内核守卫（[packages/shared](../packages/shared/src/index.mjs)、[packages/kernel](../packages/kernel/src/index.mjs)）：
+  - `@loomward/shared` 新增 `guard-types.mjs`（`VAULT_SLOT`、`AUDIT_CODES`、`REJECT_CODES`、`formatActionNode`、`buildPermissionSubject`、`sanitizeAuditMetadata`），并在 `contracts.mjs` 扩展可选 `registers`/`writes` 写边声明校验，同时保持零 `node:*`/零 `cordis` 边界。
+  - `@loomward/kernel` 补齐全部 7 大标准插槽（新增 `policy: 'closed'` 的 `vault:backend@1`）、`KernelGuard`（Cordis `internal/get` 瀑布拦截、非 root 访问闭锁凭据槽阻断与审计、声明写边核验、单飞 `ask-on-use` 异步提权与卸载中断、热卸载 `AUDIT_TRUSTED_WRITE_OFF`）、无状态 `GuardRule[]` 管线（`rules.mjs`）及真实源码字节哈希的冻结 RPM 构造/核验（`rpm-builder.mjs`），并在 `control` 上暴露特权 `mountExtensionUnit`/`unmountExtensionUnit`。
+- 根插件与进程外扩展运行时化（[packages/cloud-relay](../packages/cloud-relay/src/index.mjs)、[packages/sandbox](../packages/sandbox/src/index.mjs)、[packages/host](../packages/host/src/index.mjs)、[plugins/mcp-hub](../plugins/mcp-hub/src/index.mjs)）：
+  - `@loomward/cloud-relay` 导出规范中继协议常量与桥接 URL 校验；`@loomward/sandbox` 在保持 `local/*.mjs` 与 `container/Dockerfile` 完全自包含的前提下封装 `sandbox-docker` 工具提供者；`@loomward/plugin-mcp-hub` 以 `out-of-process` 扩展身份注册 `mcp-hub` 提供者并在卸载时清理子进程与会话。
+  - `@loomward/host` 落地 `vault.mjs`、`pipeline.mjs`（`createToolDispatchPipeline`，完整保留 `policy:rule@1` 前置拒绝 → `tool:invoke@1@before` 预检阻断 → 精确参数批准先删后写 24h `RequestReceipts` → 独占 `stop_command` 并发通道与 `StopReceipts` → `tool:provider@1` 派发 → `tool:invoke@1@after`）、双 `gateway:ingress@1` 实现（`cloudflare-wss` 远程中继与 `local-mcp-direct` 本机直连入口）及 `daemon.mjs`（`startLoomWardDaemon`）。
+- 受保护安装器升级（[scripts/host-cli.mjs](../scripts/host-cli.mjs)）：`installHardened` 同步复制 `pnpm-workspace.yaml`、`packages/`、`plugins/`（跳过 `test/` 与 `node_modules/`），在发布目录写入冻结 `rpm.json` 并将 `rpmManifestHash` 及全树 SHA-256 记入 `installation.json`；继续非破坏性兼容既有 `~/.agentdock-bridge` 状态目录。
+- 验证范围与边界：本机（Linux x86_64）在最终改动后执行 `pnpm install --frozen-lockfile`、`pnpm run check`、`pnpm run layering`、`pnpm run test:ci`（覆盖既有桥接回归 + `@loomward/{shared,kernel,host}` 单元与集成测试 + `posix-host` monorepo 安装验证）、`validate_repo_docs.py`、`docs-site` 构建、`repo_maintenance_guard.py status` 与 `sync_assets_licenses.py --check --dry-run`；不涉及修改本机运行中的 `~/.agentdock-bridge` 生产副本、公网部署或 Windows/macOS 实机验证。
+
+Synced through aa016c0（含 Phase 1 工作树改动）

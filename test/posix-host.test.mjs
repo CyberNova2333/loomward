@@ -389,6 +389,20 @@ test('POSIX host-cli setup and hardened install produce 0700 wrappers and reject
   assert.equal(config.sandbox.dockerPath, await fs.realpath(fakeDocker));
   assert.equal(config.sandbox.context, 'default');
 
+  // Monorepo workspace files and frozen rpm.json must be installed and hashed in installation.json.
+  assert.equal(fsSync.existsSync(path.join(installed.runtime, 'pnpm-workspace.yaml')), true);
+  assert.equal(fsSync.existsSync(path.join(installed.runtime, 'packages', 'kernel', 'src', 'boot.mjs')), true);
+  assert.equal(fsSync.existsSync(path.join(installed.runtime, 'plugins', 'mcp-hub', 'src', 'index.mjs')), true);
+  assert.equal(fsSync.existsSync(path.join(installed.runtime, 'packages', 'kernel', 'test')), false);
+  const rpmPath = path.join(installed.runtime, 'rpm.json');
+  const rpmDoc = JSON.parse(await fs.readFile(rpmPath, 'utf8'));
+  assert.equal(rpmDoc.format, 1);
+  assert.deepEqual(rpmDoc.rootPlugins.map(p => p.id).sort(), ['cloud-relay', 'console', 'host', 'sandbox']);
+  const installationDoc = JSON.parse(await fs.readFile(path.join(stateDir, 'installation.json'), 'utf8'));
+  assert.equal(installationDoc.rpmManifestHash, rpmDoc.manifestHash);
+  assert.equal(installationDoc.sha256['rpm.json'], sha256FileSync(rpmPath));
+  assert.equal(installationDoc.sha256['pnpm-workspace.yaml'], sha256FileSync(path.join(installed.runtime, 'pnpm-workspace.yaml')));
+
   for (const name of ['start', 'stop', 'status', 'approve', 'password']) {
     const wrapper = path.join(stateDir, name);
     const stat = await fs.stat(wrapper);

@@ -10,5 +10,13 @@ export const contract = validateContractDecl({
   executionBoundary: 'out-of-process',
   provides: ['mcp:aggregator'],
   consumes: ['tool:provider@1', 'console:panel@1'],
+  registers: [
+    { slot: 'tool:provider@1', name: 'mcp-hub' },
+  ],
+  writes: {
+    hooks: [],
+    intercepts: [],
+    isolateProvides: [],
+  },
   archiveSource: 'archive/agentdock-worker-remote',
 });

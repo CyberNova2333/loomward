@@ -186,20 +186,44 @@ function inspectDockerInstallation(dockerPath, context, image) {
   return { endpoint, imageId };
 }
 
-function copyTreeFilteredSync(sourceDir, targetDir) {
+function copyTreeFilteredSync(sourceDir, targetDir, { skipDirs = new Set() } = {}) {
   fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 });
   for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
     if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+    if (entry.isDirectory() && skipDirs.has(entry.name)) continue;
     const src = path.join(sourceDir, entry.name);
     const dst = path.join(targetDir, entry.name);
     if (entry.isSymbolicLink()) throw new Error(`Refusing symbolic link in runtime source tree: ${src}`);
     if (entry.isDirectory()) {
-      copyTreeFilteredSync(src, dst);
+      copyTreeFilteredSync(src, dst, { skipDirs });
     } else if (entry.isFile()) {
       fs.copyFileSync(src, dst);
       fs.chmodSync(dst, 0o600);
     }
   }
+}
+
+async function generateWorkspaceRpmForRelease(sourceRoot, destination) {
+  const { pathToFileURL } = await import('node:url');
+  const { createFrozenRpm, sha256Tagged, validateContractDecl } = await import(
+    pathToFileURL(path.join(sourceRoot, 'packages', 'shared', 'src', 'index.mjs')).href
+  );
+  const rootIds = ['cloud-relay', 'sandbox', 'host', 'console'];
+  const rootPlugins = [];
+  for (const id of rootIds) {
+    const contractFile = path.join(sourceRoot, 'packages', id, 'src', 'contract.mjs');
+    const entryFile = path.join(destination, 'packages', id, 'src', 'index.mjs');
+    const mod = await import(pathToFileURL(contractFile).href);
+    const contract = validateContractDecl(mod.contract);
+    const entryHash = await sha256Tagged(fs.readFileSync(entryFile));
+    rootPlugins.push({
+      id: contract.id,
+      version: contract.version,
+      entryHash,
+      provides: [...contract.provides],
+    });
+  }
+  return createFrozenRpm({ target: 'runtime', rootPlugins });
 }
 
 function collectReleaseHashes(releaseDir) {
@@ -313,10 +337,24 @@ export async function installHardened({
   for (const folder of ['local', 'scripts']) {
     copyTreeFilteredSync(path.join(sourceRoot, folder), path.join(destination, folder));
   }
-  for (const file of ['package.json', 'pnpm-lock.yaml']) {
+  for (const folder of ['packages', 'plugins']) {
+    const srcFolder = path.join(sourceRoot, folder);
+    if (fs.existsSync(srcFolder)) {
+      copyTreeFilteredSync(srcFolder, path.join(destination, folder), { skipDirs: new Set(['test']) });
+    }
+  }
+  for (const file of ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml']) {
+    const src = path.join(sourceRoot, file);
+    if (!fs.existsSync(src)) continue;
     const dst = path.join(destination, file);
-    fs.copyFileSync(path.join(sourceRoot, file), dst);
+    fs.copyFileSync(src, dst);
     fs.chmodSync(dst, 0o600);
+  }
+  let rpmManifestHash = null;
+  if (fs.existsSync(path.join(destination, 'packages', 'shared', 'src', 'index.mjs'))) {
+    const frozenRpm = await generateWorkspaceRpmForRelease(sourceRoot, destination);
+    writePrivateJsonSync(path.join(destination, 'rpm.json'), frozenRpm);
+    rpmManifestHash = frozenRpm.manifestHash;
   }
 
   if (!skipDependencyInstall) {
@@ -393,6 +431,7 @@ export async function installHardened({
     runtime: destination,
     workspace: workspacePath,
     image: imageId,
+    ...(rpmManifestHash ? { rpmManifestHash } : {}),
     sha256: collectReleaseHashes(destination),
   };
   writePrivateJsonSync(path.join(statePath, 'installation.json'), manifest);

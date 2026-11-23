@@ -92,6 +92,48 @@ export function validateContractDecl(decl) {
     seenSlots.add(slot.name);
   }
 
+  const registers = decl.registers ?? [];
+  if (!Array.isArray(registers)) throw new Error(`${decl.id}.registers must be an array.`);
+  const seenRegisters = new Set();
+  for (const reg of registers) {
+    if (!reg || typeof reg !== 'object' || Array.isArray(reg)) {
+      throw new Error(`Invalid register entry in ${decl.id}.`);
+    }
+    if (typeof reg.slot !== 'string' || !SERVICE_OR_SLOT_RE.test(reg.slot)) {
+      throw new Error(`Invalid register slot in ${decl.id}: ${String(reg.slot)}`);
+    }
+    if (typeof reg.name !== 'string' || !ID_RE.test(reg.name)) {
+      throw new Error(`Invalid register name in ${decl.id}: ${String(reg.name)}`);
+    }
+    const key = `${reg.slot}#${reg.name}`;
+    if (seenRegisters.has(key)) throw new Error(`Duplicate register in ${decl.id}: ${key}`);
+    seenRegisters.add(key);
+  }
+
+  const rawWrites = decl.writes ?? {};
+  if (!rawWrites || typeof rawWrites !== 'object' || Array.isArray(rawWrites)) {
+    throw new Error(`${decl.id}.writes must be an object.`);
+  }
+  const rawHooks = rawWrites.hooks ?? [];
+  if (!Array.isArray(rawHooks)) throw new Error(`${decl.id}.writes.hooks must be an array.`);
+  const seenHooks = new Set();
+  for (const hook of rawHooks) {
+    if (!hook || typeof hook !== 'object' || Array.isArray(hook)) {
+      throw new Error(`Invalid hook write entry in ${decl.id}.`);
+    }
+    if (typeof hook.slot !== 'string' || !SERVICE_OR_SLOT_RE.test(hook.slot)) {
+      throw new Error(`Invalid hook write slot in ${decl.id}: ${String(hook.slot)}`);
+    }
+    if (!['before', 'after', 'replace'].includes(hook.phase)) {
+      throw new Error(`Invalid hook write phase in ${decl.id}: ${String(hook.phase)}`);
+    }
+    const key = `${hook.slot}@${hook.phase}`;
+    if (seenHooks.has(key)) throw new Error(`Duplicate hook write in ${decl.id}: ${key}`);
+    seenHooks.add(key);
+  }
+  assertStringArray(rawWrites.intercepts ?? [], `${decl.id}.writes.intercepts`, SERVICE_OR_SLOT_RE);
+  assertStringArray(rawWrites.isolateProvides ?? [], `${decl.id}.writes.isolateProvides`, SERVICE_OR_SLOT_RE);
+
   return Object.freeze({
     schemaVersion: decl.schemaVersion,
     id: decl.id,
@@ -102,6 +144,12 @@ export function validateContractDecl(decl) {
     consumes: Object.freeze([...(decl.consumes ?? [])]),
     implSlots: Object.freeze(implSlots.map(s => Object.freeze({ ...s }))),
     mechanismSlots: Object.freeze(mechanismSlots.map(s => Object.freeze({ ...s }))),
+    registers: Object.freeze(registers.map(r => Object.freeze({ slot: r.slot, name: r.name }))),
+    writes: Object.freeze({
+      hooks: Object.freeze(rawHooks.map(h => Object.freeze({ slot: h.slot, phase: h.phase }))),
+      intercepts: Object.freeze([...(rawWrites.intercepts ?? [])]),
+      isolateProvides: Object.freeze([...(rawWrites.isolateProvides ?? [])]),
+    }),
     ...(typeof decl.archiveSource === 'string' ? { archiveSource: decl.archiveSource } : {}),
   });
 }
