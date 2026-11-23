@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -193,4 +194,24 @@ test('decisions plugin runs out-of-process Python SQLite ledger, enforces local 
   assert.equal(panel.table.rows[0][2], 'decided');
   assert.equal(panel.links.length, 1);
   assert.match(panel.links[0].href, /^http:\/\/127\.0\.0\.1:\d+$/);
+
+  // 6. R4-H1: any other local process POSTing directly to the managed loopback ledger without the
+  // per-process service token is rejected (writes cannot bypass LoomWard's exact local approval).
+  const directStatus = await new Promise((resolve, reject) => {
+    const target = new URL('/api/topic/create', panel.links[0].href);
+    const payload = JSON.stringify({ id: 'rogue-topic', title: 'Bypass approval' });
+    const req = http.request({
+      hostname: target.hostname,
+      port: target.port,
+      path: target.pathname,
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) },
+    }, res => {
+      res.resume();
+      res.on('end', () => resolve(res.statusCode));
+    });
+    req.on('error', reject);
+    req.end(payload);
+  });
+  assert.equal(directStatus, 401);
 });

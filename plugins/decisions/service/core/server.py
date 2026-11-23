@@ -16,9 +16,12 @@ import webbrowser
 import urllib.parse
 import ipaddress
 import re
+import signal
 import socket
 import hashlib
+import hmac
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -43,6 +46,8 @@ from core.locking import ledger_lock
 
 MAX_BODY_SIZE = 10 * 1024 * 1024  # 10MB 最大请求体限制防 DoS
 REQUEST_TIMEOUT = 10
+# LoomWard 托管模式：写接口要求单进程随机能力令牌；读取后立即从环境移除，不传给 git 等子进程。
+SERVICE_TOKEN = os.environ.pop("LOOMWARD_DECISIONS_SERVICE_TOKEN", "") or ""
 
 
 def is_loopback_host(host: str) -> bool:
@@ -470,6 +475,11 @@ def make_handler(server: DashboardServer):
             if self.headers.get("Sec-Fetch-Site") == "cross-site":
                 self._send_json(403, {"error": "forbidden_origin", "message": "拒绝跨站写入"})
                 return
+            if SERVICE_TOKEN:
+                provided = self.headers.get("X-LoomWard-Service-Token", "") or ""
+                if not hmac.compare_digest(provided.encode("utf-8"), SERVICE_TOKEN.encode("utf-8")):
+                    self._send_json(401, {"error": "service_token_required", "message": "托管模式下写入须经 LoomWard 审批工具链"})
+                    return
             if self.headers.get_content_type() != "application/json":
                 self._send_json(415, {"error": "unsupported_media_type", "message": "写请求必须使用 application/json"})
                 return
@@ -813,12 +823,19 @@ def main():
         sys.exit(0)
 
     host = args.host or config.host
-    port = args.port or config.port
+    port = config.port if args.port is None else args.port
 
     server = DashboardServer(config, host=host, port=port)
     handler_class = make_handler(server)
 
     httpd = DashboardHTTPServer((host, port), handler_class)
+    if hasattr(signal, "SIGTERM"):
+        def _handle_sigterm(_signum, _frame):
+            threading.Thread(target=httpd.shutdown, daemon=True).start()
+        try:
+            signal.signal(signal.SIGTERM, _handle_sigterm)
+        except (ValueError, OSError):
+            pass
     url_host = f"[{host}]" if ":" in host else host
     url = f"http://{url_host}:{httpd.server_port}/dashboard.html"
     print("=" * 64)

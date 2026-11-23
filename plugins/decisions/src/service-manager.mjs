@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // This file is part of LoomWard (织盾) and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
 // Out-of-process manager and strict loopback HTTP client for the Python+SQLite decision ledger service.
+import crypto from 'node:crypto';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
@@ -66,7 +67,7 @@ function normalizeTimeoutMs(raw, fallback = 10000) {
   return Number.isFinite(n) ? Math.max(500, Math.trunc(n)) : fallback;
 }
 
-function httpJsonRequest(baseUrl, pathname, { method = 'GET', body, timeoutMs = 10000, signal } = {}) {
+function httpJsonRequest(baseUrl, pathname, { method = 'GET', body, timeoutMs = 10000, signal, token = null } = {}) {
   const origin = assertLoopbackUrl(baseUrl);
   if (typeof pathname !== 'string' || !pathname.startsWith('/') || pathname.startsWith('//')) {
     throw new Error('Invalid decisions loopback request path.');
@@ -79,6 +80,7 @@ function httpJsonRequest(baseUrl, pathname, { method = 'GET', body, timeoutMs = 
   const payloadBuf = body !== undefined ? Buffer.from(JSON.stringify(body), 'utf8') : null;
   const headers = {
     Accept: 'application/json',
+    ...(typeof token === 'string' && token ? { 'X-LoomWard-Service-Token': token } : {}),
     ...(payloadBuf !== null
       ? { 'Content-Type': 'application/json', 'Content-Length': String(payloadBuf.length) }
       : {}),
@@ -177,6 +179,7 @@ export function createDecisionsServiceClient({
   port = 0,
   spawnService = false,
   timeoutMs = 10000,
+  serviceToken = null,
 } = {}) {
   const safeHost = assertLoopbackHost(host);
   const boundedTimeoutMs = normalizeTimeoutMs(timeoutMs, 10000);
@@ -184,6 +187,8 @@ export function createDecisionsServiceClient({
   let child = null;
   let starting = null;
   let closed = false;
+  // Per-process write capability: managed ledger writes must go through LoomWard's approval pipeline.
+  let activeToken = typeof serviceToken === 'string' && serviceToken ? serviceToken : null;
 
   async function ensureRunning({ signal } = {}) {
     if (closed) throw new Error('Decisions ledger plugin is closed.');
@@ -202,6 +207,7 @@ export function createDecisionsServiceClient({
         const targetPort = port > 0 ? port : await findFreeLoopbackPort(safeHost);
         if (closed) throw new Error('Decisions ledger plugin is closed.');
         const url = assertLoopbackUrl(`http://${formatLoopbackHostForUrl(safeHost)}:${targetPort}`);
+        const spawnToken = crypto.randomBytes(32).toString('base64url');
         const proc = spawn(
           pythonPath,
           ['-B', '-m', 'core.server', '--config', path.resolve(configPath), '--host', safeHost, '--port', String(targetPort), '--no-browser'],
@@ -209,11 +215,12 @@ export function createDecisionsServiceClient({
             cwd: SERVICE_ROOT,
             shell: false,
             windowsHide: true,
-            env: sanitizedServiceEnv(),
+            env: { ...sanitizedServiceEnv(), LOOMWARD_DECISIONS_SERVICE_TOKEN: spawnToken },
             stdio: ['ignore', 'pipe', 'pipe'],
           },
         );
         child = proc;
+        activeToken = spawnToken;
         let exited = false;
         let spawnErr = null;
         proc.on('error', err => {
@@ -268,18 +275,18 @@ export function createDecisionsServiceClient({
 
   async function requestJson(pathname, opts = {}) {
     const url = await ensureRunning({ signal: opts.signal });
-    return httpJsonRequest(url, pathname, { timeoutMs: boundedTimeoutMs, ...opts });
+    return httpJsonRequest(url, pathname, { timeoutMs: boundedTimeoutMs, ...opts, token: activeToken });
   }
 
   async function getStatus(opts = {}) {
     const res = await requestJson('/api/status', opts);
-    if (res.status !== 200) throw new Error(res.data?.message || `Decisions status HTTP ${res.status}`);
+    if (res.status !== 200) throw new Error(`Decisions status HTTP ${res.status}`);
     return res.data;
   }
 
   async function listTopics(opts = {}) {
     const res = await requestJson('/api/topics', opts);
-    if (res.status !== 200) throw new Error(res.data?.message || `Decisions topics HTTP ${res.status}`);
+    if (res.status !== 200) throw new Error(`Decisions topics HTTP ${res.status}`);
     return res.data;
   }
 
@@ -295,13 +302,13 @@ export function createDecisionsServiceClient({
     if (pathKeyword) params.set('path', String(pathKeyword));
     const qs = params.toString();
     const res = await requestJson(`/api/agent/context${qs ? `?${qs}` : ''}`, opts);
-    if (res.status !== 200) throw new Error(res.data?.message || `Decisions context HTTP ${res.status}`);
+    if (res.status !== 200) throw new Error(`Decisions context HTTP ${res.status}`);
     return res.data;
   }
 
   async function checkConsistency(opts = {}) {
     const res = await requestJson('/api/recovery/check', opts);
-    if (res.status !== 200) throw new Error(res.data?.message || `Decisions consistency HTTP ${res.status}`);
+    if (res.status !== 200) throw new Error(`Decisions consistency HTTP ${res.status}`);
     return res.data;
   }
 
@@ -346,6 +353,7 @@ export function createDecisionsServiceClient({
     const proc = child;
     child = null;
     activeBaseUrl = null;
+    if (spawnService) activeToken = null;
     await terminateChildProcess(proc);
   }
 

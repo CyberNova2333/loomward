@@ -54,6 +54,8 @@ export const DECISIONS_TOOLS = Object.freeze([
 ]);
 
 const TOOL_MAP = new Map(DECISIONS_TOOLS.map(tool => [tool.name, tool]));
+const SAFE_CLIENT_ERROR_RE =
+  /^(?:Invalid topic_id|Invalid payload\.id|Valid topic_id|Unsupported decisions record action|Decisions record payload|Decisions (?:status|topics|context|consistency) HTTP \d{3}$|Decisions service request (?:cancelled|timed out))/;
 
 export function createDecisionsAdapterDescriptor() {
   return Object.freeze({
@@ -118,16 +120,22 @@ export function createDecisionsToolProvider({ client } = {}) {
             payload: args.payload,
           }, { signal });
           const isError = res.status < 200 || res.status >= 300;
+          // Server-side 5xx messages may embed host paths or stack details; never relay them to remote callers.
+          const safeData = res.status >= 500
+            ? { error: typeof res.data?.error === 'string' ? res.data.error.slice(0, 64) : 'server_error' }
+            : (res.data && typeof res.data === 'object' ? res.data : {});
           return {
-            content: [{ type: 'text', text: JSON.stringify(res.data ?? { status: res.status }) }],
-            structuredContent: { httpStatus: res.status, ...(res.data && typeof res.data === 'object' ? res.data : {}) },
+            content: [{ type: 'text', text: JSON.stringify(Object.keys(safeData).length ? safeData : { status: res.status }) }],
+            structuredContent: { httpStatus: res.status, ...safeData },
             ...(isError ? { isError: true } : {}),
           };
         }
         return { content: [{ type: 'text', text: `Unknown tool: ${toolName}` }], isError: true };
       } catch (err) {
         if (signal?.aborted) throw err;
-        return { content: [{ type: 'text', text: err?.message || 'Decisions ledger invocation failed.' }], isError: true };
+        const raw = typeof err?.message === 'string' ? err.message : '';
+        const safe = SAFE_CLIENT_ERROR_RE.test(raw) ? raw : 'Decisions ledger invocation failed.';
+        return { content: [{ type: 'text', text: safe }], isError: true };
       }
     },
     health() {
@@ -146,6 +154,7 @@ export async function apply(ctx, config = {}) {
     port: config.port,
     spawnService: config.spawnService === true,
     timeoutMs: config.timeoutMs,
+    serviceToken: config.serviceToken,
   });
 
   if (config.eagerStart === true) {
@@ -202,7 +211,8 @@ export async function apply(ctx, config = {}) {
                 `v${item.version ?? 1}`,
               ]),
             },
-            links: [{ label: '打开独立决策台账', href: url }],
+            notices: [{ tone: 'info', text: '托管模式下台账写入须经 LoomWard 本机审批工具链；独立看板页面仅供只读浏览。' }],
+            links: [{ label: '打开独立决策台账（只读）', href: url }],
           };
         } catch {
           return {

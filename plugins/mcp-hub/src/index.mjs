@@ -101,6 +101,10 @@ export function createMcpHubToolProvider({
       if (!effectiveHub || closed) {
         return { content: [{ type: 'text', text: 'External MCP support is unavailable.' }], isError: true };
       }
+      const parsed = parseExternalToolName(toolName);
+      if (!parsed || RESERVED_FIRST_PARTY_SERVERS.has(parsed.serverId)) {
+        return { content: [{ type: 'text', text: 'Tool belongs to a reserved platform plugin namespace.' }], isError: true };
+      }
       return effectiveHub.callTool(toolName, args, options);
     },
     health() {

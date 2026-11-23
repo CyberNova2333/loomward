@@ -316,3 +316,14 @@ Synced through d88bd6e（含二轮对抗性代码审查与深层逃逸封堵工�
 - 验证范围与边界：本机（Linux x86_64）运行 `pnpm run check`、`pnpm run layering`、工作区与插件测试、`validate_repo_docs.py` 与 `repo_maintenance_guard.py pre-commit`。
 
 Synced through bd32c2e（含三轮收官代码审查修复工作树改动）
+
+## 2026-11-23（四轮终审代码审查）：托管决策台账单进程写能力令牌、错误脱敏与 `SIGTERM` 事务排空
+
+- 触发：用户要求「再最后进行一次代码审查」；深入排查 `plugins/decisions/service/core/*.py` 托管子进程边界与 `plugins/mcp-hub` 直接调用防线，发现并修复 `4 High` 问题；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 托管决策台账审批绕过封堵（`R4-H1`、[plugins/decisions/src/service-manager.mjs](../plugins/decisions/src/service-manager.mjs)、[plugins/decisions/service/core/server.py](../plugins/decisions/service/core/server.py)）：
+  - 在 `spawnService: true` 托管模式下，由宿主机为每次拉起的 Python 台账子进程生成 256-bit 随机能力令牌 `LOOMWARD_DECISIONS_SERVICE_TOKEN`；`server.py` 启动导入时立即 `os.environ.pop(...)`（杜绝子 `git` 进程继承）并在全部 `POST` 写路由上以 `hmac.compare_digest` 强制校核 `X-LoomWard-Service-Token`，防止本机其他进程直接向回环端口发起 `POST` 绕过 LoomWard 人工审批流水线；在 [decisions.test.mjs](../plugins/decisions/test/decisions.test.mjs) 新增直连 `POST /api/topic/create` 返回 `401` 回归断言。
+- 5xx 宿主路径脱敏、`mcp-hub` 纵深命名空间防护与 `SIGTERM` 优雅停机（`R4-H2`、`R4-H3`、`R4-H4`、[plugins/decisions/src/index.mjs](../plugins/decisions/src/index.mjs)、[plugins/mcp-hub/src/index.mjs](../plugins/mcp-hub/src/index.mjs)）：
+  - 截断并脱敏决策台账服务端 `5xx` 异常与未白名单客户端错误消息，防止宿主绝对路径或 SQLite 细节回传至远端调用方；在 `mcp-hub` 的 `callTool()` 中补充 `RESERVED_FIRST_PARTY_SERVERS` 纵深拦截；为 `server.py` 注册 `SIGTERM` 优雅停机处理（触发 `httpd.shutdown()` 与 `httpd.server_close()` 排空在途写事务）并修复 `--port 0` 命令行解析。
+- 验证范围与边界：本机（Linux x86_64）运行 `pnpm run check`、`pnpm run layering`、`pnpm run test:ci`（176 项测试：160 通过、0 失败、16 按平台/Docker 跳过）、`validate_repo_docs.py`、`pnpm --dir docs-site run docs:build`、`repo_maintenance_guard.py pre-commit` 与 `sync_assets_licenses.py --check --dry-run`。
+
+Synced through 85b97da（含四轮终审代码审查修复工作树改动）
