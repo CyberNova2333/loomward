@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TransientReceipts, StopReceipts } from '../local/receipts.mjs';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { TransientReceipts, StopReceipts, RequestReceipts } from '../local/receipts.mjs';
+import { digest } from '../local/request-policy.mjs';
 
 const frame = (clientId, id, method = 'ping') => ({ id, authorization: { clientId }, body: { jsonrpc: '2.0', id, method } });
 
@@ -36,4 +40,25 @@ test('stop receipts retain recent duplicate conflicts without a capacity rejecti
   // is still checked against the current job owner by the runtime.
   assert.equal(cache.claim(original).acquired, true);
   assert.equal(cache.records.size, 2);
+});
+
+test('RequestReceipts evicts expired entries before enforcing maximum capacity and rejects oversized receipt files', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentdock-receipts-test-'));
+  t.after(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  let now = 1_700_000_000_000;
+  const receipts = new RequestReceipts(dir, { now: () => now, maximum: 2 });
+  const req1 = { id: 'req-1', authorization: { clientId: 'c1' }, body: { jsonrpc: '2.0', id: '1', method: 'tools/call', params: { name: 'read_file' } } };
+  const req2 = { id: 'req-2', authorization: { clientId: 'c1' }, body: { jsonrpc: '2.0', id: '2', method: 'tools/call', params: { name: 'read_file' } } };
+  const req3 = { id: 'req-3', authorization: { clientId: 'c1' }, body: { jsonrpc: '2.0', id: '3', method: 'tools/call', params: { name: 'read_file' } } };
+  assert.equal((await receipts.claim(req1)).acquired, true);
+  assert.equal((await receipts.claim(req2)).acquired, true);
+  now += 24 * 60 * 60 * 1000 + 1000;
+  // Must evict expired receipts even before next hourly cleanup window elapses.
+  assert.equal((await receipts.claim(req3)).acquired, true);
+
+  const oversizedReq = { id: 'req-big', authorization: { clientId: 'c1' }, body: { jsonrpc: '2.0', id: '4', method: 'tools/call', params: { name: 'read_file' } } };
+  await fs.writeFile(path.join(receipts.directory, `${digest(oversizedReq.id)}.json`), 'x'.repeat(600));
+  assert.deepEqual(await receipts.claim(oversizedReq), { acquired: false, reason: 'duplicate_or_incomplete' });
 });

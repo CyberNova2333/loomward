@@ -7,10 +7,11 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
+import { resolveTestSandbox } from './docker-fixture.mjs';
+import { hostContainerIds } from '../local/sandbox.mjs';
 const exec = promisify(execFile);
-const docker = process.platform === 'win32' ? 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe' : '/usr/bin/docker';
-
 test('Docker workspace provides tools while isolating host credentials, runtime, processes and network', { timeout: 300000, skip: process.env.AGENTDOCK_DOCKER_TEST !== '1' }, async t => {
+  const sandbox = await resolveTestSandbox();
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'agentdock-sandbox-test-'));
   const workspace = path.join(base, 'workspace'), state = path.join(base, 'state'), runtime = path.join(base, 'runtime');
   for (const dir of [workspace, state, runtime]) await fs.mkdir(dir);
@@ -18,9 +19,8 @@ test('Docker workspace provides tools while isolating host credentials, runtime,
   const fileModules = await fs.readdir(new URL('../local/', import.meta.url));
   for (const file of fileModules) if (file.endsWith('.mjs') && !['sandbox.mjs', 'tools.mjs'].includes(file)) await fs.copyFile(new URL(`../local/${file}`, import.meta.url), path.join(runtime, file));
   const { createSandboxRuntime } = await import(pathToFileURL(path.join(runtime, 'sandbox.mjs')).href);
-  const image = (await exec(docker, ['image', 'inspect', process.env.AGENTDOCK_TEST_IMAGE || 'agentdock-dev:2026-10-28', '--format', '{{.Id}}'])).stdout.trim();
   await fs.writeFile(path.join(base, 'host-private-canary.txt'), 'host-private-canary');
-  const gateway = await createSandboxRuntime({ roots: [workspace], stateDir: state, allowExec: true, sandbox: { enabled: true, image, dockerPath: docker, context: 'desktop-linux', allowOutbound: true } });
+  const gateway = await createSandboxRuntime({ roots: [workspace], stateDir: state, allowExec: true, sandbox: { ...sandbox, enabled: true, allowOutbound: true } });
   t.after(async () => { await gateway.close(); if (base.startsWith(path.join(os.tmpdir(), 'agentdock-sandbox-test-'))) await fs.rm(base, { recursive: true, force: true }); });
   let id = 0;
   const call = async (name, args = {}, options = {}) => {
@@ -33,8 +33,9 @@ test('Docker workspace provides tools while isolating host credentials, runtime,
   const command = await call('exec_command', { cmd: `set -eu; for tool in git python3 go rustc javac gcc cmake gh wrangler pnpm tsc; do command -v "$tool" >/dev/null; done; node -e ${quote(factsProgram)}`, timeout_ms: 20000 });
   assert.equal(command.exit_code, 0, command.stderr);
   const facts = JSON.parse(command.stdout);
-  assert.equal(facts.uid, 1000); assert.equal(facts.gid, 1000);
-  assert.ok(facts.groups.every(group => group === 1000));
+  const expectedIds = hostContainerIds();
+  assert.equal(facts.uid, expectedIds.uid); assert.equal(facts.gid, expectedIds.gid);
+  assert.ok(facts.groups.every(group => group === expectedIds.gid));
   assert.match(facts.capabilities, /^0+$/); assert.equal(facts.noNewPrivileges, '1');
   for (const field of ['controlPipe', 'imageWritable', 'dockerSocket', 'hostPath', 'privateCanary', 'secrets']) assert.equal(facts[field], false, field);
   assert.deepEqual(facts.interfaces, ['lo']);
@@ -91,6 +92,6 @@ test('Docker workspace provides tools while isolating host credentials, runtime,
   assert.equal(await fs.access(path.join(workspace, 'cancelled-before-start.txt')).then(() => true, () => false), false);
   await gateway.close();
   const label = createHash('sha256').update(state.toLowerCase()).digest('hex').slice(0, 24);
-  const remaining = await exec(docker, ['ps', '-aq', '--filter', `label=cbnv.agentdock.install=${label}`]);
+  const remaining = await exec(sandbox.dockerPath, ['--context', sandbox.context, 'ps', '-aq', '--filter', `label=cbnv.agentdock.install=${label}`]);
   assert.equal(remaining.stdout.trim(), '');
 });

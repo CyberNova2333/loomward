@@ -6,7 +6,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import { once, EventEmitter } from 'node:events';
-import { BridgeConnector } from '../local/connector.mjs';
+import { BridgeConnector, proxyCandidates } from '../local/connector.mjs';
 import { RequestReceipts, TransientReceipts } from '../local/receipts.mjs';
 import { LocalApprovals } from '../local/approvals.mjs';
 import { approveRequest, safeText } from '../local/approval-cli.mjs';
@@ -389,4 +389,53 @@ test('stop during asynchronous startup cannot reopen a connector after shutdown'
   await connector.stop();
   release(); await starting;
   assert.equal(opened, 0); assert.equal(connector.running, false);
+});
+
+test('retries reset only after pong and proxyCandidates honors NO_PROXY', async t => {
+  const stateDir = await state(t);
+  let lastSocket;
+  class HandshakeFailSocket extends EventEmitter {
+    readyState = WebSocket.CONNECTING;
+    send() {}
+    terminate() { this.readyState = WebSocket.CLOSED; this.emit('close', 1006); }
+    close() { this.terminate(); }
+  }
+  const connector = new BridgeConnector({
+    origin: 'http://127.0.0.1',
+    bridgeToken: 'fake',
+    stateDir,
+    proxyProvider: () => [null],
+    socketFactory: () => {
+      lastSocket = new HandshakeFailSocket();
+      return lastSocket;
+    },
+    runtime: { close: async () => {}, handleRpc() {} },
+  });
+  await connector.start();
+  lastSocket.readyState = WebSocket.OPEN;
+  lastSocket.emit('open');
+  lastSocket.emit('close', 1008);
+  assert.equal(connector.retries, 1, 'Retries must not reset before pong confirms session');
+  clearTimeout(connector.timer);
+  connector.connect();
+  lastSocket.readyState = WebSocket.OPEN;
+  lastSocket.emit('open');
+  lastSocket.emit('message', Buffer.from('{"type":"pong"}'), false);
+  assert.equal(connector.retries, 0);
+  await connector.stop();
+
+  const savedHttps = process.env.HTTPS_PROXY;
+  const savedNoProxy = process.env.NO_PROXY;
+  try {
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:8888';
+    process.env.NO_PROXY = 'localhost,[::1]:8797,bridge.example.test';
+    assert.deepEqual(proxyCandidates('https://bridge.example.test'), [null]);
+    assert.deepEqual(proxyCandidates('https://[::1]:8797'), [null]);
+    assert.ok(proxyCandidates('https://other.example.test').includes('http://127.0.0.1:8888'));
+  } finally {
+    if (savedHttps === undefined) delete process.env.HTTPS_PROXY;
+    else process.env.HTTPS_PROXY = savedHttps;
+    if (savedNoProxy === undefined) delete process.env.NO_PROXY;
+    else process.env.NO_PROXY = savedNoProxy;
+  }
 });

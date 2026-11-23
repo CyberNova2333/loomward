@@ -44,7 +44,7 @@ function bounded(value, fallback, min, max, label) {
   if (!Number.isSafeInteger(n) || n < min || n > max) fail(`Invalid ${label}; expected integer ${min}..${max}.`);
   return n;
 }
-const canonicalCase = (p) => process.platform === 'win32' ? p.toLowerCase() : p;
+const canonicalCase = (p) => process.platform === 'darwin' ? p.normalize('NFC').toLowerCase() : process.platform === 'win32' ? p.toLowerCase() : p;
 function ordinaryWindowsPath(value) {
   if (process.platform !== 'win32') return;
   if (/^[\\/]{2}/.test(value)) fail('UNC and Windows device paths are not exposed.');
@@ -103,14 +103,19 @@ export async function createToolRuntime(config) {
     catch { fail('File content is not valid UTF-8. Convert its encoding before using text tools.'); }
     return result;
   }
-  async function audit(name, success) {
-    if (!config.auditFile) return;
-    try {
-      const file = config.auditFile;
-      const info = await fs.stat(file).catch(() => null);
-      if (info?.size > 2 * 1024 * 1024) { await fs.unlink(`${file}.1`).catch(() => {}); await fs.rename(file, `${file}.1`).catch(() => {}); }
-      await fs.appendFile(file, JSON.stringify({ time: new Date().toISOString(), tool: name, success }) + '\n', { mode: 0o600 });
-    } catch { /* An audit write failure must not leak payloads into another logger. */ }
+  let auditQueue = Promise.resolve();
+  function audit(name, success) {
+    if (!config.auditFile) return Promise.resolve();
+    const action = auditQueue.then(async () => {
+      try {
+        const file = config.auditFile;
+        const info = await fs.stat(file).catch(() => null);
+        if (info?.size > 2 * 1024 * 1024) { await fs.unlink(`${file}.1`).catch(() => {}); await fs.rename(file, `${file}.1`).catch(() => {}); }
+        await fs.appendFile(file, JSON.stringify({ time: new Date().toISOString(), tool: name, success }) + '\n', { mode: 0o600 });
+      } catch { /* An audit write failure must not leak payloads into another logger. */ }
+    });
+    auditQueue = action.catch(() => {});
+    return action;
   }
 
   const handlers = {
@@ -250,10 +255,18 @@ export async function createToolRuntime(config) {
             try { await resolvePath(file); } catch { checkpoint(); continue; }
             if (normalize(entry.name).includes(needle)) matches.push({ path: file });
           } else {
+            const budgetRemaining = 16 * MAX_FILE - bytes;
+            if (budgetRemaining <= 0) { exhausted = 'bytes'; truncated = true; break outer; }
             let content;
             try {
               const verified = await resolvePath(file);
-              const loaded = await loadSmallFile(verified, Math.min(MAX_FILE, 16 * MAX_FILE - bytes), count => { bytes += count; });
+              const stat = await fs.lstat(verified);
+              if (stat.isFile() && stat.size <= MAX_FILE && stat.size > budgetRemaining) {
+                exhausted = 'bytes';
+                truncated = true;
+                break outer;
+              }
+              const loaded = await loadSmallFile(verified, Math.min(MAX_FILE, budgetRemaining), count => { bytes += count; });
               content = loaded.content.toString('utf8');
             } catch { checkpoint(); continue; }
             let lineNumber = 0;

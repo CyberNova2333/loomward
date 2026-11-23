@@ -8,6 +8,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { promisify } from 'node:util';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
+import { writeCapabilitiesSync } from '../local/capabilities.mjs';
 
 function fakeDocker(executable) {
   const containers = new Map(), calls = [];
@@ -57,6 +58,10 @@ function fakeDocker(executable) {
       const request = JSON.parse(chunk.toString());
       if (request.kind) {
         container.request = request;
+        if (request.kind === 'file') {
+          child.stdout.write(JSON.stringify({ result: { structuredContent: { content: 'synthetic-read-payload', bytes_read: 22 } } }));
+          queueMicrotask(() => child.finish(0));
+        }
         if (request.cmd === 'synthetic cleanup failure') queueMicrotask(() => child.finish(0));
       }
       done();
@@ -144,4 +149,28 @@ test('cleanup failure preserves owned job controls while rejecting new work and 
   assert.equal(docker.calls.filter(args => args[0] === 'rm' && args[2] === backgroundContainer.name).length, 1);
   const failedContainer = [...docker.containers.values()].find(container => container.request?.cmd === 'synthetic cleanup failure');
   assert.equal(docker.calls.filter(args => args[0] === 'rm' && args[2] === failedContainer.name).length, 1);
+
+  const auditText = await fs.readFile(path.join(stateDir, 'audit.jsonl'), 'utf8').catch(() => null);
+  assert.equal(auditText, null, 'audit.jsonl is only created when auditFile is passed');
+
+  // Verify auditFile writes sanitized records and sanitizes internal errors.
+  const auditFile = path.join(base, 'audit.jsonl');
+  const audited = await createSandboxRuntime({ roots: [workspace], stateDir, auditFile, allowExec: true, sandbox: {
+    enabled: true, image: `sha256:${'a'.repeat(64)}`, context: 'desktop-linux', dockerPath,
+  } });
+  const ctxReply = await audited.handleRpc({ jsonrpc: '2.0', id: 99, method: 'tools/call', params: { name: 'computer_context', arguments: {} } });
+  assert.notEqual(ctxReply.result.isError, true);
+  writeCapabilitiesSync(stateDir, { fileWrite: false }, { requirePrivateState: false, workspaceRoots: [workspace] });
+  const read = await audited.handleRpc({
+    jsonrpc: '2.0', id: 100, method: 'tools/call', params: { name: 'read_file', arguments: { path: '/workspace/synthetic.txt' } },
+  });
+  assert.equal(read.result.structuredContent.content, 'synthetic-read-payload');
+  const createArgs = docker.calls.filter(args => args[0] === 'create').at(-1);
+  assert.ok(createArgs.includes(`type=bind,src=${await fs.realpath(workspace)},dst=/workspace,readonly`));
+  await audited.close();
+  const auditLines = (await fs.readFile(auditFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(auditLines[0].tool, 'computer_context');
+  assert.equal(auditLines[0].success, true);
+  assert.equal(auditLines[1].bytesRead, 22);
+  assert.doesNotMatch(JSON.stringify(auditLines), /synthetic-read-payload|synthetic\.txt/);
 });

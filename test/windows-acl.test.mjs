@@ -6,6 +6,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createWindowsReplacementGuard } from '../local/windows-acl.mjs';
+import { resolveTestSandbox } from './docker-fixture.mjs';
 import { createSandboxRuntime } from '../local/sandbox.mjs';
 
 const exec = promisify(execFile);
@@ -49,9 +50,8 @@ test('Windows replacement preflight rejects custom ACLs and aliases without chan
 test('Docker file editing preserves custom NTFS ACLs by refusing replacement, while inherited files stay editable', { skip: process.platform !== 'win32' || process.env.AGENTDOCK_DOCKER_TEST !== '1', timeout: 240000 }, async t => {
   const { base, workspace, ordinary, protectedFile } = await fixture(t);
   const state = path.join(base, 'state'); await fs.mkdir(state);
-  const dockerPath = 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe';
-  const image = (await exec(dockerPath, ['image', 'inspect', process.env.AGENTDOCK_TEST_IMAGE || 'agentdock-dev:2026-10-28', '--format', '{{.Id}}'], { timeout: 15000 })).stdout.trim();
-  const runtime = await createSandboxRuntime({ roots: [workspace], stateDir: state, allowExec: true, sandbox: { enabled: true, image, dockerPath, context: 'desktop-linux', allowOutbound: false } });
+  const sandbox = await resolveTestSandbox();
+  const runtime = await createSandboxRuntime({ roots: [workspace], stateDir: state, allowExec: true, sandbox: { ...sandbox, enabled: true, allowOutbound: false } });
   try {
     let id = 0;
     const call = (name, args) => runtime.handleRpc({ jsonrpc: '2.0', id: ++id, method: 'tools/call', params: { name, arguments: args } });

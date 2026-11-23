@@ -7,6 +7,10 @@ const toolScopes = new Map([
   ...['write_file', 'edit_file', 'delete_file'].map(name => [name, ['computer:read', 'computer:write']]),
   ...['exec_command', 'command_status', 'stop_command'].map(name => [name, ['computer:read', 'computer:execute']]),
 ]);
+export const getToolScopes = name => [...(toolScopes.get(name) || [])];
+export const EXTERNAL_SERVER_ID_PATTERN = '^[a-z0-9](?:(?:_(?!_)|[a-z0-9-]){0,30}[a-z0-9-])?$';
+export const EXTERNAL_TOOL_NAME = /^mcp__([a-z0-9](?:(?:_(?!_)|[a-z0-9-]){0,30}[a-z0-9-])?)__([A-Za-z0-9_.-]{1,64})$/;
+export const isValidExternalToolName = name => typeof name === 'string' && EXTERNAL_TOOL_NAME.test(name);
 const basicMethods = new Set(['initialize', 'ping', 'tools/list', 'notifications/initialized', 'notifications/cancelled']);
 const allowedScopes = new Set(['computer:read', 'computer:write', 'computer:execute', 'offline_access']);
 export const APPROVAL_EXEMPT_TOOLS = new Set(['computer_context', 'command_status', 'stop_command']);
@@ -29,7 +33,7 @@ export function canonical(value) {
 }
 export const digest = value => createHash('sha256').update(typeof value === 'string' ? value : canonical(value)).digest('hex');
 
-export function validateRequestEnvelope(message, now = Date.now()) {
+export function validateRequestEnvelope(message, now = Date.now(), { externalToolScopes } = {}) {
   if (!message || message.type !== 'request' || typeof message.id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(message.id)) throw new Error('Invalid request envelope.');
   if (!Number.isSafeInteger(message.issuedAt) || !Number.isSafeInteger(message.deadline) || message.issuedAt > now + 5000 || message.deadline <= now || message.deadline - message.issuedAt > 110000 || message.deadline <= message.issuedAt || now - message.issuedAt > 110000) throw new Error('Expired or invalid request deadline.');
   const auth = message.authorization;
@@ -39,7 +43,16 @@ export function validateRequestEnvelope(message, now = Date.now()) {
   if (typeof body.id === 'string' && body.id.length > 256) throw new Error('Invalid JSON-RPC request ID.');
   if ('params' in body && (!body.params || typeof body.params !== 'object' || Array.isArray(body.params))) throw new Error('Invalid JSON-RPC parameters.');
   boundedJson(body);
-  const required = body.method === 'tools/call' ? toolScopes.get(body.params?.name) : basicMethods.has(body.method) ? ['computer:read'] : undefined;
+  const toolName = body.params?.name;
+  let required;
+  if (body.method === 'tools/call') {
+    required = toolScopes.get(toolName);
+    if (!required && isValidExternalToolName(toolName) && externalToolScopes instanceof Map) {
+      required = externalToolScopes.get(toolName);
+    }
+  } else if (basicMethods.has(body.method)) {
+    required = ['computer:read'];
+  }
   if (!required || !required.every(scope => auth.scope.includes(scope))) throw new Error('Tool or scope is not permitted by the local policy.');
   return { body: structuredClone(body), authorization: { userId: auth.userId, clientId: auth.clientId, scope: [...new Set(auth.scope)].sort() } };
 }

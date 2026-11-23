@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // This file is part of AgentDock Bridge and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import https from 'node:https';
@@ -10,19 +11,56 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import { cloudflare } from './cloudflare-api.mjs';
 import { defaultStateDirectory, proxyCandidates } from '../local/connector.mjs';
 const exec = promisify(execFile);
+const sha256File = filePath => new Promise((resolve, reject) => {
+  const hash = crypto.createHash('sha256');
+  const stream = fsSync.createReadStream(filePath);
+  stream.on('data', chunk => hash.update(chunk));
+  stream.on('error', reject);
+  stream.on('end', () => resolve(hash.digest('hex')));
+});
+const MAX_HEALTH_BYTES = 1024 * 1024;
+const probeHealth = async origin => {
+  const url = `${origin.replace(/\/+$/, '')}/healthz`;
+  let lastError = new Error('Health request failed');
+  for (const proxy of proxyCandidates(origin)) {
+    try {
+      return await new Promise((resolve, reject) => {
+        let agent;
+        if (proxy) agent = new HttpsProxyAgent(proxy);
+        let settled = false;
+        const done = fn => value => { if (!settled) { settled = true; fn(value); } };
+        const req = https.get(url, { timeout: 15000, minVersion: 'TLSv1.2', agent }, res => {
+          const chunks = [];
+          let bytes = 0;
+          res.on('data', chunk => {
+            bytes += chunk.length;
+            if (bytes > MAX_HEALTH_BYTES) { req.destroy(new Error('Health response exceeds byte limit')); return; }
+            chunks.push(chunk);
+          });
+          res.on('end', () => { try { done(resolve)({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }); } catch { done(reject)(new Error('Invalid health')); } });
+          res.on('close', () => done(reject)(new Error('Health connection closed')));
+          res.on('error', done(reject));
+        });
+        req.on('error', done(reject));
+        req.on('timeout', () => req.destroy(new Error('Health timeout')));
+      });
+    } catch (error) { lastError = error; }
+  }
+  throw lastError;
+};
 const root = path.resolve(import.meta.dirname, '..');
 const stateDir = defaultStateDirectory();
 const config = JSON.parse(await fs.readFile(path.join(stateDir, 'config.json'), 'utf8'));
 const installation = JSON.parse(await fs.readFile(path.join(stateDir, 'installation.json'), 'utf8'));
 const acceptance = JSON.parse(await fs.readFile(path.join(root, 'artifacts/acceptance-v2-result.json'), 'utf8'));
 const lifecycle = JSON.parse(await fs.readFile(path.join(root, 'artifacts/lifecycle-v2.json'), 'utf8'));
-const testOutput = await fs.readFile(path.join(root, 'artifacts/fix-round5/final-tests.txt'), 'utf8');
+const testOutput = await fs.readFile(path.join(root, process.env.AGENTDOCK_TEST_REPORT || 'artifacts/fix-round5/final-tests.txt'), 'utf8');
 const passed = Number(testOutput.match(/pass (\d+)/)?.[1]);
 const failed = Number(testOutput.match(/fail (\d+)/)?.[1]);
 const skipped = Number(testOutput.match(/skipped (\d+)/)?.[1]);
 const cancelled = Number(testOutput.match(/cancelled (\d+)/)?.[1]);
 if (!acceptance.success || !lifecycle.success || !passed || failed !== 0 || skipped !== 0 || cancelled !== 0) throw new Error('Verification is incomplete');
-if (!config.nodeRoot || !/^[a-f0-9]{64}$/.test(config.nodeSha256 || '') || crypto.createHash('sha256').update(await fs.readFile(config.nodePath)).digest('hex') !== config.nodeSha256) throw new Error('Private Node integrity verification failed');
+if (!config.nodeRoot || !/^[a-f0-9]{64}$/.test(config.nodeSha256 || '') || await sha256File(config.nodePath) !== config.nodeSha256) throw new Error('Private Node integrity verification failed');
 const [account] = process.argv.slice(2);
 if (!/^[a-f0-9]{32}$/.test(account || '')) throw new Error('Usage: node scripts/record-hardening.mjs <cloudflare-account-id>');
 const hostname = new URL(config.origin).hostname;
@@ -31,15 +69,7 @@ const [domains, deployments] = await Promise.all([
   cloudflare(`/accounts/${account}/workers/scripts/agentdock-bridge/deployments`),
 ]);
 if (!domains.some(domain => domain.hostname === hostname && domain.service === 'agentdock-bridge')) throw new Error('Domain binding mismatch');
-const proxy = proxyCandidates().find(Boolean);
-const health = await new Promise((resolve, reject) => {
-  const req = https.get(`${config.origin}/healthz`, { timeout: 15000, agent: proxy ? new HttpsProxyAgent(proxy) : undefined }, res => {
-    let data = '';
-    res.on('data', chunk => { data += chunk; });
-    res.on('end', () => { try { resolve({ status: res.statusCode, body: JSON.parse(data) }); } catch { reject(new Error('Invalid health')); } });
-  });
-  req.on('error', reject); req.on('timeout', () => req.destroy(new Error('Health timeout')));
-});
+const health = await probeHealth(config.origin);
 if (health.status !== 200 || !health.body.connectorOnline) throw new Error('Public connector is offline');
 const hashes = {};
 async function walk(directory) {
@@ -47,13 +77,13 @@ async function walk(directory) {
     if (['node_modules', '.git', '.wrangler', 'artifacts'].includes(item.name)) continue;
     const file = path.join(directory, item.name);
     if (item.isDirectory()) await walk(file);
-    else if (item.isFile()) hashes[path.relative(root, file).replaceAll('\\', '/')] = crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex');
+    else if (item.isFile()) hashes[path.relative(root, file).replaceAll('\\', '/')] = await sha256File(file);
   }
 }
 await walk(root);
 for (const [relative, hash] of Object.entries(installation.sha256)) {
   const installed = path.join(config.sourceRoot, relative);
-  if (crypto.createHash('sha256').update(await fs.readFile(installed)).digest('hex') !== hash) throw new Error('Installed runtime integrity mismatch');
+  if (await sha256File(installed) !== hash) throw new Error('Installed runtime integrity mismatch');
   if (hashes[relative.replaceAll('\\', '/')] !== hash) throw new Error('Installed runtime differs from reviewed source');
 }
 const installedFiles = new Set(Object.keys(installation.sha256).map(relative => relative.replaceAll('\\', '/')));

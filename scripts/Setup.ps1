@@ -16,6 +16,12 @@ foreach($candidate in $Roots){
   $allowed+=$resolved
 }
 & (Join-Path $PSScriptRoot 'Secrets.ps1') -Action Create -StateDir $StateDir
+$statePath=Assert-PrivateState $StateDir
+$finalConfigFile=Join-Path $statePath 'config.json'
 $config=@{origin=$Origin;roots=$allowed;defaultCwd=$allowed[0];allowExec=$false;requireLocalApproval=$true;sourceRoot=(Split-Path -Parent $PSScriptRoot);sandbox=@{enabled=$false}}
-[IO.File]::WriteAllText($configFile,($config|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
+$tmpConfig=Join-Path $statePath ('.config-'+[Guid]::NewGuid().ToString('N')+'.tmp')
+try {
+  [IO.File]::WriteAllText($tmpConfig,($config|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
+  Move-Item -LiteralPath $tmpConfig -Destination $finalConfigFile -Force
+} finally { if(Test-Path -LiteralPath $tmpConfig){Remove-Item -LiteralPath $tmpConfig -Force -ErrorAction SilentlyContinue} }
 'Credentials initialized. Build the isolated image and run Install-Hardened.ps1 before starting.'

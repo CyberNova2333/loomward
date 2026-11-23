@@ -10,18 +10,43 @@ import { defaultStateDirectory, proxyCandidates } from '../local/connector.mjs';
 const exec = promisify(execFile);
 const stateDir = defaultStateDirectory();
 const config = JSON.parse(await fs.readFile(path.join(stateDir, 'config.json'), 'utf8'));
-const shell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-const manage = action => exec(shell, ['-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', path.join(config.sourceRoot, 'scripts', 'Manage.ps1'), '-Action', action, '-StateDir', stateDir], { timeout: 30000, windowsHide: true });
-const proxy = proxyCandidates().find(Boolean);
-export function health() {
+const manage = action => {
+  if (process.platform === 'win32') {
+    const shell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    return exec(shell, ['-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', path.join(config.sourceRoot, 'scripts', 'Manage.ps1'), '-Action', action, '-StateDir', stateDir], { timeout: 30000, windowsHide: true });
+  }
+  const nodeExe = config.nodePath || process.execPath;
+  return exec(nodeExe, [path.join(config.sourceRoot, 'scripts', 'host-cli.mjs'), action.toLowerCase(), '--state-dir', stateDir], { timeout: 30000 });
+};
+function probeHealth(origin, proxy) {
   return new Promise((resolve, reject) => {
-    const req = https.get(`${config.origin}/healthz`, { timeout: 8000, agent: proxy ? new HttpsProxyAgent(proxy) : undefined }, res => {
+    let agent;
+    if (proxy) {
+      try { agent = new HttpsProxyAgent(proxy); } catch (error) { return reject(error); }
+    }
+    let settled = false;
+    const done = fn => value => { if (!settled) { settled = true; fn(value); } };
+    const req = https.get(`${origin.replace(/\/+$/, '')}/healthz`, { timeout: 8000, minVersion: 'TLSv1.2', agent }, res => {
       let text = '';
-      res.on('data', chunk => { text += chunk; if (text.length > 4096) req.destroy(); });
-      res.on('end', () => { try { resolve({ status: res.statusCode, body: JSON.parse(text) }); } catch { reject(new Error('Invalid health response')); } });
+      res.on('data', chunk => {
+        text += chunk;
+        if (text.length > 4096) req.destroy(new Error('Health response too large'));
+      });
+      res.on('end', () => { try { done(resolve)({ status: res.statusCode, body: JSON.parse(text) }); } catch { done(reject)(new Error('Invalid health response')); } });
+      res.on('close', () => done(reject)(new Error('Health connection closed')));
+      res.on('error', done(reject));
     });
-    req.on('timeout', () => req.destroy(new Error('Health timeout'))); req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('Health timeout')));
+    req.on('error', done(reject));
   });
+}
+export async function health() {
+  let lastError = new Error('Health check failed');
+  for (const proxy of proxyCandidates(config.origin)) {
+    try { return await probeHealth(config.origin, proxy); }
+    catch (error) { lastError = error; }
+  }
+  throw lastError;
 }
 async function waitHealth(wanted) {
   // Startup may perform three read-only Docker queries, each with one bounded

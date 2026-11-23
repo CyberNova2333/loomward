@@ -24,7 +24,7 @@ export async function readJson(file, maximum = MAX_RECORD_BYTES) {
 }
 export function validRequest(record, expectedId, now) {
   try {
-    return record?.id === expectedId && APPROVAL_ID.test(record.id) && Number.isSafeInteger(record.createdAt) && Number.isSafeInteger(record.expiresAt) && record.expiresAt > now && record.createdAt <= now && record.expiresAt - record.createdAt === 300000 && record.hash === digest(record.request);
+    return !!record && record.id === expectedId && APPROVAL_ID.test(record.id) && Number.isSafeInteger(record.createdAt) && Number.isSafeInteger(record.expiresAt) && record.expiresAt > now && record.createdAt <= now && record.expiresAt - record.createdAt === 300000 && record.request !== null && typeof record.request === 'object' && !Array.isArray(record.request) && record.hash === digest(record.request);
   } catch { return false; }
 }
 export async function atomicJson(file, value, maximum = MAX_RECORD_BYTES) {

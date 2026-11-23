@@ -6,16 +6,20 @@ param(
 )
 $ErrorActionPreference='Stop'
 . ([IO.Path]::Combine($PSScriptRoot, 'State-Safety.ps1'))
-$null=Assert-PrivateState $StateDir
+$statePath=Assert-PrivateState $StateDir
 $root=Split-Path -Parent $PSScriptRoot
 $connector=Join-Path $root 'local\connector.mjs'
 $self=$PSCommandPath
-$processFile=Join-Path $StateDir 'supervisor.json'
-$childFile=Join-Path $StateDir 'connector-process.json'
-$stopFile=Join-Path $StateDir 'stop.request'
+$processFile=Join-Path $statePath 'supervisor.json'
+$childFile=Join-Path $statePath 'connector-process.json'
+$stopFile=Join-Path $statePath 'stop.request'
 function SaveProcess($file,$process,$marker){
-  # The protected record is written immediately after we create the process.
-  [IO.File]::WriteAllText($file,(@{pid=$process.Id;startTime=$process.StartTime.ToUniversalTime().Ticks.ToString();executable=$process.Path;source=$marker}|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+  # The protected record is written atomically via temp file + move.
+  $tmp=Join-Path $statePath ('.proc-'+[Guid]::NewGuid().ToString('N')+'.tmp')
+  try {
+    [IO.File]::WriteAllText($tmp,(@{pid=$process.Id;startTime=$process.StartTime.ToUniversalTime().Ticks.ToString();executable=$process.Path;source=$marker}|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $tmp -Destination $file -Force
+  } finally { if(Test-Path -LiteralPath $tmp){Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue} }
 }
 function OwnedProcess($file,$marker){
   if(-not(Test-Path -LiteralPath $file)){return $null}
@@ -29,18 +33,63 @@ function OwnedProcess($file,$marker){
   } catch {}
   return $null
 }
-if($Action -eq 'Password') {& (Join-Path $PSScriptRoot 'Secrets.ps1') -Action ShowPassword -StateDir $StateDir;exit}
+function ProbePublicHealth([string]$Origin){
+  if(-not $Origin -or -not $Origin.StartsWith('https://',[StringComparison]::OrdinalIgnoreCase)){
+    return [pscustomobject]@{error='Invalid gateway origin scheme.'}
+  }
+  [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+  $uri=$Origin.TrimEnd('/')+'/healthz'
+  $req=[System.Net.HttpWebRequest]::Create($uri)
+  $req.Method='GET'
+  $req.Timeout=15000
+  $req.AllowAutoRedirect=$false
+  try {
+    $resp=$req.GetResponse()
+    try {
+      $reader=[IO.StreamReader]::new($resp.GetResponseStream(),[Text.Encoding]::UTF8)
+      $text=$reader.ReadToEnd()
+      return [pscustomobject]@{status=[int]$resp.StatusCode;body=($text|ConvertFrom-Json)}
+    } finally { $resp.Close() }
+  } catch [System.Net.WebException] {
+    $resp=$_.Exception.Response
+    if($resp -is [System.Net.HttpWebResponse]){
+      try {
+        $reader=[IO.StreamReader]::new($resp.GetResponseStream(),[Text.Encoding]::UTF8)
+        $text=$reader.ReadToEnd()
+        try { return [pscustomobject]@{status=[int]$resp.StatusCode;body=($text|ConvertFrom-Json)} }
+        catch { return [pscustomobject]@{status=[int]$resp.StatusCode;error='Invalid health response.'} }
+      } finally { $resp.Close() }
+    }
+    return [pscustomobject]@{error='Public health request failed.'}
+  } catch {
+    return [pscustomobject]@{error='Public health request failed.'}
+  }
+}
+if($Action -eq 'Password') {& (Join-Path $PSScriptRoot 'Secrets.ps1') -Action ShowPassword -StateDir $statePath;exit}
 if($Action -eq 'Status') {
   $supervisor=OwnedProcess $processFile $self
   $child=OwnedProcess $childFile $connector
-  [pscustomobject]@{supervisorAlive=[bool]$supervisor;connectorAlive=[bool]$child;stateDirectory=$StateDir}|ConvertTo-Json
-  $status=Join-Path $StateDir 'connector-status.json'
-  if(Test-Path -LiteralPath $status){Get-Content -LiteralPath $status -Raw}
-  $configFile=Join-Path $StateDir 'config.json'
+  $status=Join-Path $statePath 'connector-status.json'
+  $connectorStatus=$null
+  if(Test-Path -LiteralPath $status){
+    try { $connectorStatus=Get-Content -LiteralPath $status -Raw|ConvertFrom-Json }
+    catch { $connectorStatus=[pscustomobject]@{corrupt=$true} }
+  }
+  $configFile=Join-Path $statePath 'config.json'
+  $publicHealth=$null
   if(Test-Path -LiteralPath $configFile){
-    $origin=(Get-Content -LiteralPath $configFile -Raw|ConvertFrom-Json).origin
-    try {Invoke-RestMethod ($origin.TrimEnd('/')+'/healthz') -TimeoutSec 15|ConvertTo-Json}catch{'Public health request failed.'}
-  } else {'No configuration found; health probe skipped.'}
+    try {
+      $origin=(Get-Content -LiteralPath $configFile -Raw|ConvertFrom-Json).origin
+      $publicHealth=ProbePublicHealth $origin
+    } catch { $publicHealth=[pscustomobject]@{error='Invalid configuration.'} }
+  }
+  [pscustomobject]@{
+    supervisorAlive=[bool]$supervisor
+    connectorAlive=[bool]$child
+    stateDirectory=$statePath
+    connectorStatus=$connectorStatus
+    publicHealth=$publicHealth
+  }|ConvertTo-Json -Depth 8
   exit
 }
 if($Action -eq 'Stop') {
@@ -50,47 +99,73 @@ if($Action -eq 'Stop') {
   if(OwnedProcess $processFile $self){throw 'Supervisor is still running. Inspect its status.'}
   $child=OwnedProcess $childFile $connector
   if($child){throw 'Connector is still stopping. Inspect its status before forcing termination.'}
+  if(Test-Path -LiteralPath $stopFile){Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue}
   'Stopped this connector and its supervisor.'
   exit
 }
 if($Action -eq 'Start') {
-  $config=Get-Content -LiteralPath (Join-Path $StateDir 'config.json') -Raw | ConvertFrom-Json
+  $config=Get-Content -LiteralPath (Join-Path $statePath 'config.json') -Raw | ConvertFrom-Json
   if(-not $config.sandbox.enabled -or -not $config.requireLocalApproval){throw 'Install the hardened runtime and local approval policy first.'}
   if($config.sourceRoot -ine $root){throw 'Start using the protected Start.cmd in the private AgentDockBridge directory.'}
-  $null=Assert-PinnedNode $config $StateDir
+  $null=Assert-PinnedNode $config $statePath
   Clear-NodeOverrides
   if(OwnedProcess $processFile $self){'Already running.';exit}
   if(Test-Path -LiteralPath $stopFile){Remove-Item -LiteralPath $stopFile}
   $powershell=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-  $arguments='-NoProfile -ExecutionPolicy RemoteSigned -File "'+$self+'" -Action Run -StateDir "'+$StateDir+'"'
+  $arguments='-NoProfile -ExecutionPolicy RemoteSigned -File "'+$self+'" -Action Run -StateDir "'+$statePath+'"'
   Start-Process -FilePath $powershell -ArgumentList $arguments -WorkingDirectory $root -WindowStyle Hidden | Out-Null
   'Start requested. Use Status.cmd to verify the public connection.'
   exit
 }
 $digest=[Security.Cryptography.SHA256]::Create()
-try{$identifier=([BitConverter]::ToString($digest.ComputeHash([Text.Encoding]::UTF8.GetBytes($StateDir.ToLowerInvariant())))).Replace('-','')}finally{$digest.Dispose()}
+try{$identifier=([BitConverter]::ToString($digest.ComputeHash([Text.Encoding]::UTF8.GetBytes($statePath.ToLowerInvariant())))).Replace('-','')}finally{$digest.Dispose()}
 $mutex=[Threading.Mutex]::new($false,'Local\CbnvComputerBridge-'+$identifier)
 $owns=$false
 try{$owns=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$owns=$true}
 if(-not $owns){$mutex.Dispose();exit}
-SaveProcess $processFile (Get-Process -Id $PID) $self
-$config=Get-Content -LiteralPath (Join-Path $StateDir 'config.json') -Raw | ConvertFrom-Json
-if(-not $config.sandbox.enabled -or -not $config.requireLocalApproval -or $config.sourceRoot -ine $root){throw 'Untrusted or incomplete runtime configuration.'}
-$node=$config.nodePath
-if(-not [IO.Path]::IsPathRooted($node) -or -not(Test-Path -LiteralPath $node -PathType Leaf)){throw 'Pinned Node executable is missing.'}
-$null=Assert-PinnedNode $config $StateDir
-Clear-NodeOverrides
 try {
+  SaveProcess $processFile (Get-Process -Id $PID) $self
+  $config=Get-Content -LiteralPath (Join-Path $statePath 'config.json') -Raw | ConvertFrom-Json
+  if(-not $config.sandbox.enabled -or -not $config.requireLocalApproval -or $config.sourceRoot -ine $root){throw 'Untrusted or incomplete runtime configuration.'}
+  $node=$config.nodePath
+  if(-not [IO.Path]::IsPathRooted($node) -or -not(Test-Path -LiteralPath $node -PathType Leaf)){throw 'Pinned Node executable is missing.'}
+  $null=Assert-PinnedNode $config $statePath
+  Clear-NodeOverrides
+  $quickFailures=0
+  $lastSpawnAt=[DateTime]::MinValue
+  $nextRestartAt=[DateTime]::MinValue
   while(-not(Test-Path -LiteralPath $stopFile)) {
     $child=OwnedProcess $childFile $connector
-    if(-not $child) {
-      $null=Assert-PinnedNode $config $StateDir
-      $arguments='"'+$connector+'" "'+$StateDir+'"'
+    if(-not $child -and [DateTime]::UtcNow -ge $nextRestartAt) {
+      if($lastSpawnAt -ne [DateTime]::MinValue) {
+        $elapsed=([DateTime]::UtcNow - $lastSpawnAt).TotalSeconds
+        if($elapsed -lt 10){
+          $quickFailures=[Math]::Min($quickFailures+1, 5)
+          $backoff=[Math]::Min(30, [int][Math]::Pow(2, $quickFailures))
+          $nextRestartAt=[DateTime]::UtcNow.AddSeconds($backoff)
+          Start-Sleep -Seconds 1
+          continue
+        }
+        $quickFailures=0
+      }
+      $null=Assert-PinnedNode $config $statePath
+      $arguments='"'+$connector+'" "'+$statePath+'"'
+      $lastSpawnAt=[DateTime]::UtcNow
       $child=Start-Process -FilePath $node -ArgumentList $arguments -WorkingDirectory $root -WindowStyle Hidden -PassThru
       SaveProcess $childFile $child $connector
     }
     Start-Sleep -Seconds 2
   }
   $child=OwnedProcess $childFile $connector
-  if($child){$null=$child.WaitForExit(12000)}
-} finally {$mutex.ReleaseMutex();$mutex.Dispose()}
+  if($child){
+    if(-not $child.WaitForExit(12000)){
+      try{ $child.Kill(); $null=$child.WaitForExit(3000) }catch{}
+    }
+  }
+} finally {
+  if(Test-Path -LiteralPath $childFile){Remove-Item -LiteralPath $childFile -Force -ErrorAction SilentlyContinue}
+  if(Test-Path -LiteralPath $stopFile){Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue}
+  if(Test-Path -LiteralPath $processFile){Remove-Item -LiteralPath $processFile -Force -ErrorAction SilentlyContinue}
+  $mutex.ReleaseMutex()
+  $mutex.Dispose()
+}

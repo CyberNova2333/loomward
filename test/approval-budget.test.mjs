@@ -6,7 +6,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { LocalApprovals } from '../local/approvals.mjs';
 import { approveRequest } from '../local/approval-cli.mjs';
-import { validateRequestEnvelope } from '../local/request-policy.mjs';
+import { validateRequestEnvelope, digest } from '../local/request-policy.mjs';
 import { atomicJson, readJson, MAX_RECORD_BYTES, MAX_APPROVED_RECORD_BYTES, ApprovalRecordTooLargeError } from '../local/approval-store.mjs';
 
 const origin = 'https://example.test';
@@ -85,4 +85,22 @@ test('oversize requests fail before creating a pending approval and do not poiso
   await approveRequest(approvals.directory, pending);
   assert.equal((await approvals.authorize(body, auth)).approved, true);
   assert.equal((await approvals.authorize(body, auth)).approved, false);
+});
+
+test('LocalApprovals prunes >1024 expired request files cleanly instead of bricking queue', async t => {
+  const directory = await fixture(t);
+  let now = 1_700_000_000_000;
+  const approvals = new LocalApprovals(directory, origin, { now: () => now });
+  await approvals.ready;
+  for (let i = 0; i < 1030; i++) {
+    const id = randomUUID();
+    const request = { origin, authorization: auth, method: 'tools/call', params: { name: 'read_file', arguments: { path: `/workspace/e-${i}.txt` } } };
+    const createdAt = now - 400000;
+    await fs.writeFile(
+      path.join(approvals.directory, `${id}.request.json`),
+      JSON.stringify({ id, hash: digest(request), createdAt, expiresAt: createdAt + 300000, request }),
+    );
+  }
+  const fresh = await approvals.authorize(call({ tag: 'after-purge' }), auth);
+  assert.equal(fresh.approved, false);
 });

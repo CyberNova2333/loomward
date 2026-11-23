@@ -36,12 +36,17 @@ function Assert-PrivateState([string]$StateDir) {
 }
 
 function Assert-ConnectorStopped([string]$StateDir) {
+  $statePath=Assert-PlainLocalPath $StateDir
   foreach($name in @('supervisor.json','connector-process.json')) {
-    $file=Join-Path $StateDir $name
+    $file=Join-Path $statePath $name
     if(-not(Test-Path -LiteralPath $file)){continue}
-    $record=Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
-    $process=Get-Process -Id $record.pid -ErrorAction SilentlyContinue
-    if($process -and $process.Path -ieq $record.executable -and $process.StartTime.ToUniversalTime().Ticks.ToString() -ceq $record.startTime){throw 'Stop the current connector before installing or rotating credentials.'}
+    $running=$false
+    try {
+      $record=Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+      $process=Get-Process -Id $record.pid -ErrorAction Stop
+      if($process.Path -ieq $record.executable -and $process.StartTime.ToUniversalTime().Ticks.ToString() -ceq $record.startTime){$running=$true}
+    } catch {}
+    if($running){throw 'Stop the current connector before installing or rotating credentials.'}
   }
 }
 
@@ -102,6 +107,7 @@ function Assert-WriteProtectedPath([string]$LiteralPath) {
 function Assert-PinnedNode($Config,[string]$StateDir) {
   $private=Assert-PrivateState $StateDir
   if($Config.nodeRoot){$private=Assert-PrivateState $Config.nodeRoot}
+  if(-not $Config.roots -or -not $Config.roots[0]){throw 'A workspace root is required for pinned Node verification.'}
   $node=Assert-TrustedBinary $Config.nodePath $Config.roots[0]
   if(-not $node.StartsWith($private+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Node must be installed inside its private runtime directory.'}
   if($Config.nodeSha256 -notmatch '^[a-f0-9]{64}$' -or (Get-FileHash -LiteralPath $node -Algorithm SHA256).Hash -ine $Config.nodeSha256){throw 'Pinned Node integrity check failed.'}

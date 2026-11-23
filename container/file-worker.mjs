@@ -3,7 +3,7 @@
 import { createToolRuntime } from '../local/tools.mjs';
 import path from 'node:path';
 
-export async function readJsonInput(stream, maximum = 1100000) {
+export async function readJsonInput(stream, maximum = 1400000) {
   const chunks = [];
   let bytes = 0;
   for await (const chunk of stream) {

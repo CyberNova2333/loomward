@@ -136,7 +136,7 @@ try {
   assert.equal(await fs.access(probe).then(() => true, () => false), false);
   probe = undefined;
   pass('PUBLIC_FILE_CREATE_READ_EDIT_DELETE_AND_DISK_MATCH');
-  const echo = await call('exec_command', { cmd: "[Console]::Write('Bridge-acceptance-ok')", cwd: acceptanceDirectory, mode: 'sync', timeout_ms: 10000, max_output_bytes: 2048 });
+  const echo = await call('exec_command', { cmd: "printf %s Bridge-acceptance-ok", cwd: acceptanceDirectory, mode: 'sync', network: 'none', timeout_ms: 10000, max_output_bytes: 2048 });
   assert.equal(echo.exit_code, 0);
   assert.equal(echo.stdout, 'Bridge-acceptance-ok');
   pass('PUBLIC_COMMAND_EXIT_AND_OUTPUT');

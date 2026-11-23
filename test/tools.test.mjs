@@ -148,3 +148,14 @@ test('file runtime cannot enable host execution or expose command handlers', asy
     assert.equal((await call(name, {})).error.code, -32602);
   }
 });
+
+test('search_files flags byte budget exhaustion instead of silently skipping <= 1 MiB files', async t => {
+  const { root, call } = await fixture(t);
+  const bigChunk = 'needle\n' + 'x'.repeat(900 * 1024);
+  for (let i = 0; i < 19; i++) {
+    await fs.writeFile(path.join(root, `f-${String(i).padStart(2, '0')}.txt`), bigChunk);
+  }
+  const search = data(await call('search_files', { query: 'needle', limit: 200 }));
+  assert.equal(search.budget_exhausted, 'bytes');
+  assert.equal(search.truncated, true);
+});

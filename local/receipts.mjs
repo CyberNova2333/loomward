@@ -14,6 +14,7 @@ export class RequestReceipts {
     this.directory = path.join(stateDir, 'request-receipts');
     this.now = now;
     this.maximum = maximum;
+    this.records = new Map();
     this.queue = Promise.resolve();
     this.count = 0;
     this.ready = this.initialize();
@@ -25,24 +26,31 @@ export class RequestReceipts {
   }
   async cleanup() {
     const directory = await fs.opendir(this.directory);
+    const now = this.now();
+    this.records.clear();
     let count = 0;
     for await (const entry of directory) {
       if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/.test(entry.name)) throw new Error('Unexpected receipt entry.');
       const file = path.join(this.directory, entry.name);
-      const stat = await fs.stat(file);
+      const stat = await fs.lstat(file);
+      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('Unexpected receipt entry.');
       if (stat.size > 512) throw new Error('Invalid receipt size.');
       let receipt;
-      try { receipt = JSON.parse(await fs.readFile(file, 'utf8')); } catch { /* A partial receipt is kept: fail closed. */ }
-      if (Number.isSafeInteger(receipt?.expiresAt) && receipt.expiresAt < this.now()) await fs.unlink(file);
+      try { receipt = JSON.parse(await fs.readFile(file, 'utf8')); } catch { /* Partial receipt without valid JSON; kept until KEEP_MS elapses. */ }
+      if (Number.isSafeInteger(receipt?.expiresAt) && receipt.expiresAt < now) await fs.unlink(file);
+      else if (!receipt && stat.mtimeMs < now - KEEP_MS) await fs.unlink(file);
       else if (++count > this.maximum) throw new Error('Receipt storage limit reached.');
+      else this.records.set(entry.name.slice(0, 64), Number.isSafeInteger(receipt?.expiresAt) ? receipt.expiresAt : stat.mtimeMs + KEEP_MS);
     }
     this.count = count;
-    this.nextCleanup = this.now() + 3600000;
+    this.nextCleanup = now + 3600000;
   }
   async inspect(message) {
     await this.ready;
     const file = path.join(this.directory, `${digest(message.id)}.json`);
     try {
+      const stat = await fs.lstat(file);
+      if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 512) return { acquired: false, reason: 'duplicate_or_incomplete' };
       const raw = await fs.readFile(file, 'utf8');
       if (Buffer.byteLength(raw) > 512) return { acquired: false, reason: 'duplicate_or_incomplete' };
       const existing = JSON.parse(raw);
@@ -54,18 +62,35 @@ export class RequestReceipts {
   claim(message) {
     const action = this.queue.then(async () => {
       await this.ready;
-      if (this.now() > this.nextCleanup) await this.cleanup();
-      const file = path.join(this.directory, `${digest(message.id)}.json`);
+      const now = this.now();
+      if (now > this.nextCleanup) await this.cleanup();
+      else if (this.count >= this.maximum) {
+        for (const [hash, expiresAt] of this.records) {
+          if (expiresAt < now) {
+            await fs.unlink(path.join(this.directory, `${hash}.json`)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+            this.records.delete(hash);
+            this.count = Math.max(0, this.count - 1);
+          }
+        }
+        if (this.count >= this.maximum) await this.cleanup();
+      }
+      const idHash = digest(message.id);
+      const file = path.join(this.directory, `${idHash}.json`);
       const bodyHash = digest(message);
       let existing;
-      try { existing = JSON.parse(await fs.readFile(file, 'utf8')); }
-      catch (error) { if (error.code !== 'ENOENT') return { acquired: false, reason: 'duplicate_or_incomplete' }; }
+      try {
+        const stat = await fs.lstat(file);
+        if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 512) return { acquired: false, reason: 'duplicate_or_incomplete' };
+        existing = JSON.parse(await fs.readFile(file, 'utf8'));
+      } catch (error) { if (error.code !== 'ENOENT') return { acquired: false, reason: 'duplicate_or_incomplete' }; }
       if (existing) return { acquired: false, reason: existing.digest === bodyHash ? 'already_attempted' : 'request_id_conflict' };
       if (this.count >= this.maximum) throw new Error('Receipt storage capacity reached.');
       const handle = await fs.open(file, 'wx', 0o600).catch(error => { if (error.code === 'EEXIST') return null; throw error; });
       if (!handle) return { acquired: false, reason: 'already_attempted' };
       this.count++;
-      try { await handle.writeFile(JSON.stringify({ digest: bodyHash, expiresAt: this.now() + KEEP_MS })); await handle.sync(); }
+      const expiresAt = now + KEEP_MS;
+      this.records.set(idHash, expiresAt);
+      try { await handle.writeFile(JSON.stringify({ digest: bodyHash, expiresAt })); await handle.sync(); }
       finally { await handle.close(); }
       return { acquired: true };
     });

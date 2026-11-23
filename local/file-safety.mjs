@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 
 export class FilePolicyError extends Error {}
 const deny = message => { throw new FilePolicyError(message); };
-const normalized = value => process.platform === 'win32' ? value.toLowerCase() : value;
+const normalized = value => process.platform === 'darwin' ? value.normalize('NFC').toLowerCase() : process.platform === 'win32' ? value.toLowerCase() : value;
 export function beneath(candidate, root) {
   const relative = path.relative(normalized(root), normalized(candidate));
   return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
@@ -69,7 +69,7 @@ export async function createFilePolicy(config, checkpoint) {
     file = await resolve(file);
     const before = await fs.lstat(file);
     regular(before);
-    const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
     try {
       const info = await handle.stat();
       regular(info);
@@ -145,7 +145,7 @@ export async function createFilePolicy(config, checkpoint) {
       if (overwrite) await assertVersion(file, prior);
       else await resolve(file, { create: true });
       checkpoint();
-      if (overwrite) await fs.rename(temporary, file);
+      if (overwrite && prior !== null) await fs.rename(temporary, file);
       else {
         // link is an atomic create-if-absent; unlike rename it cannot overwrite
         // a destination created by another process after our check.

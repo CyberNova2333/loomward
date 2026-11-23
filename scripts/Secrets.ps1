@@ -10,12 +10,20 @@ $ErrorActionPreference='Stop'
 # the connector's fresh credential-export process.
 . ([IO.Path]::Combine($PSScriptRoot,'State-Safety.ps1'))
 Add-Type -AssemblyName System.Security
-$file=Join-Path $StateDir 'secrets.dpapi'
 $entropy=[Text.Encoding]::UTF8.GetBytes('cbnv.agentdock-bridge.secrets.v1')
+function WriteDpapiAtomic([string]$targetPath,[byte[]]$cipher){
+  $tmp=Join-Path ([IO.Path]::GetDirectoryName($targetPath)) ('.secret-'+[Guid]::NewGuid().ToString('N')+'.tmp')
+  try {
+    [IO.File]::WriteAllText($tmp,[Convert]::ToBase64String($cipher),[Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $tmp -Destination $targetPath -Force
+  } finally { if(Test-Path -LiteralPath $tmp){Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue} }
+}
 if($Action -eq 'Create') {
-  Assert-WriteProtectedPath ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($StateDir)))
-  if(Test-Path -LiteralPath $StateDir){Assert-WriteProtectedPath $StateDir}
-  if(Test-Path -LiteralPath $file){throw 'Secrets already exist; preserve them.'}
+  $normalizedState=[IO.Path]::GetFullPath($StateDir).TrimEnd('\')
+  Assert-WriteProtectedPath ([IO.Path]::GetDirectoryName($normalizedState))
+  if(Test-Path -LiteralPath $normalizedState){Assert-WriteProtectedPath $normalizedState}
+  $rawFile=Join-Path $normalizedState 'secrets.dpapi'
+  if(Test-Path -LiteralPath $rawFile){throw 'Secrets already exist; preserve them.'}
   if((Test-Path -LiteralPath $StateDir) -and @(Get-ChildItem -LiteralPath $StateDir -Force).Count -gt 0){throw 'Credential directory is not empty; inspect it before setup.'}
   New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
   $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -23,7 +31,8 @@ if($Action -eq 'Create') {
   if($LASTEXITCODE -ne 0){throw 'Cannot protect the credential directory.'}
   $unexpected=@((Get-Acl -LiteralPath $StateDir).Access | Where-Object {$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin @($sid,'S-1-5-18')})
   if($unexpected.Count -gt 0){throw 'Credential directory has other explicit access rules; no secrets were saved.'}
-  $null=Assert-PrivateState $StateDir
+  $statePath=Assert-PrivateState $StateDir
+  $file=Join-Path $statePath 'secrets.dpapi'
   function RandomBytes([int]$count) {
     $b=New-Object byte[] $count
     $rng=[Security.Cryptography.RandomNumberGenerator]::Create()
@@ -39,12 +48,13 @@ if($Action -eq 'Create') {
   $plain=[Text.Encoding]::UTF8.GetBytes(($data|ConvertTo-Json -Compress))
   try {
     $cipher=[Security.Cryptography.ProtectedData]::Protect($plain,$entropy,[Security.Cryptography.DataProtectionScope]::CurrentUser)
-    [IO.File]::WriteAllText($file,[Convert]::ToBase64String($cipher),[Text.UTF8Encoding]::new($false))
+    WriteDpapiAtomic $file $cipher
   } finally {[Array]::Clear($plain,0,$plain.Length);$data=$null;$password=$null}
   'Credentials created and encrypted for the current Windows user.'
   exit 0
 }
-$null=Assert-PrivateState $StateDir
+$statePath=Assert-PrivateState $StateDir
+$file=Join-Path $statePath 'secrets.dpapi'
 $cipher=[Convert]::FromBase64String(([IO.File]::ReadAllText($file)).Trim())
 $plain=[Security.Cryptography.ProtectedData]::Unprotect($cipher,$entropy,[Security.Cryptography.DataProtectionScope]::CurrentUser)
 try {
@@ -54,14 +64,18 @@ try {
     [Console]::Write(($data|ConvertTo-Json -Compress))
   } elseif($Action -eq 'ShowPassword') {
     Add-Type -AssemblyName System.Windows.Forms
-    $configFile=Join-Path $StateDir 'config.json'
+    $configFile=Join-Path $statePath 'config.json'
     $site=if(Test-Path -LiteralPath $configFile){(Get-Content -LiteralPath $configFile -Raw|ConvertFrom-Json).origin}else{'your bridge origin'}
     [Windows.Forms.MessageBox]::Show($data.ownerPassword,"$site - login password (do not share)") | Out-Null
   } elseif($Action -eq 'Upload') {
+    Assert-ConnectorStopped $statePath
     $root=Split-Path -Parent $PSScriptRoot
-    $wrangler=Join-Path $root 'node_modules\.bin\wrangler.cmd'
+    $wrangler=Assert-PlainLocalPath (Join-Path $root 'node_modules\.bin\wrangler.cmd')
+    Assert-WriteProtectedPath $wrangler
+    $wranglerConfig=Assert-PlainLocalPath (Join-Path $root 'wrangler.jsonc')
+    Clear-NodeOverrides
     $json=@{BRIDGE_TOKEN=$data.bridgeToken;OWNER_PASSWORD_HASH=$data.ownerPasswordHash}|ConvertTo-Json -Compress
-    $json | & $wrangler secret bulk --config (Join-Path $root 'wrangler.jsonc')
+    $json | & $wrangler secret bulk --config $wranglerConfig
     if($LASTEXITCODE -ne 0){throw 'Cloud secret upload failed.'}
   }
 } finally {[Array]::Clear($plain,0,$plain.Length);$data=$null;$json=$null}
