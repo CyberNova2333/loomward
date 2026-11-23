@@ -188,10 +188,11 @@ export function createModelBridgeClient({
   }
 
   async function getSnapshot({ refresh = false, signal = null, timeoutOverrideMs = null } = {}) {
+    const canShareInflight = !signal && !timeoutOverrideMs;
     if (!refresh && cachedSnapshot && Date.now() - cachedAt < SNAPSHOT_CACHE_TTL_MS) {
       return cachedSnapshot;
     }
-    if (!refresh && inflightSnapshot) {
+    if (canShareInflight && !refresh && inflightSnapshot) {
       return inflightSnapshot;
     }
     const run = (async () => {
@@ -209,14 +210,16 @@ export function createModelBridgeClient({
           usage,
           catalog,
         });
-        cachedSnapshot = snap;
-        cachedAt = Date.now();
+        if (!signal?.aborted) {
+          cachedSnapshot = snap;
+          cachedAt = Date.now();
+        }
         return snap;
       } finally {
-        inflightSnapshot = null;
+        if (inflightSnapshot === run) inflightSnapshot = null;
       }
     })();
-    inflightSnapshot = run;
+    if (canShareInflight) inflightSnapshot = run;
     return run;
   }
 

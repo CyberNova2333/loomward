@@ -27,8 +27,15 @@ function boundedJson(value) {
 }
 
 export function canonical(value) {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
+  if (Array.isArray(value)) {
+    return `[${value.map(item => (item === undefined || typeof item === 'function' || typeof item === 'symbol' ? 'null' : canonical(item))).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value)
+      .filter(key => value[key] !== undefined && typeof value[key] !== 'function' && typeof value[key] !== 'symbol')
+      .sort();
+    return `{${keys.map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
+  }
   return JSON.stringify(value);
 }
 export const digest = value => createHash('sha256').update(typeof value === 'string' ? value : canonical(value)).digest('hex');

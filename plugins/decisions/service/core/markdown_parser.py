@@ -7,12 +7,42 @@ Agent Decisions Dashboard - Markdown Parser & Serializer
 支持 Frontmatter (schema_version: 2.0)、代码围栏精确匹配、正文注释与三级标题保护、多维状态提取
 """
 
+import os
 import re
+import stat
 import json
+import errno
 import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from core.contracts import canonical_impl_state
+
+MAX_MARKDOWN_BYTES = 10 * 1024 * 1024
+
+
+def _read_regular_markdown_bytes(file_path: Path, max_bytes: int = MAX_MARKDOWN_BYTES) -> Optional[bytes]:
+    """安全读取普通 Markdown 文件字节：拒绝符号链接、非普通文件及超大文件。"""
+    if file_path.is_symlink():
+        raise ValueError(f"拒绝读取符号链接 Markdown 文件: {file_path.name}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(file_path), flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(f"拒绝读取符号链接 Markdown 文件: {file_path.name}") from exc
+        raise
+    with os.fdopen(fd, "rb") as handle:
+        st = os.fstat(handle.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"仅允许读取普通 Markdown 文件: {file_path.name}")
+        if st.st_size > max_bytes:
+            raise ValueError(f"Markdown 文件超过大小上限 ({max_bytes} 字节): {file_path.name}")
+        raw = handle.read(max_bytes + 1)
+        if len(raw) > max_bytes:
+            raise ValueError(f"Markdown 文件超过大小上限 ({max_bytes} 字节): {file_path.name}")
+        return raw
 
 
 def is_fence_start(line: str) -> Optional[Tuple[str, int]]:
@@ -147,10 +177,15 @@ class TopicMarkdownParser:
     @classmethod
     def count_rounds(cls, file_path: Path) -> int:
         """极速统计单个 Markdown 文件中的讨论轮次数，具备完备代码围栏感知"""
+        if file_path.is_symlink():
+            return 0
         if not file_path.exists():
             return 1
         try:
-            content = file_path.read_text(encoding="utf-8").replace("\r\n", "\n")
+            raw = _read_regular_markdown_bytes(file_path)
+            if raw is None:
+                return 1
+            content = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
             open_char = None
             open_len = 0
             round_nums = []
@@ -182,13 +217,14 @@ class TopicMarkdownParser:
     @classmethod
     def parse_markdown_file(cls, file_path: Path) -> Optional[Dict[str, Any]]:
         """读取并结构化解析单个议题 Markdown 文件"""
-        if not file_path.exists():
+        raw_bytes = _read_regular_markdown_bytes(file_path)
+        if raw_bytes is None:
             return None
 
         try:
-            raw_text = file_path.read_text(encoding="utf-8")
+            raw_text = raw_bytes.decode("utf-8")
         except UnicodeDecodeError:
-            raw_text = file_path.read_text(encoding="gbk", errors="replace")
+            raw_text = raw_bytes.decode("gbk", errors="replace")
 
         return cls.parse_markdown_text(raw_text, default_id=file_path.stem)
 

@@ -172,16 +172,33 @@ export function validateStateDir(stateDir, requirePrivateState) {
   return resolved;
 }
 
+const MAX_TRUSTED_JSON_BYTES = 2 * 1024 * 1024;
+
 export function readTrustedJsonFile(filePath, requirePrivateState) {
   if (requirePrivateState && process.platform !== 'win32') {
     assertPrivateFile(filePath);
-  } else {
-    const stat = fs.lstatSync(filePath);
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+  }
+  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1) {
       throw new Error('Configuration file must be a regular single-link file.');
     }
+    if (stat.size > MAX_TRUSTED_JSON_BYTES) {
+      throw new Error('Configuration file exceeds maximum allowed size.');
+    }
+    if (requirePrivateState && process.platform !== 'win32') {
+      if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+        throw new Error('Private file has an untrusted owner.');
+      }
+      if ((stat.mode & 0o077) !== 0) {
+        throw new Error('Private file permissions must restrict access to the owner (0600).');
+      }
+    }
+    return JSON.parse(fs.readFileSync(fd, 'utf8'));
+  } finally {
+    fs.closeSync(fd);
   }
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
 export function appendSanitizedConnectorLog(stateDir, event, fields = {}) {

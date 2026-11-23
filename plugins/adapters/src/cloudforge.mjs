@@ -56,6 +56,16 @@ function sanitizeDescription(raw, fallback) {
   return cleaned.length > 400 ? `${cleaned.slice(0, 399)}…` : cleaned;
 }
 
+function sanitizeSchemaArrayItem(item, depth) {
+  if (depth > 8 || item === null || item === undefined) return null;
+  if (typeof item === 'boolean') return item;
+  if (typeof item === 'number') return Number.isFinite(item) ? item : null;
+  if (typeof item === 'string') return item.replace(UNSAFE_TEXT_RE, '').slice(0, 120);
+  if (Array.isArray(item)) return item.slice(0, 32).map(sub => sanitizeSchemaArrayItem(sub, depth + 1));
+  if (typeof item === 'object') return sanitizeInputSchema(item, depth + 1);
+  return null;
+}
+
 function sanitizeInputSchema(rawSchema, depth = 0) {
   if (depth > 8 || !rawSchema || typeof rawSchema !== 'object' || Array.isArray(rawSchema)) {
     return { type: 'object', properties: {} };
@@ -68,7 +78,7 @@ function sanitizeInputSchema(rawSchema, depth = 0) {
     } else if (typeof v === 'string') {
       clean[k] = v.replace(UNSAFE_TEXT_RE, '').slice(0, 400);
     } else if (Array.isArray(v)) {
-      clean[k] = v.slice(0, 64).map(item => (typeof item === 'string' ? item.replace(UNSAFE_TEXT_RE, '').slice(0, 120) : item));
+      clean[k] = v.slice(0, 64).map(item => sanitizeSchemaArrayItem(item, depth + 1));
     } else if (typeof v === 'object') {
       clean[k] = sanitizeInputSchema(v, depth + 1);
     }
@@ -130,10 +140,11 @@ export function createCloudForgeClient({
   }
 
   async function probeWellKnown({ diagnostic = false, refresh = false, signal = null, timeoutOverrideMs = null } = {}) {
+    const canShareInflight = !diagnostic && !signal && !timeoutOverrideMs;
     if (!diagnostic && !refresh && lastProbe && Date.now() - lastProbeAt < PROBE_CACHE_TTL_MS) {
       return lastProbe;
     }
-    if (!diagnostic && !refresh && inflightProbe) {
+    if (canShareInflight && !refresh && inflightProbe) {
       return inflightProbe;
     }
     const suffix = diagnostic ? '/.well-known/cloudforge?diagnostic=1' : '/.well-known/cloudforge';
@@ -163,9 +174,11 @@ export function createCloudForgeClient({
             accessRuntime: null,
             error: `HTTP ${res.status}`,
           };
-          lastProbe = snapshot;
-          lastProbeAt = Date.now();
-          lastError = snapshot.error;
+          if (!diagnostic) {
+            lastProbe = snapshot;
+            lastProbeAt = Date.now();
+            lastError = snapshot.error;
+          }
           return snapshot;
         }
         const parsed = JSON.parse(res.text);
@@ -192,9 +205,11 @@ export function createCloudForgeClient({
           accessRuntime,
           error: null,
         };
-        lastProbe = snapshot;
-        lastProbeAt = Date.now();
-        lastError = null;
+        if (!diagnostic) {
+          lastProbe = snapshot;
+          lastProbeAt = Date.now();
+          lastError = null;
+        }
         return snapshot;
       } catch (error) {
         const snapshot = {
@@ -207,15 +222,18 @@ export function createCloudForgeClient({
           accessRuntime: null,
           error: error.message || 'CloudForge metadata probe failed.',
         };
-        lastProbe = snapshot;
-        lastProbeAt = Date.now();
-        lastError = snapshot.error;
+        // Never poison the shared cache when a caller-supplied signal aborted this probe.
+        if (!diagnostic && !signal?.aborted) {
+          lastProbe = snapshot;
+          lastProbeAt = Date.now();
+          lastError = snapshot.error;
+        }
         return snapshot;
       } finally {
-        inflightProbe = null;
+        if (inflightProbe === runProbe) inflightProbe = null;
       }
     })();
-    if (!diagnostic) inflightProbe = runProbe;
+    if (canShareInflight) inflightProbe = runProbe;
     return runProbe;
   }
 
@@ -457,13 +475,25 @@ export function createCloudForgeClient({
     if (contentType.includes('text/event-stream')) {
       const frames = parseSseJsonRpcFrames(res.text);
       payload = frames.find(
-        frame => frame && frame.id === id && (Object.hasOwn(frame, 'result') || Object.hasOwn(frame, 'error')),
+        frame => frame && !Array.isArray(frame) && frame.jsonrpc === '2.0' && frame.id === id
+          && (Object.hasOwn(frame, 'result') !== Object.hasOwn(frame, 'error')),
       );
       if (!payload) {
         throw new Error('CloudForge SSE stream returned no matching JSON-RPC response frame.');
       }
     } else {
-      payload = JSON.parse(res.text);
+      const parsed = JSON.parse(res.text);
+      if (
+        !parsed
+        || typeof parsed !== 'object'
+        || Array.isArray(parsed)
+        || parsed.jsonrpc !== '2.0'
+        || parsed.id !== id
+        || (Object.hasOwn(parsed, 'result') === Object.hasOwn(parsed, 'error'))
+      ) {
+        throw new Error('CloudForge MCP returned an invalid or mismatched JSON-RPC response.');
+      }
+      payload = parsed;
     }
     if (payload?.error) {
       const err = new Error(payload.error.message || 'CloudForge MCP returned JSON-RPC error.');

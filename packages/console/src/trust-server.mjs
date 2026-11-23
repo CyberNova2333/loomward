@@ -770,17 +770,16 @@ export async function createTrustOriginServer({
           rotatedTabToken = crypto.randomBytes(32).toString('base64url');
           session.authVersion = updated.authVersion;
           session.sessionPersistence = 'tab';
+          session.tabToken = rotatedTabToken;
+          broker.pruneOtherTrustSessions(session.sid);
+          broker.revokeChildConsoleSessions?.(session.sid);
+          dropStreamsForSid(null);
         } else {
           broker.updateAllSessionsPersistence(updated.authVersion, 'browser');
+          broker.pruneOtherTrustSessions(session.sid);
         }
         appendSanitizedConnectorLog(stateDir, 'webui_auth', { outcome: `session_policy_${targetMode}` });
         const snap = await refreshSnapshot({ force: true, broadcast: targetMode !== 'tab' });
-        broker.pruneOtherTrustSessions(session.sid);
-        if (targetMode === 'tab') {
-          session.tabToken = rotatedTabToken;
-          broker.revokeChildConsoleSessions?.(session.sid);
-          dropStreamsForSid(null);
-        }
         return sendJson(res, 200, {
           ok: true,
           csrfToken: session.csrfToken,

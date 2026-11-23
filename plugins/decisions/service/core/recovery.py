@@ -72,16 +72,34 @@ class RecoveryManager:
         """
         decisions_dir = self.config.decisions_dir
         disk_files: Dict[str, Path] = {}
+        symlink_files: List[str] = []
         if decisions_dir.exists():
             for p in decisions_dir.glob("*.md"):
-                if p.is_file() and not p.name.startswith("."):
+                if p.name.startswith("."):
+                    continue
+                if p.is_symlink():
+                    symlink_files.append(p.stem)
+                    continue
+                if p.is_file():
                     disk_files[p.stem] = p
 
         db_topics = {t["id"]: t for t in self.db.get_all_topics()}
 
         unindexed_markdown: List[str] = []
         missing_markdown: List[str] = []
-        desynced_topics: List[Dict[str, Any]] = []
+        desynced_topics: List[Dict[str, Any]] = [
+            {
+                "id": tid,
+                "title": db_topics[tid]["title"] if tid in db_topics else tid,
+                "disk_version": None,
+                "db_version": db_topics[tid].get("version", 1) if tid in db_topics else None,
+                "disk_rounds": 0,
+                "version_mismatch": True,
+                "content_drift": True,
+                "error": "symlink_rejected",
+            }
+            for tid in symlink_files
+        ]
 
         # 1. 检查磁盘文件在 DB 中的状态与内容保真度
         for tid, file_path in disk_files.items():
@@ -246,8 +264,15 @@ class RecoveryManager:
         name_counts = Counter(p.stem.casefold() for p in md_files)
 
         # 1. 扫描、解析并校验所有文件
+        resolved_decisions_dir = decisions_dir.resolve()
         for p in md_files:
             try:
+                if p.is_symlink():
+                    raise ValueError(f"拒绝读取符号链接文件: {p.name}")
+                try:
+                    p.resolve().relative_to(resolved_decisions_dir)
+                except ValueError as exc:
+                    raise ValueError(f"检测到越界议题文件路径: {p.name}") from exc
                 parsed = self.parser.parse_markdown_file(p)
                 topic_id = parsed.get("id") or p.stem
                 validate_portable_id(topic_id)
@@ -369,7 +394,7 @@ class RecoveryManager:
         for r in topics:
             topic_id = r["id"]
             md_file = self.config.decisions_dir / f"{topic_id}.md"
-            rounds_count = self.parser.count_rounds(md_file)
+            rounds_count = 0 if md_file.is_symlink() else self.parser.count_rounds(md_file)
             meta_list.append({
                 "id": topic_id,
                 "title": r["title"],

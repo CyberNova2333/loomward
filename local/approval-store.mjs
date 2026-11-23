@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // This file is part of AgentDock Bridge and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
 import fs from 'node:fs/promises';
+import { constants } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { digest } from './request-policy.mjs';
@@ -16,11 +17,23 @@ export class ApprovalRecordTooLargeError extends Error {
   }
 }
 export async function readJson(file, maximum = MAX_RECORD_BYTES) {
-  const stat = await fs.lstat(file);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maximum) throw new Error('Invalid local approval record.');
-  const content = await fs.readFile(file, 'utf8');
-  if (Buffer.byteLength(content) > maximum) throw new Error('Approval record is too large.');
-  return JSON.parse(content);
+  const flags = constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0);
+  const handle = await fs.open(file, flags);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > maximum) throw new Error('Invalid local approval record.');
+    const buf = Buffer.allocUnsafe(maximum + 1);
+    let total = 0;
+    while (total < buf.length) {
+      const { bytesRead } = await handle.read(buf, total, buf.length - total, total);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    if (total > maximum) throw new Error('Approval record is too large.');
+    return JSON.parse(buf.subarray(0, total).toString('utf8'));
+  } finally {
+    await handle.close().catch(() => {});
+  }
 }
 export function validRequest(record, expectedId, now) {
   try {

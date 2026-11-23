@@ -114,7 +114,10 @@ class DecisionService:
         known_ids.extend(p.stem for p in self.config.decisions_dir.glob("*.md"))
         if any(other != tid and other.casefold() == tid.casefold() for other in known_ids):
             raise TopicValidationError("Topic ID 与已有议题仅大小写不同，请使用原始 ID")
-        target_file = (self.config.decisions_dir / f"{tid}.md").resolve()
+        raw_target = self.config.decisions_dir / f"{tid}.md"
+        if raw_target.is_symlink():
+            raise TopicValidationError("检测到符号链接议题文件，已拒绝访问")
+        target_file = raw_target.resolve()
         try:
             target_file.relative_to(self.config.decisions_dir.resolve())
         except ValueError:

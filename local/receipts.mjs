@@ -1,11 +1,34 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // This file is part of AgentDock Bridge and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
 import fs from 'node:fs/promises';
+import { constants } from 'node:fs';
 import path from 'node:path';
 import { digest } from './request-policy.mjs';
 
 const KEEP_MS = 24 * 60 * 60 * 1000;
 const MAX_RECEIPTS = 10000;
+const MAX_RECEIPT_BYTES = 512;
+
+async function readReceiptFile(file) {
+  const flags = constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0);
+  const handle = await fs.open(file, flags);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.nlink !== 1) throw new Error('Unexpected receipt entry.');
+    if (stat.size > MAX_RECEIPT_BYTES) throw new Error('Invalid receipt size.');
+    const buf = Buffer.allocUnsafe(MAX_RECEIPT_BYTES + 1);
+    let total = 0;
+    while (total < buf.length) {
+      const { bytesRead } = await handle.read(buf, total, buf.length - total, total);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    if (total > MAX_RECEIPT_BYTES) throw new Error('Invalid receipt size.');
+    return { stat, raw: buf.subarray(0, total).toString('utf8') };
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
 
 /** Persist intent before invoking a tool. A crashed or completed call is never retried with the same ID. */
 export class RequestReceipts {
@@ -32,11 +55,9 @@ export class RequestReceipts {
     for await (const entry of directory) {
       if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/.test(entry.name)) throw new Error('Unexpected receipt entry.');
       const file = path.join(this.directory, entry.name);
-      const stat = await fs.lstat(file);
-      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('Unexpected receipt entry.');
-      if (stat.size > 512) throw new Error('Invalid receipt size.');
+      const { stat, raw } = await readReceiptFile(file);
       let receipt;
-      try { receipt = JSON.parse(await fs.readFile(file, 'utf8')); } catch { /* Partial receipt without valid JSON; kept until KEEP_MS elapses. */ }
+      try { receipt = JSON.parse(raw); } catch { /* Partial receipt without valid JSON; kept until KEEP_MS elapses. */ }
       if (Number.isSafeInteger(receipt?.expiresAt) && receipt.expiresAt < now) await fs.unlink(file);
       else if (!receipt && stat.mtimeMs < now - KEEP_MS) await fs.unlink(file);
       else if (++count > this.maximum) throw new Error('Receipt storage limit reached.');
@@ -49,10 +70,7 @@ export class RequestReceipts {
     await this.ready;
     const file = path.join(this.directory, `${digest(message.id)}.json`);
     try {
-      const stat = await fs.lstat(file);
-      if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 512) return { acquired: false, reason: 'duplicate_or_incomplete' };
-      const raw = await fs.readFile(file, 'utf8');
-      if (Buffer.byteLength(raw) > 512) return { acquired: false, reason: 'duplicate_or_incomplete' };
+      const { raw } = await readReceiptFile(file);
       const existing = JSON.parse(raw);
       return { acquired: false, reason: existing?.digest === digest(message) ? 'already_attempted' : 'request_id_conflict' };
     } catch (error) {
@@ -79,9 +97,8 @@ export class RequestReceipts {
       const bodyHash = digest(message);
       let existing;
       try {
-        const stat = await fs.lstat(file);
-        if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 512) return { acquired: false, reason: 'duplicate_or_incomplete' };
-        existing = JSON.parse(await fs.readFile(file, 'utf8'));
+        const { raw } = await readReceiptFile(file);
+        existing = JSON.parse(raw);
       } catch (error) { if (error.code !== 'ENOENT') return { acquired: false, reason: 'duplicate_or_incomplete' }; }
       if (existing) return { acquired: false, reason: existing.digest === bodyHash ? 'already_attempted' : 'request_id_conflict' };
       if (this.count >= this.maximum) throw new Error('Receipt storage capacity reached.');

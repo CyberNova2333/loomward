@@ -259,17 +259,21 @@ export class BridgeConnector {
         followRedirects: false,
       });
       this.socket = socket;
-      let lastPong = 0;
+      let lastPong = Date.now();
+      let receivedPong = false;
       let beat;
       socket.on('open', () => {
         if (!this.running || this.socket !== socket) { socket.terminate(); return; }
+        lastPong = Date.now();
         this.record('connected', { route: candidate ? 'proxy' : 'direct' });
         this.status(false, { force: true });
-        socket.send('{"type":"ping"}');
+        try { socket.send('{"type":"ping"}'); } catch {}
         beat = setInterval(() => {
           if (Date.now() - lastPong > 65000) return socket.terminate();
-          if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ping' }));
-          this.status(Date.now() - lastPong <= 65000);
+          if (socket.readyState === WebSocket.OPEN) {
+            try { socket.send(JSON.stringify({ type: 'ping' })); } catch {}
+          }
+          this.status(receivedPong && Date.now() - lastPong <= 65000);
         }, 20000);
       });
       socket.on('unexpected-response', (_request, response) => {
@@ -280,7 +284,7 @@ export class BridgeConnector {
         if (!this.running || this.socket !== socket) return;
         let message;
         try { if (isBinary) throw new Error(); message = JSON.parse(data.toString()); if (!message || Array.isArray(message) || typeof message !== 'object') throw new Error(); } catch { socket.close(1003, 'Invalid bridge frame'); return; }
-        if (message.type === 'pong') { this.retries = 0; lastPong = Date.now(); this.status(true); return; }
+        if (message.type === 'pong') { this.retries = 0; receivedPong = true; lastPong = Date.now(); this.status(true); return; }
         if (message.type === 'cancel' && typeof message.id === 'string') { this.inflight.get(message.id)?.controller.abort(); return; }
         if (message.type !== 'request') return;
         const send = body => {

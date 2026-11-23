@@ -526,3 +526,89 @@ test('adapters plugin integrates with LoomWard daemon approval pipeline, dual-or
   assert.equal(serialized.includes(cfToken), false);
   assert.equal(serialized.includes(mbKey), false);
 });
+
+test('R5-H6: adapters reject mismatched JSON-RPC replies, sanitize nested schema arrays, and never cache aborted probes', async t => {
+  let cfProbeCalls = 0;
+  let mbStatusCalls = 0;
+  let returnMismatchedId = false;
+
+  const mockSrv = await listenServer(async (req, res) => {
+    if (req.url === '/.well-known/cloudforge') {
+      cfProbeCalls += 1;
+      const delay = cfProbeCalls === 1 ? 200 : 0;
+      setTimeout(() => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ installationId: 'cf-r5', version: '2.6.0', accessRuntime: { protocol: 1, ready: true } }));
+      }, delay);
+      return;
+    }
+    if (req.url === '/api/auth/status') {
+      mbStatusCalls += 1;
+      const delay = mbStatusCalls === 1 ? 200 : 0;
+      setTimeout(() => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ isSetup: true }));
+      }, delay);
+      return;
+    }
+    if (req.url === '/api/usage/summary') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ totalRequests: 5 }));
+      return;
+    }
+    if (req.url === '/mcp') {
+      const rpc = JSON.parse(await readBody(req));
+      if (returnMismatchedId) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id + 999, result: { tools: [] } }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        jsonrpc: '2.0',
+        id: rpc.id,
+        result: {
+          tools: [{
+            name: 'list_items',
+            description: 'Safe list',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+              anyOf: [JSON.parse('{"type":"string","description":"ok\\u202ebad","__proto__":{"polluted":true}}')],
+            },
+          }],
+        },
+      }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  t.after(() => mockSrv.close());
+
+  const cf = createCloudForgeClient({ origin: mockSrv.origin, allowLoopbackHttp: true });
+  const mb = createModelBridgeClient({ origin: mockSrv.origin, allowLoopbackHttp: true });
+
+  // Aborted caller signal must NOT poison the 5s probe/snapshot cache for subsequent healthy callers.
+  const abortedCtrl = new AbortController();
+  abortedCtrl.abort();
+  const cfAborted = await cf.probeWellKnown({ signal: abortedCtrl.signal });
+  assert.equal(cfAborted.reachable, false);
+  const cfHealthy = await cf.probeWellKnown();
+  assert.equal(cfHealthy.reachable, true);
+
+  const mbAborted = await mb.getSnapshot({ signal: abortedCtrl.signal });
+  assert.equal(mbAborted.status.reachable, false);
+  const mbHealthy = await mb.getSnapshot();
+  assert.equal(mbHealthy.status.reachable, true);
+
+  // Nested schema array objects must strip __proto__ and bidi/control chars.
+  const tools = await cf.listTools();
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0].inputSchema.anyOf[0].description, 'okbad');
+  assert.equal(Object.hasOwn(tools[0].inputSchema.anyOf[0], '__proto__'), false);
+
+  // Mismatched JSON-RPC response ID must be rejected.
+  returnMismatchedId = true;
+  await assert.rejects(() => cf.listTools({ refresh: true }), /invalid or mismatched JSON-RPC/i);
+});

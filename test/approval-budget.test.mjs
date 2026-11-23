@@ -104,3 +104,36 @@ test('LocalApprovals prunes >1024 expired request files cleanly instead of brick
   const fresh = await approvals.authorize(call({ tag: 'after-purge' }), auth);
   assert.equal(fresh.approved, false);
 });
+
+test('canonical digest matches JSON serialization when programmatic callers pass undefined fields, and readJson rejects symlinks', async t => {
+  const directory = await fixture(t);
+  const approvals = new LocalApprovals(directory, origin);
+  const bodyWithUndefined = {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'read_file',
+      arguments: { path: '/workspace/canary.txt', offset: undefined, tags: ['a', undefined, 'b'] },
+    },
+  };
+  const now = Date.now();
+  const validated = validateRequestEnvelope(
+    { type: 'request', id: randomUUID(), issuedAt: now, deadline: now + 100000, authorization: auth, body: bodyWithUndefined },
+    now,
+  );
+  const first = await approvals.authorize(validated.body, validated.authorization);
+  assert.equal(first.approved, false);
+  const pendingFile = path.join(approvals.directory, `${first.id}.request.json`);
+  const pending = await readJson(pendingFile);
+  await approveRequest(approvals.directory, pending);
+  assert.equal((await approvals.authorize(validated.body, validated.authorization)).approved, true);
+
+  if (process.platform !== 'win32') {
+    const targetFile = path.join(directory, 'outside.json');
+    const linkFile = path.join(directory, 'symlink.json');
+    await fs.writeFile(targetFile, JSON.stringify({ secret: true }), { mode: 0o600 });
+    await fs.symlink(targetFile, linkFile);
+    await assert.rejects(readJson(linkFile));
+  }
+});

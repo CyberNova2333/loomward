@@ -214,4 +214,35 @@ test('decisions plugin runs out-of-process Python SQLite ledger, enforces local 
     req.end(payload);
   });
   assert.equal(directStatus, 401);
+
+  // 7. R5-H3: symbolic links planted inside decisions/ must never be read or indexed into SQLite.
+  if (process.platform !== 'win32') {
+    const outsideSecret = path.join(stateDir, 'outside-secret-canary.txt');
+    const symlinkMd = path.join(path.dirname(configPath), 'decisions', 'symlink-leak.md');
+    await fs.writeFile(outsideSecret, '# Secret Canary\nTOP_SECRET_SYMLINK_PAYLOAD_DO_NOT_INDEX\n', { mode: 0o600 });
+    await fs.symlink(outsideSecret, symlinkMd);
+    try {
+      const checkAfterLink = await callApproved('mcp__decisions__check_consistency', {}, 'dec_symlink_check');
+      assert.equal(checkAfterLink.result.structuredContent.consistent, false);
+      assert.equal(JSON.stringify(checkAfterLink).includes('TOP_SECRET_SYMLINK_PAYLOAD'), false);
+
+      const topicGetRes = await new Promise((resolve, reject) => {
+        const target = new URL('/api/topic/symlink-leak', panel.links[0].href);
+        const req = http.get(target, res => {
+          const chunks = [];
+          res.on('data', c => chunks.push(c));
+          res.on('end', () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
+        });
+        req.on('error', reject);
+      });
+      assert.equal(topicGetRes.status, 400);
+      assert.equal(topicGetRes.text.includes('TOP_SECRET_SYMLINK_PAYLOAD'), false);
+
+      const ctxAfterLink = await callApproved('mcp__decisions__export_context', { topic_id: 'symlink-leak' }, 'dec_symlink_ctx');
+      assert.equal(JSON.stringify(ctxAfterLink).includes('TOP_SECRET_SYMLINK_PAYLOAD'), false);
+    } finally {
+      await fs.rm(symlinkMd, { force: true });
+      await fs.rm(outsideSecret, { force: true });
+    }
+  }
 });

@@ -327,3 +327,18 @@ Synced through bd32c2e（含三轮收官代码审查修复工作树改动）
 - 验证范围与边界：本机（Linux x86_64）运行 `pnpm run check`、`pnpm run layering`、`pnpm run test:ci`（176 项测试：160 通过、0 失败、16 按平台/Docker 跳过）、`validate_repo_docs.py`、`pnpm --dir docs-site run docs:build`、`repo_maintenance_guard.py pre-commit` 与 `sync_assets_licenses.py --check --dry-run`。
 
 Synced through 85b97da（含四轮终审代码审查修复工作树改动）
+
+## 2026-11-24（五轮全库代码审查）：审批摘要规范化、状态文件无 TOCTOU 句柄读取、决策台账软链阻断与外部适配加固
+
+- 触发：用户要求「再进行一次代码审查」；覆盖 `local/`、`cloud/`、`container/` 与 `packages/*`、`plugins/*` 跨层接缝，修复 `6 High` 真实缺陷；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 审批与状态文件边界（`R5-H1`、`R5-H2`、[local/request-policy.mjs](../local/request-policy.mjs)、[local/approval-store.mjs](../local/approval-store.mjs)、[local/receipts.mjs](../local/receipts.mjs)、[packages/console/src/http-security.mjs](../packages/console/src/http-security.mjs)、[local/webui.mjs](../local/webui.mjs)）：
+  - `canonical()` 对齐 `JSON.stringify` 语义（省略对象 `undefined` 键并将数组 `undefined` 项规范为 `null`），消除编程式调用传入可选 `undefined` 字段后经落盘再读取导致 `validRequest` 摘要失配、永久无法批准的缺陷。
+  - `approval-store.mjs` `readJson()`、`receipts.mjs` `readReceiptFile()` 及 `http-security.mjs` / `webui.mjs` `readTrustedJsonFile()` 全面改用 `O_RDONLY | O_NOFOLLOW`（异步路径附 `O_NONBLOCK`）+ `fstat` 校验与按句柄有界读取，封堵 `lstat -> readFile` 软链切换 TOCTOU、硬链别名及超限读取。
+- 决策台账软链防穿越、生产连接器心跳、控制台会话同步吊销与适配器契约（`R5-H3`–`R5-H6`、[plugins/decisions/service/core/markdown_parser.py](../plugins/decisions/service/core/markdown_parser.py)、[plugins/decisions/service/core/recovery.py](../plugins/decisions/service/core/recovery.py)、[plugins/decisions/service/core/decision_service.py](../plugins/decisions/service/core/decision_service.py)、[local/connector.mjs](../local/connector.mjs)、[packages/console/src/trust-server.mjs](../packages/console/src/trust-server.mjs)、[plugins/adapters/src/cloudforge.mjs](../plugins/adapters/src/cloudforge.mjs)、[plugins/adapters/src/modelbridge.mjs](../plugins/adapters/src/modelbridge.mjs)）：
+  - `markdown_parser.py`、`recovery.py` 与 `decision_service.py` 拒绝跟随 `decisions/*.md` 符号链接并限制单文件读取上限（`10 MiB` + `O_NOFOLLOW`），防止符号链接把宿主文件索引进 SQLite 台账与导出上下文。
+  - `local/connector.mjs` 同步补齐 `lastPong = Date.now()` 与 `receivedPong` 心跳宽限逻辑，消除首次 `pong` 略超 20s 时误断连问题。
+  - `trust-server.mjs` 在切换 `sessionPersistence: 'tab'` 落盘后立即同步轮换 `tabToken` 并吊销其它 Trust 会话、子 Console 会话与 SSE 流，不再等待异步快照刷新完成。
+  - `cloudforge.mjs` 与 `modelbridge.mjs` 补齐数组内嵌套 Schema 对象递归清洗、非 SSE JSON-RPC `id`/`jsonrpc` 强校验、并发 `diagnostic` 探针句柄归属隔离及中止信号免污染 5s 缓存。
+- 验证范围与边界：本机（Linux x86_64）运行 `pnpm run check`、`pnpm run layering`、`pnpm run test:ci`（178 项测试：162 通过、0 失败、16 按平台/Docker 跳过）、Python 字节码检查、`validate_repo_docs.py`、`pnpm --dir docs-site run docs:build`、`repo_maintenance_guard.py pre-commit` 与 `sync_assets_licenses.py --check --dry-run`。
+
+Synced through aeffb89（含五轮全库代码审查修复工作树改动）
