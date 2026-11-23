@@ -23,10 +23,10 @@ export default defineConfig({
     root: {
       label: '简体中文',
       lang: 'zh-CN',
-      title: 'AgentDock Bridge 文档',
-      description: 'Cloudflare Workers OAuth 2.1 + Windows 受保护连接器 + 只读 Linux Docker 沙箱的个人远程 MCP 桥接网关。',
+      title: 'LoomWard · 织盾 文档',
+      description: '基于 Cordis 4 微内核的综合本地 Agent 安全管控平台，融合 Cloudflare Workers OAuth 2.1 中继、跨平台本机审批、只读 Linux Docker 沙箱、防泄漏护栏与决策台账。',
       themeConfig: {
-        siteTitle: 'AgentDock Bridge',
+        siteTitle: 'LoomWard · 织盾',
         nav: [
           { text: '首页', link: '/' },
           { text: '起步与部署', link: '/docs/' },
@@ -70,10 +70,10 @@ export default defineConfig({
       label: 'English',
       lang: 'en-US',
       link: '/en/',
-      title: 'AgentDock Bridge Documentation',
-      description: 'Personal authenticated remote MCP bridge combining Cloudflare Workers OAuth 2.1, hardened Windows host approval, and read-only Linux Docker sandboxes.',
+      title: 'LoomWard Documentation',
+      description: 'Cordis 4 local Agent security & control plane unifying Cloudflare Workers OAuth 2.1 relay, cross-platform local approval, read-only Linux Docker sandboxes, anti-leak guardrails, and a decision ledger.',
       themeConfig: {
-        siteTitle: 'AgentDock Bridge',
+        siteTitle: 'LoomWard',
         nav: [
           { text: 'Home', link: '/en/' },
           { text: 'Getting Started', link: '/en/docs/' },

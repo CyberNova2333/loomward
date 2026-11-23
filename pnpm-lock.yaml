@@ -189,6 +189,65 @@ importers:
         specifier: 4.154.0
         version: 4.154.0
 
+  packages/cloud-relay:
+    dependencies:
+      '@loomward/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/console:
+    dependencies:
+      '@loomward/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/host:
+    dependencies:
+      '@loomward/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/kernel:
+    dependencies:
+      '@loomward/shared':
+        specifier: workspace:*
+        version: link:../shared
+      cordis:
+        specifier: 4.0.0-rc.11
+        version: 4.0.0-rc.11
+
+  packages/sandbox:
+    dependencies:
+      '@loomward/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/shared: {}
+
+  plugins/adapters:
+    dependencies:
+      '@loomward/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+
+  plugins/antileak:
+    dependencies:
+      '@loomward/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+
+  plugins/decisions:
+    dependencies:
+      '@loomward/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+
+  plugins/mcp-hub:
+    dependencies:
+      '@loomward/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+
 packages:
 
   '@cloudflare/kv-asset-handler@0.5.0':
@@ -665,6 +724,9 @@ packages:
   '@speed-highlight/core@1.2.24':
     resolution: {integrity: sha512-qeW2e1l78afw8VhRPfPQ1Gjj+KU5XFQ/OFV5ti6eTa9bruO7mJyZtA4vw0ofqmA3tKCkROE9xLk3VZoeRc98nw==}
 
+  '@standard-schema/spec@1.1.0':
+    resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
+
   agent-base@9.0.0:
     resolution: {integrity: sha512-TQf59BsZnytt8GdJKLPfUZ54g/iaUL2OWDSFCCvMOhsHduDQxO8xC4PNeyIkVcA5KwL2phPSv0douC0fgWzmnA==}
     engines: {node: '>= 20'}
@@ -675,6 +737,21 @@ packages:
   cookie@1.1.1:
     resolution: {integrity: sha512-ei8Aos7ja0weRpFzJnEA9UHJ/7XQmqglbRwnf2ATjcB9Wq874VKH9kfjjirM6UhU2/E5fFYadylyhFldcqSidQ==}
     engines: {node: '>=18'}
+
+  cordis@4.0.0-rc.11:
+    resolution: {integrity: sha512-03PHbcYJzp84XRKnW7jd17g26bPvG5UvSyhyjxGIu/1VQs3bweNMACo3t1W0ikzoZ7q+wytHyk8jJsaIQOkPkA==}
+    hasBin: true
+    peerDependencies:
+      '@cordisjs/plugin-include': ^1.1.1
+      '@cordisjs/plugin-loader': ^1.0.0-rc.8
+    peerDependenciesMeta:
+      '@cordisjs/plugin-include':
+        optional: true
+      '@cordisjs/plugin-loader':
+        optional: true
+
+  cosmokit@1.8.1:
+    resolution: {integrity: sha512-PDBv4l90xZKrUsZ0vtoycgZpO/j4iFsqJXrAxsyBDsnQRI7ZMJXIjgDJsKNjd5L8jnVnnlrDCdhkFbTncgCVjQ==}
 
   debug@4.4.3:
     resolution: {integrity: sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==}
@@ -1097,11 +1174,20 @@ snapshots:
 
   '@speed-highlight/core@1.2.24': {}
 
+  '@standard-schema/spec@1.1.0': {}
+
   agent-base@9.0.0: {}
 
   blake3-wasm@2.1.5: {}
 
   cookie@1.1.1: {}
+
+  cordis@4.0.0-rc.11:
+    dependencies:
+      '@standard-schema/spec': 1.1.0
+      cosmokit: 1.8.1
+
+  cosmokit@1.8.1: {}
 
   debug@4.4.3(supports-color@10.2.2):
     dependencies:

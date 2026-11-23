@@ -1,13 +1,13 @@
-# AgentDock Bridge 人员署名、AI 工具、代码与资产许可综合清单
+# LoomWard · 织盾（原 AgentDock Bridge）人员署名、AI 工具、代码与资产许可综合清单
 
 **标准文件名：** `ASSETS_LICENSES.md`  
 **配套模板版本：** v1.6.7-r4  
-**项目名称：** `AgentDock Bridge`  
+**项目名称：** `LoomWard · 织盾`（前称 `AgentDock Bridge`）  
 **开发、维护或联合推出主体：** `CyberNova`  
 **上游仓库地址：** `https://github.com/CyberNova2333/agentdock-worker-remote`  
-**所对应的仓库版本及发行物：** `main` 分支（基于提交 `6d63386` 及本次 v1.6.7-r4 合规更新工作树）  
-**记录覆盖范围及尚未核实部分：** 已核实本仓库全部受 Git 跟踪的 Cloudflare Worker / 本地桥接 / 容器运行器源码（`cloud/`、`local/`、`container/`、`shared/`、`scripts/`）与 `docs-site/` 自托管字体及脚本，以及 `package.json` 依赖树（均为 MIT / Apache-2.0 / ISC / BSD 等宽松许可，无 copyleft 冲突）。未核实范围：用户运行环境自备的 Docker 引擎、Cloudflare Workers 运行时及 `docs-site` 开发期工具链。  
-**清单最后更新日期：** `2026-11-19`  
+**所对应的仓库版本及发行物：** `main` 分支（更名为 LoomWard 并建立 Cordis 4 monorepo 骨架）  
+**记录覆盖范围及尚未核实部分：** 已核实本仓库全部受 Git 跟踪的 monorepo 工作区源码（`packages/*`、`plugins/*`）、既有 Cloudflare Worker / 本地桥接 / 容器运行器源码（`cloud/`、`local/`、`container/`、`scripts/`）与 `docs-site/` 自托管字体及脚本，以及 `package.json` 依赖树（含 `cordis` 等均为 MIT / Apache-2.0 / ISC / BSD 等宽松许可，无 copyleft 冲突）。未核实范围：用户运行环境自备的 Docker 引擎、Cloudflare Workers 运行时及 `docs-site` 开发期工具链。  
+**清单最后更新日期：** `2026-11-23`  
 **配套附加条款：** [中文完整文本](./LICENSE-ADDITIONAL_TERMS-zh-CN.md)；[英文参考译文](./LICENSE-ADDITIONAL_TERMS-en.md)；[工程实施指南](./IMPLEMENTATION-GUIDE.zh-en.md)
 
 > **填写状态：本清单已依据本仓库实际文件、Git 提交历史与各上游/字体原始许可文本核实填写。** 四个分区的排列与配套附加条款 v1.6.7-r4 第 3.2、7.1 款一致；本清单如实记录已核实范围与未覆盖范围，不扩大或缩减任何上游有效许可证授予的权利，也不以列名方式向第三方材料追加限制。
@@ -104,7 +104,7 @@
 
 ### 4.3 项目标识与既有许可边界
 
-本仓库目前不含独立二进制图形 Logo 文件，项目名称 `AgentDock Bridge` 依附加条款第五条与第八条规范真实来源陈述与反冒充边界，不主张注册商标权。
+本仓库目前不含独立二进制图形 Logo 文件，项目名称 `LoomWard · 织盾`（前称 `AgentDock Bridge`）依附加条款第五条与第八条规范真实来源陈述与反冒充边界，不主张注册商标权。
 
 引用附加条款第八条（含第 8.2 款）时，完整保留资产独立性、实际权利人授权、可替换性、许可相容性及不追溯收回既有版本有效授权（第 7.8、9.3 款）等全部前提条件，不单独摘录或扩大限制。
 

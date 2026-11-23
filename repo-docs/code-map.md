@@ -4,11 +4,30 @@
 
 | 路径 | 职责 | 关键代码 | 与主流程的关系 |
 | --- | --- | --- | --- |
+| `packages/` | LoomWard monorepo 核心包（共享契约、Cordis 4 微内核、中继、沙箱、宿主与双源控制台） | `packages/shared/`、`packages/kernel/`、`packages/{cloud-relay,sandbox,host,console}/` | 提供零宿主 RPM/插槽原语、Cordis 启动校验、`PolicyTree` 与机械分层守卫（`pnpm run layering`），渐进承接原根目录模块 |
+| `plugins/` | 严格进程外边界（`out-of-process`）的平台扩展插件 | `plugins/{antileak,decisions,mcp-hub,adapters}/` | 分别承接 `archive/claude-code-antileak-hooks`、`archive/agent-decisions-dashboard`、第三方 MCP 聚合与独立项目（CloudForge / ModelBridge）适配 |
 | `cloud/` | 云端 OAuth 2.1、中继与活性判定 | `index.mjs`、`relay.mjs`、`auth-store.mjs` | 承载公网接入、代次授权与 WebSocket 信封派发，详见[云端网关与中继模块](modules/cloud-oauth-and-relay.md) |
 | `local/` | 连接器、本机批准、防重放、宿主安全与沙箱文件策略 | `connector.mjs`、`approvals.mjs`、`sandbox.mjs`、`host-safety.mjs`、`host-secrets.mjs` | 把关二审、一次批准、账本登记、跨平台凭据与容器策略，详见[本地批准与防重放模块](modules/local-approval-and-replay.md)及[容器沙箱与文件策略模块](modules/container-sandbox-and-file-policy.md) |
 | `container/` | 容器镜像与内部命令/文件执行入口 | `runner.mjs`、`file-worker.mjs`、`Dockerfile` | 降权为非特权开发用户（默认 `1000` 或按 Linux 宿主 UID/GID 映射）隔离执行命令或禁用命令的文件工具 |
 | `scripts/` | 跨平台受保护安装、凭据托管、生命周期守护与公网验收 | `host-cli.mjs`、`Install-Hardened.ps1`、`Secrets.ps1`、`Manage.ps1`、`acceptance-v2.mjs` | 管理私有状态目录、固定 Node 校验、轮换和显式验收 |
 | `test/` | 本地批准、文件安全、POSIX/Windows 宿主安全与沙箱故障回归 | `connector.test.mjs`、`posix-host.test.mjs`、`sandbox-recovery.test.mjs`、`file-hardening.test.mjs` | 覆盖连接器、预算、Unicode、POSIX/Windows 权限与清理故障逻辑 |
+
+## `packages/`
+
+| 重要代码 | 功能 | 关键符号 | 调用方 / 使用方 |
+| --- | --- | --- | --- |
+| [共享契约与原语](../packages/shared/src/index.mjs) | 零宿主、零运行时依赖的契约校验、RPM JCS+SHA-256、60 秒 `BootRun` 回滚与插槽原语 | `validateContractDecl` / `createFrozenRpm` / `withDeadline` / `ImplSlot` / `MechanismSlot` | `@loomward/kernel` 与全部根包/插件；[共享原语测试](../packages/shared/test/shared.test.mjs) |
+| [Cordis 微内核](../packages/kernel/src/index.mjs) | 基于 Cordis 4 的 RPM 校验启动、标准插槽注册与 `PolicyTree` 策略树求值 | `createLoomWardKernel` / `PLATFORM_SLOTS` / `evaluatePermissionTree` | 启动入口；[内核测试](../packages/kernel/test/kernel.test.mjs)与[机械分层守卫](../packages/kernel/test/layering.test.mjs) |
+| [核心业务根包骨架](../packages/host/src/contract.mjs) | 声明 `cloud-relay`、`sandbox`、`host`、`console` 四个根插件契约，渐进承接原根目录模块 | `packages/{cloud-relay,sandbox,host,console}/src/contract.mjs` | RPM 装配与分层守卫 |
+
+## `plugins/`
+
+| 重要代码 | 功能 | 关键符号 | 调用方 / 使用方 |
+| --- | --- | --- | --- |
+| [防泄漏护栏插件](../plugins/antileak/src/contract.mjs) | 声明进程外 R1–R7 防泄漏策略与 `tool:invoke@1` 拦截契约（来源 `archive/claude-code-antileak-hooks`） | `createAntileakAdapterDescriptor` | 平台 `policy:rule@1` 与 `tool:invoke@1` 插槽 |
+| [人机决策台账插件](../plugins/decisions/src/contract.mjs) | 声明进程外决策台账与上下文导出契约（来源 `archive/agent-decisions-dashboard`） | `createDecisionsAdapterDescriptor` | 平台 `tool:provider@1` 与 `console:panel@1` 插槽 |
+| [第三方 MCP 聚合插件](../plugins/mcp-hub/src/contract.mjs) | 声明进程外 `stdio` / `Streamable HTTP` 聚合器契约（承接 `local/mcp-*.mjs`） | `createMcpHubDescriptor` | 平台 `tool:provider@1` 与 `console:panel@1` 插槽 |
+| [外部独立项目适配](../plugins/adapters/src/contract.mjs) | 声明对接独立仓库 `CloudForge` 与 `ModelBridge` 的受控接口契约 | `STANDALONE_INTEGRATIONS` | 平台 `tool:provider@1` 与 `console:panel@1` 插槽 |
 
 ## `cloud/`
 

@@ -1,16 +1,21 @@
 {
-  "name": "agentdock-bridge",
-  "version": "2.0.0",
+  "name": "loomward",
+  "version": "3.0.0-alpha.0",
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
-  "description": "Personal authenticated MCP connection from ChatGPT to a Windows, macOS, or Linux workspace",
+  "description": "LoomWard · 织盾 — Cordis-based local Agent control plane combining OAuth 2.1 remote relay, exact local approval, Linux Docker sandbox, anti-leak guardrails, decision ledger, and MCP hub",
   "engines": {
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs cloud/*.test.mjs",
-    "check": "node --check cloud/index.mjs && node --check cloud/auth-store.mjs && node --check cloud/auth-queue.mjs && node --check cloud/auth-transactions.mjs && node --check cloud/liveness.mjs && node --check cloud/relay.mjs && node --check cloud/security.mjs && node --check local/approval-cli.mjs && node --check local/approval-store.mjs && node --check local/approvals.mjs && node --check local/connector.mjs && node --check local/capabilities.mjs && node --check local/docker-query.mjs && node --check local/file-safety.mjs && node --check local/mcp-registry.mjs && node --check local/mcp-client.mjs && node --check local/receipts.mjs && node --check local/request-policy.mjs && node --check local/sandbox.mjs && node --check local/tools.mjs && node --check local/webauthn.mjs && node --check local/webui-auth.mjs && node --check local/webui.mjs && node --check local/webui-assets.mjs && node --check local/windows-acl.mjs && node --check local/host-safety.mjs && node --check local/host-secrets.mjs && node --check local/node-toolchains.mjs && node --check scripts/host-cli.mjs && node --check container/runner.mjs && node --check container/file-worker.mjs",
+    "test": "pnpm run test:bridge && pnpm run test:workspace",
+    "test:bridge": "node --test test/*.test.mjs cloud/*.test.mjs",
+    "test:workspace": "node --test packages/*/test/*.test.mjs",
+    "test:ci": "node --test --test-concurrency=1 test/*.test.mjs cloud/*.test.mjs packages/*/test/*.test.mjs",
+    "layering": "node --test packages/kernel/test/layering.test.mjs",
+    "check:workspace": "pnpm -r --if-present run check",
+    "check": "pnpm run check:workspace && node --check cloud/index.mjs && node --check cloud/auth-store.mjs && node --check cloud/auth-queue.mjs && node --check cloud/auth-transactions.mjs && node --check cloud/liveness.mjs && node --check cloud/relay.mjs && node --check cloud/security.mjs && node --check local/approval-cli.mjs && node --check local/approval-store.mjs && node --check local/approvals.mjs && node --check local/connector.mjs && node --check local/capabilities.mjs && node --check local/docker-query.mjs && node --check local/file-safety.mjs && node --check local/mcp-registry.mjs && node --check local/mcp-client.mjs && node --check local/receipts.mjs && node --check local/request-policy.mjs && node --check local/sandbox.mjs && node --check local/tools.mjs && node --check local/webauthn.mjs && node --check local/webui-auth.mjs && node --check local/webui.mjs && node --check local/webui-assets.mjs && node --check local/windows-acl.mjs && node --check local/host-safety.mjs && node --check local/host-secrets.mjs && node --check local/node-toolchains.mjs && node --check scripts/host-cli.mjs && node --check container/runner.mjs && node --check container/file-worker.mjs",
     "dev": "wrangler dev --ip 127.0.0.1 --port 8797",
     "deploy": "wrangler deploy",
     "start": "node local/connector.mjs"

@@ -1,0 +1,18 @@
+{
+  "name": "@loomward/plugin-mcp-hub",
+  "version": "3.0.0-alpha.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "description": "Out-of-process stdio and Streamable HTTP third-party MCP aggregator with SSRF and environment isolation for LoomWard",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./contract": "./src/contract.mjs"
+  },
+  "dependencies": {
+    "@loomward/shared": "workspace:*"
+  },
+  "scripts": {
+    "check": "node --check src/index.mjs && node --check src/contract.mjs"
+  }
+}

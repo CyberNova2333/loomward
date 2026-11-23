@@ -1,8 +1,9 @@
-<h1 align="center">AgentDock Bridge</h1>
+<h1 align="center">LoomWard · 织盾</h1>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg" alt="License: AGPL-3.0-only" /></a>
   <a href="package.json"><img src="https://img.shields.io/badge/Node-%3E%3D24-339933.svg" alt="Node &gt;= 24" /></a>
+  <a href="pnpm-workspace.yaml"><img src="https://img.shields.io/badge/Architecture-Cordis%204%20Monorepo-7c3aed.svg" alt="Architecture" /></a>
   <a href="wrangler.jsonc.example"><img src="https://img.shields.io/badge/Runtime-CF%20Worker%20%2B%20Win%20%2F%20macOS%20%2F%20Linux%20%2B%20Docker-0969da.svg" alt="Platform" /></a>
 </p>
 
@@ -14,7 +15,29 @@
   <a href="https://agentdock-worker-remote.cbnv.me/">在线文档站</a> · <a href="docs-site/index.md">文档站源码</a> · <a href="repo-docs/README.md">源码阅读指南</a>
 </p>
 
-面向单人开发者的远程 MCP 桥接网关：通过 Cloudflare Workers 完成 OAuth 2.1 + PKCE 鉴权与请求中继，在 Windows、macOS 或 Linux 受保护连接器上等待人工逐参数批准后，交由只读 Linux Docker 沙箱执行工作区文件与命令操作。
+面向单人开发者的综合本地 Agent 安全管控平台（前身为 `AgentDock Bridge`，现已升级为 **LoomWard · 织盾** `pnpm workspace` monorepo）：以 **Cordis 4** 微内核、冻结根插件清单（RPM）与无状态 `PolicyTree` 为治理底座，结合 Cloudflare Workers OAuth 2.1 远程中继、跨平台（Windows / macOS / Linux）本机逐参人工审批、只读 Linux Docker 沙箱、第三方 MCP 聚合接入、R1–R7 防泄漏护栏与人机协作决策台账。
+
+## Monorepo 结构与归档分支
+
+仓库已按领域拆分为 `packages/*`（核心根包）与 `plugins/*`（严格进程外边界扩展插件），既有 v2 桥接运行时（`cloud/`、`local/`、`container/`、`scripts/`、`test/`）在迁移期间完整保留并持续回归验证：
+
+| 工作区包 / 分支 | 包名 / 角色 | 边界与来源说明 |
+| --- | --- | --- |
+| `packages/shared` | `@loomward/shared` | 零宿主、零运行时依赖的共享契约、RPM 摘要、60 秒 `BootRun` 回滚与插槽原语 |
+| `packages/kernel` | `@loomward/kernel` | Cordis 4 微内核启动校验、`PolicyTree` 策略树与静态机械分层守卫（`pnpm run layering`） |
+| `packages/cloud-relay` | `@loomward/cloud-relay` | Cloudflare Workers OAuth 2.1 + `BridgeRelay` 边缘中继根包（承接 `cloud/`） |
+| `packages/sandbox` | `@loomward/sandbox` | 只读 Linux Docker 沙箱、`file-worker` 与 Windows ACL 守卫根包（承接 `container/` 与沙箱模块） |
+| `packages/host` | `@loomward/host` | 跨平台受保护宿主运行时、凭据保管库、审批状态机与 24h 防重放账本（承接 `local/` 与 `scripts/`） |
+| `packages/console` | `@loomward/console` | 双源回环控制台（Console Origin + 独立 Trust Origin PassKey/审批页，承接 `local/webui*.mjs`） |
+| `plugins/antileak` | `@loomward/plugin-antileak` | 进程外 R1–R7 防泄漏护栏插件（整合自存档分支 `archive/claude-code-antileak-hooks`） |
+| `plugins/decisions` | `@loomward/plugin-decisions` | 进程外人机决策台账与上下文导出插件（整合自存档分支 `archive/agent-decisions-dashboard`） |
+| `plugins/mcp-hub` | `@loomward/plugin-mcp-hub` | 进程外 `stdio` / `Streamable HTTP` 第三方 MCP 聚合器（承接 `local/mcp-*.mjs`） |
+| `plugins/adapters` | `@loomward/plugin-adapters` | 外部独立项目接口适配（对接独立维护的 `CloudForge` 与 `ModelBridge`，不动其源码本体） |
+
+历史单仓完整提交树已双端保留在以下存档分支，随时可检出对照：
+- `archive/agentdock-worker-remote`（本仓库原 v2 桥接完整快照）
+- `archive/agent-decisions-dashboard`（原人机决策台账完整快照）
+- `archive/claude-code-antileak-hooks`（原双层防泄漏护栏完整快照）
 
 ## 核心能力与执行链路
 

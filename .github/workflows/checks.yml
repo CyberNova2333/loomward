@@ -37,7 +37,7 @@ jobs:
       - name: 语法检查
         run: pnpm run check
       - name: 运行测试套件
-        run: node --test --test-concurrency=1 test/*.test.mjs cloud/*.test.mjs
+        run: pnpm run test:ci
       - name: 检查维护守卫与同步脚本
         run: python3 tools/repo_maintenance_guard.py status && python3 .github/scripts/sync_assets_licenses.py --check --dry-run
       - name: 验证文档站依赖并构建

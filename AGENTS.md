@@ -1,22 +1,25 @@
-# AgentDock Bridge 工作约定
+# LoomWard · 织盾 工作约定
+
+> 本仓库原名 `AgentDock Bridge`（完整历史已双端归档于 `archive/agentdock-worker-remote`），已整合原 `agent-decisions-dashboard`（`archive/agent-decisions-dashboard`）与 `claude-code-antileak-hooks`（`archive/claude-code-antileak-hooks`），在 `main` 上以 **LoomWard · 织盾**（`pnpm workspace` monorepo + Cordis 4 微内核）演进；`CloudForge` 与 `ModelBridge` 保持独立仓库维护，仅经 `@loomward/plugin-adapters` 对接。
 
 ## 命令与环境
 
-- Node.js 24+；开发检查 `pnpm run check`，回归 `pnpm test`，依赖按锁文件 `pnpm install --frozen-lockfile`。
+- Node.js 24+；开发检查 `pnpm run check`（覆盖 `packages/*`、`plugins/*` 与既有桥接模块），回归 `pnpm test`（或定向 `pnpm run test:workspace` / `pnpm run test:bridge` / `pnpm run layering`），依赖按锁文件 `pnpm install --frozen-lockfile`。
 - Docker 集成需要显式启用测试开关和指定测试镜像；历史 `audit/`、`SECURITY-REVIEW.md` 不是当前通过标准。
 - 连接器从受保护安装副本运行；源码和 Docker 镜像更新不自动生效。操作前核对本机状态，安装、轮换、启动/停止与部署均需对应任务授权。
 
-## 安全边界
+## 安全与分层边界
 
+- **微内核与分层红线**：`@loomward/shared` 禁止依赖 `node:*`、`cordis`、宿主或业务插件；仅 `@loomward/kernel` 可直接导入 `cordis` 运行时；禁止 `packages/*` 与 `plugins/*` 间跨包相对导入或跨插件静态互导（由 `pnpm run layering` 机械守卫）。
+- **进程外扩展边界**：Node.js 同进程不构成安全隔离；第三方与跨语言扩展（含 `plugins/*` 全部扩展插件）必须声明 `executionBoundary: "out-of-process"`，经子进程 / MCP / 回环协议与内核交互，不得访问主进程内存凭据。
 - 保留精确本机批准、权限、时限、请求账本和单次消费顺序；读文件同样需要批准。不要以云端身份校验代替本机批准。
 - 只使用受保护目录的可信管理入口；不要从工程目录替换运行副本、清理状态或更改已固定镜像。
 - 不挂载宿主用户目录、Docker socket、网关状态或 CLI 凭据；宿主固定 Node、摘要与 ACL 复核规则必须保留。
 - 文件操作不联网，命令默认无网络；显式出站联网属于批准对象。保留非特权容器、只读镜像、临时 HOME、资源/并发限制和无入站端口配置。
 - 保留链接拒绝、Unicode 校验、自定义 ACL 拒绝和预期内容摘要校验。已批准 Bash 仍有工程读写权；项目代码与输出都可能携带提示注入。
 - 超时、断线或取消可能已有部分效果，不自动重试写入；无法确认容器清理时停止接纳后续执行并检查 Docker。
-- 不输出或提交连接密码、令牌、状态文件、文件正文和命令输出日志；保留 DPAPI 与私有状态 ACL。云端中继可见输入输出，不能宣传为端到端加密或客户端签名系统。
+- 不输出或提交连接密码、令牌、状态文件、文件正文和命令输出日志；保留 DPAPI / Keychain / Secret Service 与私有状态 ACL。云端中继可见输入输出，不能宣传为端到端加密或客户端签名系统。
 - 保留现有业务和 UI 工作，不从文档整理扩大到安全实现、服务管理或历史重写。
-
 
 ## Repo docs
 
@@ -25,18 +28,17 @@ This repo's `repo-docs/` guide is reader-facing Chinese documentation. When upda
 Read current source, scripts, configuration and tests before relying on guide claims. Repo questions, behavior-changing edits, user uncertainty, stable knowledge clarified in conversation and knowledge about to enter memory trigger the `repo-docs` Sync gate before the final response (or the same manual check if the skill is unavailable).
 Choose `none`, `answer-only`, `foreground patch`, or `background sync`. Patch the smallest owning page before answering when stale content would mislead; delegate broader non-critical sync only with a real tracked handoff. Record meaningful guide changes and validation limits in `repo-docs/change-log.md`, with `Synced through <sha>` when HEAD exists. Do not log every answer.
 
-
 ## 贡献与维护入口
 
 提交采用 Conventional Commits：`type(scope): 描述`；项目已有的中文描述、署名、签名和文档交代要求继续生效。保留用户未提交内容，只暂存本次明确审查的路径。
 贡献与安全约定分别见 [贡献说明](CONTRIBUTING.md) 和 [安全说明](SECURITY.md)；相关维护由统一任务协调，避免并行覆盖。
 维护守卫安装命令为 `python tools/repo_maintenance_guard.py install`。仅在明确安装任务下执行；文档修改不自动安装或更改 Git 配置。保留已有安全钩子，安装与验证结果按实际执行另行记录。
 
-文档站统一使用 VitePress 默认主题；样式与动效遵循原生主题，构建输出独立于业务界面。
+文档站统一使用 VitePress 默认主题；样式与动效遵循原生主题，构建输出独立于业务界面（不纳入根 `pnpm-workspace.yaml`）。
 
 ## 项目简介与主页元数据 (meta.json)
 
-- **项目名称**：AgentDock Bridge · 云端 AI 会话与本机环境的 MCP 桥接工具
-- **项目简介**：把云端 AI 会话连接到本机 Windows 开发目录的个人 MCP 桥接小工具，通过 Cloudflare Worker 做 OAuth 鉴权，并要求本机逐条审批后在 Linux 容器中执行命令。
-- **公开状态**：已公开 (public) · 分类：`ai-agent` · 主语言：`TypeScript`
+- **项目名称**：LoomWard · 织盾 · 基于 Cordis 内核的综合本地 Agent 安全管控平台
+- **项目简介**：基于 Cordis 4 微内核与 pnpm monorepo 构建的个人综合 Agent 管控平台，融合 Cloudflare OAuth 2.1 远程中继、本机逐参人工审批、只读 Linux Docker 沙箱、第三方 MCP 聚合、防泄漏护栏与人机决策台账。
+- **公开状态**：已公开 (public) · 分类：`ai-agent` · 主语言：`JavaScript`
 - **元数据说明**：仓库根目录的 [`meta.json`](meta.json) 供个人主页（[`cybernova-homepage`](https://github.com/CyberNova2333/cybernova-homepage)）读取项目简介、功能说明、技术栈和常用命令。修改项目主要功能、技术栈或文档站链接时请同步更新 `meta.json`。

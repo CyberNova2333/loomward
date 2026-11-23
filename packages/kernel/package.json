@@ -1,0 +1,21 @@
+{
+  "name": "@loomward/kernel",
+  "version": "3.0.0-alpha.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "description": "Cordis 4 microkernel, RPM boot verifier, PolicyTree guard, and layering boundary for LoomWard",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./boot": "./src/boot.mjs",
+    "./policy-tree": "./src/policy-tree.mjs"
+  },
+  "dependencies": {
+    "@loomward/shared": "workspace:*",
+    "cordis": "4.0.0-rc.11"
+  },
+  "scripts": {
+    "check": "node --check src/index.mjs && node --check src/boot.mjs && node --check src/policy-tree.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

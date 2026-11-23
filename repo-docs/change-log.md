@@ -198,3 +198,13 @@ Synced through 4bff65b（含本轮三路代码审查全量修复与验证）
   - 验证范围与边界：本机（Linux x86_64）在最终改动后完成非破坏性受保护副本重装（保留既有用户 PassKey）、`pnpm run check`（全量 31 个 `.mjs` 模块）、含显式 `AGENTDOCK_DOCKER_TEST=1` 与本机已固定测试镜像的 `pnpm test`、无头 Chromium 四分页 E2E、`validate_repo_docs.py`、`docs-site` 构建、`repo_maintenance_guard.py status` 与 `sync_assets_licenses.py --check --dry-run`；Windows DPAPI/NTFS ACL、`cmd.exe` 包装与 macOS Keychain 仍需在对应实机验证。
 
 Synced through 4bff65b（含二轮对抗性审查全量修复与验证）
+
+## 2026-11-23：归档收尾、项目更名为 LoomWard · 织盾并落地 Cordis 4 Monorepo 骨架
+
+- 触发：用户授权收尾提交工作树改动并双端归档旧仓库，随后更名并切入以 Cordis 4 为微内核的 `pnpm workspace` monorepo 架构；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 归档与收尾：本仓库原工作树按云端、本地运行时与文档/CI 拆分为 3 条签名提交（`4eed460`、`8c66c3c`、`f74b7f5`）并双端推送至 `main` 与 `archive/agentdock-worker-remote`；原 `agent-decisions-dashboard` 与 `claude-code-antileak-hooks` 双端追平并分别归档至本仓库 `archive/agent-decisions-dashboard`、`archive/claude-code-antileak-hooks` 后移除对应独立本地目录；`modelbridge` 与 `cloudforge` 保持独立仓库维护（其中 `modelbridge` 已顺带收尾提交并双端同步至 `54e941a`）。
+- 更名与 Monorepo 骨架：项目正式更名为 **LoomWard · 织盾**（`loomward` / `@loomward/*`），配置根目录 `pnpm-workspace.yaml`（`packages/*`、`plugins/*`，继续与独立 `docs-site/` 隔离）；落地零宿主原语包 [packages/shared](../packages/shared/README.md)（契约校验、RPM JCS+SHA-256、60 秒 `BootRun` 逆序回滚、`ImplSlot`/`MechanismSlot`）与 Cordis 4 微内核包 [packages/kernel](../packages/kernel/README.md)（`createLoomWardKernel`、`PolicyTree` 与静态机械分层守卫 `layering.test.mjs`），建立核心根包骨架 `packages/{cloud-relay,sandbox,host,console}` 与声明 `executionBoundary: "out-of-process"` 的扩展插件骨架 `plugins/{antileak,decisions,mcp-hub,adapters}`；既有 `cloud/`、`local/`、`container/`、`scripts/` 与 `test/` 完整保留并在渐进迁移期间持续受回归保护。
+- 同步入口：更新 `package.json`、`meta.json`、`AGENTS.md`、`README.md`、`README.en.md`、`docs-site/.vitepress/config.mts`、`repo-docs/README.md`、`repo-docs/code-map.md` 与 CI 测试入口（`pnpm run test:ci`）。
+- 验证边界：将执行 `pnpm install` 锁定 `cordis@4.0.0-rc.11` 与 workspace 链接，验证 `pnpm run check`、`pnpm run test:ci`（既有桥接套件 + 新增 `packages/shared` 与 `packages/kernel` 单元与分层守卫测试）、`validate_repo_docs.py`、`docs-site` 构建、`repo_maintenance_guard.py status` 与 `sync_assets_licenses.py --check --dry-run`。远端仓库改名与本地目录路径重命名留待用户下一步显式执行。
+
+Synced through f74b7f56d1fd88a97df322c8cd4df95f9aaff279（本节对应其后的 LoomWard 更名与 monorepo 骨架工作树）

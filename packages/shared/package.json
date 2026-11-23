@@ -1,0 +1,19 @@
+{
+  "name": "@loomward/shared",
+  "version": "3.0.0-alpha.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "description": "Zero-host shared contracts, RPM hashing, boot deadline rollback, and slot primitives for LoomWard",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./contracts": "./src/contracts.mjs",
+    "./rpm": "./src/rpm.mjs",
+    "./deadline": "./src/deadline.mjs",
+    "./slots": "./src/slots.mjs"
+  },
+  "scripts": {
+    "check": "node --check src/index.mjs && node --check src/contracts.mjs && node --check src/rpm.mjs && node --check src/deadline.mjs && node --check src/slots.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

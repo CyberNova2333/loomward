@@ -22,7 +22,7 @@
     corepack enable
     pnpm install --frozen-lockfile
     pnpm run check
-    node --test --test-concurrency=1 test/*.test.mjs cloud/*.test.mjs
+    pnpm run test:ci
 
 .build-docs: &build-docs
   name: 构建并核对文档站

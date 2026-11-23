@@ -1,8 +1,9 @@
-<h1 align="center">AgentDock Bridge</h1>
+<h1 align="center">LoomWard</h1>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg" alt="License: AGPL-3.0-only" /></a>
   <a href="package.json"><img src="https://img.shields.io/badge/Node-%3E%3D24-339933.svg" alt="Node &gt;= 24" /></a>
+  <a href="pnpm-workspace.yaml"><img src="https://img.shields.io/badge/Architecture-Cordis%204%20Monorepo-7c3aed.svg" alt="Architecture" /></a>
   <a href="wrangler.jsonc.example"><img src="https://img.shields.io/badge/Runtime-CF%20Worker%20%2B%20Win%20%2F%20macOS%20%2F%20Linux%20%2B%20Docker-0969da.svg" alt="Runtime" /></a>
 </p>
 
@@ -14,7 +15,15 @@
   <a href="https://agentdock-worker-remote.cbnv.me/en/">Live Documentation</a> · <a href="docs-site/en/index.md">Docs Source</a> · <a href="repo-docs/README.md">Source Walkthrough (ZH)</a>
 </p>
 
-Personal authenticated MCP remote bridge: routes remote MCP clients (such as ChatGPT) through Cloudflare Workers OAuth 2.1 + PKCE, enforces exact per-request manual approval on a hardened Windows, macOS, or Linux host connector, and executes workspace file and command tools inside a read-only Linux Docker container.
+Personal local Agent security and control plane (evolved from `AgentDock Bridge` into the **LoomWard** `pnpm workspace` monorepo): built on a **Cordis 4** microkernel with frozen Root Plugin Manifests (RPM) and stateless `PolicyTree` guards, unifying Cloudflare Workers OAuth 2.1 remote MCP relay, exact local approval on Windows/macOS/Linux, disposable read-only Linux Docker sandboxes, third-party MCP aggregation, R1–R7 anti-leak guardrails, and a Human-Agent decision ledger.
+
+## Monorepo Layout & Archive Branches
+
+Workspace packages live under `packages/*` (core root packages) and `plugins/*` (strictly `out-of-process` extensions), while the existing v2 bridge runtime (`cloud/`, `local/`, `container/`, `scripts/`, `test/`) stays active and regression-tested during incremental migration:
+
+- **Core Packages (`packages/*`)**: `@loomward/shared`, `@loomward/kernel` (Cordis 4 + RPM + PolicyTree + `pnpm run layering`), `@loomward/cloud-relay`, `@loomward/sandbox`, `@loomward/host`, `@loomward/console` (Console Origin + isolated Trust Origin).
+- **Platform Plugins (`plugins/*`)**: `@loomward/plugin-antileak` (`archive/claude-code-antileak-hooks`), `@loomward/plugin-decisions` (`archive/agent-decisions-dashboard`), `@loomward/plugin-mcp-hub`, and `@loomward/plugin-adapters` (interfaces for standalone **CloudForge** and **ModelBridge** repos without altering their repositories).
+- **Archive Branches**: `archive/agentdock-worker-remote`, `archive/agent-decisions-dashboard`, and `archive/claude-code-antileak-hooks` preserve the complete signed pre-consolidation histories.
 
 ## Core Capabilities & Flow
 

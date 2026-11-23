@@ -1,11 +1,11 @@
 {
   "$schema": "https://raw.githubusercontent.com/CyberNova2333/cybernova-homepage/main/public/schemas/repo-meta.v1.json",
   "schemaVersion": 1,
-  "slug": "agentdock-worker-remote",
-  "name": "AgentDock Bridge",
+  "slug": "loomward",
+  "name": "LoomWard · 织盾",
   "title": {
-    "zh": "AgentDock Bridge · 云端 AI 会话与本机环境的 MCP 桥接工具",
-    "en": "AgentDock Bridge · Remote MCP Bridge with Local Approval"
+    "zh": "LoomWard · 织盾 · 基于 Cordis 内核的综合本地 Agent 安全管控平台",
+    "en": "LoomWard · Cordis-Based Local Agent Security & Control Plane"
   },
   "visibility": "public",
   "status": "active",
@@ -16,36 +16,39 @@
   "homepage": "https://agentdock-worker-remote.cbnv.me",
   "docsUrl": "https://agentdock-worker-remote.cbnv.me/docs/",
   "license": "AGPL-3.0-only",
-  "primaryLanguage": "TypeScript",
+  "primaryLanguage": "JavaScript",
   "techStack": [
+    "Cordis",
+    "Node.js 24",
     "Cloudflare Workers",
     "Durable Objects",
     "MCP",
     "Docker",
-    "PowerShell",
-    "DPAPI",
-    "TypeScript"
+    "WebAuthn",
+    "PowerShell"
   ],
   "tags": [
+    "agent-control-plane",
+    "cordis",
     "mcp-gateway",
-    "remote-workspace",
     "docker-sandbox",
+    "anti-leak",
     "cloudflare-workers"
   ],
   "summary": {
-    "zh": "把云端 AI 会话连接到本机 Windows、macOS 或 Linux 开发目录的个人 MCP 桥接小工具，通过 Cloudflare Worker 做 OAuth 鉴权，并要求本机逐条审批后在 Linux 容器中执行命令。",
-    "en": "Personal MCP bridge connecting cloud AI sessions to local Windows, macOS, or Linux folders via Cloudflare Worker OAuth, local per-request approval, and Linux Docker containers."
+    "zh": "基于 Cordis 4 微内核与 pnpm monorepo 构建的个人综合 Agent 管控平台，融合 Cloudflare OAuth 2.1 远程中继、本机逐参人工审批、只读 Linux Docker 沙箱、第三方 MCP 聚合、防泄漏护栏与人机决策台账。",
+    "en": "Cordis 4 monorepo local Agent control plane unifying Cloudflare OAuth 2.1 remote MCP relay, exact local approval, read-only Linux Docker sandboxes, third-party MCP aggregation, anti-leak guardrails, and a decision ledger."
   },
   "highlights": {
     "zh": [
-      "文件读写与命令执行均须逐次批准，Linux 和 macOS 支持在本机 WebUI 中核对完整请求、切换工具权限",
-      "命令在非特权、只读根文件系统的 Linux Docker 容器内运行，不挂载宿主敏感目录与 Docker Socket",
-      "按宿主平台使用 Windows DPAPI、macOS Keychain 或 Linux Secret Service/0600 私有存储保护凭据，并校验路径安全与符号链接"
+      "以 Cordis 4 + 冻结根插件清单（RPM）+ PolicyTree 为安全内核，机械守卫包间分层，第三方与跨语言扩展严格运行在进程外边界",
+      "完整保留单次精确审批、24 小时防重放账本、只读 Linux Docker 容器沙箱及 Windows/macOS/Linux 受保护宿主运行时与回环 PassKey 控制台",
+      "采用 monorepo 架构整合远程桥接、R1–R7 防泄漏护栏与人机决策台账，并为 CloudForge 与 ModelBridge 预留独立外部适配接口"
     ],
     "en": [
-      "Requires exact local approval for file and shell requests, with request review and per-tool controls in the local Linux and macOS WebUI",
-      "Runs commands inside non-privileged, read-only Linux Docker containers without mounting host sensitive paths",
-      "Protects local credentials via Windows DPAPI, macOS Keychain, or Linux Secret Service/0600 private storage and checks for symlink or path traversal"
+      "Powered by a Cordis 4 microkernel with frozen Root Plugin Manifests (RPM), PolicyTree guards, mechanical layering checks, and strict out-of-process extension boundaries",
+      "Preserves exact per-request local approval, 24h replay ledgers, disposable read-only Linux Docker sandboxes, cross-platform credential vaults, and PassKey-authenticated loopback WebUI",
+      "Consolidates remote bridge, R1–R7 anti-leak guardrails, and decision ledger in a pnpm monorepo while keeping CloudForge and ModelBridge standalone via adapter interfaces"
     ]
   },
   "quickStart": [
@@ -54,15 +57,15 @@
     "pnpm test"
   ],
   "roadmap": {
-    "stage": "日常维护",
-    "stageEn": "Maintained",
+    "stage": "架构重构",
+    "stageEn": "Re-architecting",
     "milestone": {
-      "zh": "已完成 Worker 鉴权、本机审批脚本与容器隔离执行流程。",
-      "en": "Worker OAuth, local approval connector, and container execution are complete."
+      "zh": "已完成旧项目双端归档（archive/*）、更名为 LoomWard · 织盾，并落地 pnpm workspace monorepo 与 Cordis 4 微内核骨架。",
+      "en": "Archived predecessor repos into archive/* branches, renamed to LoomWard, and established the pnpm workspace monorepo and Cordis 4 microkernel skeleton."
     }
   },
   "additionalTermsConsent": {
     "CyberNova": true
   },
-  "updatedAt": "2026-11-21"
+  "updatedAt": "2026-11-23"
 }
