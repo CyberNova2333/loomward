@@ -27,10 +27,25 @@ export async function startLoomWardDaemon({
   enableMcpHub = true,
   mcpHub = null,
   mcpHubBlockedOrigins = [],
+  consoleConfig = null,
   timeoutMs,
 } = {}) {
   const resolvedRoot = path.resolve(rootDir);
   const frozenRpm = rpm ?? (await buildWorkspaceRpm(resolvedRoot)).rpm;
+
+  let kernelControl = null;
+  const effectiveConsoleConfig = consoleConfig
+    ? {
+        stateDir,
+        runtimeRoot: resolvedRoot,
+        getKernelSummary: () => ({
+          roots: kernelControl ? kernelControl.roots() : [],
+          units: kernelControl ? kernelControl.units() : [],
+          pendingTrustDecisions: [],
+        }),
+        ...consoleConfig,
+      }
+    : {};
 
   const roots = await loadWorkspaceRootRefs(resolvedRoot, {
     configs: {
@@ -53,7 +68,7 @@ export async function startLoomWardDaemon({
         status,
       },
       'cloud-relay': {},
-      console: {},
+      console: effectiveConsoleConfig,
     },
   });
 
@@ -62,6 +77,7 @@ export async function startLoomWardDaemon({
     roots,
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
   });
+  kernelControl = control;
 
   if (enableMcpHub && (mcpHub || stateDir)) {
     const contractPath = path.join(resolvedRoot, 'plugins/mcp-hub/src/contract.mjs');

@@ -12,6 +12,7 @@ import {
   REJECT_CODES,
   SlotError,
   VAULT_SLOT,
+  buildContentInspectRequest,
   buildPermissionSubject,
   canonicalJson,
   computeManifestHash,
@@ -21,8 +22,11 @@ import {
   isSafeUnicodeString,
   mechanismActionKind,
   sanitizeAuditMetadata,
+  sanitizeConsolePanelSnapshot,
   serviceInvokeActionKind,
   sha256Tagged,
+  validateConsolePanelDecl,
+  validateContentInspectVerdict,
   validateContractDecl,
   withDeadline,
 } from '../src/index.mjs';
@@ -205,4 +209,64 @@ test('ImplSlot and MechanismSlot enforce authorization, report release, and trac
   unhookReplace();
   assert.equal(mech.hasReplace(), false);
   assert.ok(events.includes('rel:hook:tool:invoke@1'));
+});
+
+test('panel-schema and content-guard contracts validate declarative panels and input/output moderation verdicts', () => {
+  const decl = validateConsolePanelDecl({
+    id: 'llm-moderation',
+    title: 'LLM 内容审核引擎',
+    subtitle: '独立进程外内容风控与合规审核',
+    category: 'moderation',
+    order: 20,
+    executionBoundary: 'out-of-process',
+  });
+  assert.equal(decl.readOnly, true);
+  assert.equal(decl.category, 'moderation');
+
+  const snap = sanitizeConsolePanelSnapshot(decl, {
+    status: 'ok',
+    summary: [{ label: '已审核', value: '128', tone: 'ok' }],
+    table: { columns: ['时间', '裁决'], rows: [['12:00', 'allow']] },
+    links: [
+      { label: 'Safe Docs', href: 'https://example.test/docs' },
+      { label: 'XSS Attempt', href: 'javascript:alert(1)' },
+    ],
+  });
+  assert.equal(snap.links.length, 1);
+  assert.equal(snap.links[0].href, 'https://example.test/docs');
+
+  const req = buildContentInspectRequest({
+    stage: 'input',
+    requestId: 'req-1',
+    toolName: 'write_file',
+    providerName: 'sandbox-docker',
+    payload: { path: 'notes.md', content: 'hello' },
+  });
+  assert.equal(req.protocolVersion, 1);
+
+  const escalated = validateContentInspectVerdict({
+    protocolVersion: 1,
+    decision: 'escalate',
+    categories: ['policy.review'],
+    score: 0.72,
+    ruleId: 'MOD-01',
+    reason: 'Needs human review',
+  }, { stage: 'input' });
+  assert.equal(escalated.decision, 'escalate');
+
+  // Input stage forbids silent redaction; output stage allows redaction.
+  assert.throws(() => validateContentInspectVerdict({
+    protocolVersion: 1,
+    decision: 'redact',
+    categories: ['pii'],
+    redactedPayload: '[redacted]',
+  }, { stage: 'input' }), /cannot silently rewrite/);
+
+  const redacted = validateContentInspectVerdict({
+    protocolVersion: 1,
+    decision: 'redact',
+    categories: ['pii'],
+    redactedPayload: '[redacted]',
+  }, { stage: 'output' });
+  assert.equal(redacted.redactedPayload, '[redacted]');
 });

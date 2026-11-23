@@ -222,3 +222,17 @@ Synced through f74b7f56d1fd88a97df322c8cd4df95f9aaff279（本节对应其后的 
 - 验证范围与边界：本机（Linux x86_64）在最终改动后执行 `pnpm install --frozen-lockfile`、`pnpm run check`、`pnpm run layering`、`pnpm run test:ci`（覆盖既有桥接回归 + `@loomward/{shared,kernel,host}` 单元与集成测试 + `posix-host` monorepo 安装验证）、`validate_repo_docs.py`、`docs-site` 构建、`repo_maintenance_guard.py status` 与 `sync_assets_licenses.py --check --dry-run`；不涉及修改本机运行中的 `~/.agentdock-bridge` 生产副本、公网部署或 Windows/macOS 实机验证。
 
 Synced through aa016c0（含 Phase 1 工作树改动）
+
+## 2026-11-23（Phase 2）：`@loomward/console` 双源物理隔离控制台、控制通道与低耦合扩展契约
+
+- 触发：落地 Phase 2（双源回环控制台 + 模块化离线前端构建 + 实时内核控制通道），并同步为后续可独立剥离交付的外部 LLM 内容审核插件预留零耦合声明式面板与输入/输出审查契约；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 低耦合共享契约（[packages/shared](../packages/shared/src/index.mjs)、[packages/host/src/pipeline.mjs](../packages/host/src/pipeline.mjs)、[local/approvals.mjs](../local/approvals.mjs)）：
+  - 新增 `panel-schema.mjs`（`CONSOLE_PANEL_SCHEMA_VERSION`、`validateConsolePanelDecl`、`sanitizeConsolePanelSnapshot`），以纯 JSON 声明式结构表达指标卡片、表格、提示与安全链接（过滤 `javascript:` 等危险协议，零任意 HTML/JS 注入），让任何外部插件无需修改 `@loomward/console` 即可自动渲染只读面板。
+  - 新增 `content-guard.mjs`（`CONTENT_INSPECT_PROTOCOL_VERSION`、`buildContentInspectRequest`、`validateContentInspectVerdict`），定义独立的 `input`/`output` 内容审查协议（`allow | redact | escalate | block`，输入阶段禁止静默改写）；`ToolDispatchPipeline` 与 `LocalApprovals` 同步支持前置钩子 `forceApproval: true`（在内容审核判定 `escalate` 时对原本免批工具也强制进入人工审批）及后置钩子输出脱敏。
+- 双源回环控制台与离线前端（[packages/console](../packages/console/src/index.mjs)）：
+  - 物理拆分 **Trust Origin（Ring 2，默认 `127.0.0.1:18798`）** 与 **Console Origin（Ring 3，默认 `127.0.0.1:18797`）**：各自独立 Cookie（`loomward_trust_sid` / `loomward_console_sid`）、独立 `Origin`/`Host`/`Sec-Fetch-Site`/`X-LoomWard-CSRF`/`X-LoomWard-Tab-Auth` 校验与 `CORP`/`COOP` 隔离；Trust Origin 拒绝 `/api/panels`（`403 CONSOLE_ORIGIN_ONLY`），Console Origin 拒绝全部写操作/认证/审批端点（`403 TRUST_ORIGIN_REQUIRED`）。
+  - 落地 `session-broker.mjs`（Trust Origin 签发单次 60 秒只读移交票据，Console Origin 经 `#ticket` 片段立即擦除并同源兑换，Trust 登出或改密实时级联吊销关联 Console 会话与 SSE 流）与 `control-channel.mjs`（进程内总线 + POSIX 私有 `0600` `control.sock` 仅元数据实时推送，消除常规文件轮询）。
+  - 拆分前端至模块化源码 `packages/console/web/{shared,trust,console}`，经 `esbuild` 离线零 CDN 构建至 `packages/console/dist/{trust,console}.{js,css}`，接入 Cordis 4 `console` 根插件与 `startLoomWardDaemon`。
+- 验证范围与边界：本机（Linux x86_64）运行 `pnpm run build:console`、`pnpm install --frozen-lockfile`、`pnpm run check`、`pnpm run layering`、`pnpm run test:ci`（覆盖既有 158 项回归 + 新增 `panel-schema`/`content-guard` 单测与 `dual-origin-console.test.mjs` 跨源隔离、ES256 PassKey、两步审批、`control.sock` 实时推送及模拟独立 LLM 内容审核插件联调）、`validate_repo_docs.py`、`docs-site` 构建、`repo_maintenance_guard.py status` 与 `sync_assets_licenses.py --check --dry-run`。既有 `local/webui*.mjs` 兼容保留，未改动本机 `~/.agentdock-bridge` 运行副本。
+
+Synced through 32ab5c1（含 Phase 2 工作树改动）

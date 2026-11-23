@@ -11,10 +11,12 @@
     "./rpm": "./src/rpm.mjs",
     "./deadline": "./src/deadline.mjs",
     "./slots": "./src/slots.mjs",
-    "./guard-types": "./src/guard-types.mjs"
+    "./guard-types": "./src/guard-types.mjs",
+    "./panel-schema": "./src/panel-schema.mjs",
+    "./content-guard": "./src/content-guard.mjs"
   },
   "scripts": {
-    "check": "node --check src/index.mjs && node --check src/contracts.mjs && node --check src/rpm.mjs && node --check src/deadline.mjs && node --check src/slots.mjs && node --check src/guard-types.mjs",
+    "check": "node --check src/index.mjs && node --check src/contracts.mjs && node --check src/rpm.mjs && node --check src/deadline.mjs && node --check src/slots.mjs && node --check src/guard-types.mjs && node --check src/panel-schema.mjs && node --check src/content-guard.mjs",
     "test": "node --test test/*.test.mjs"
   }
 }

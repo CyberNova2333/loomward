@@ -322,7 +322,8 @@ export function createToolDispatchPipeline({
 
         controller.signal.throwIfAborted();
 
-        if (persistent) {
+        const needsApproval = persistent || current?.forceApproval === true;
+        if (needsApproval) {
           const channel = resolveApprovalChannel();
           if (!channel || typeof channel.authorize !== 'function') {
             throw new Error('Local approval channel is unavailable.');
@@ -330,6 +331,7 @@ export function createToolDispatchPipeline({
           // Approval is strictly verified and unlinked BEFORE claiming the 24h receipt or running the tool.
           const approval = await channel.authorize(authorized.body, authorized.authorization, {
             signal: controller.signal,
+            force: current?.forceApproval === true,
           });
           if (!approval.approved) {
             const approveCommand = process.platform === 'win32' ? 'Approve.cmd' : 'approve';
@@ -349,13 +351,15 @@ export function createToolDispatchPipeline({
             ));
           }
           controller.signal.throwIfAborted();
-          const claim = await effectiveReceipts.claim(message);
-          if (!claim.acquired) {
-            throw new ControlReplySignal(makeRpcError(
-              authorized.body.id,
-              'This request ID was already attempted; its result is not replayed.',
-              { reason: claim.reason },
-            ));
+          if (persistent) {
+            const claim = await effectiveReceipts.claim(message);
+            if (!claim.acquired) {
+              throw new ControlReplySignal(makeRpcError(
+                authorized.body.id,
+                'This request ID was already attempted; its result is not replayed.',
+                { reason: claim.reason },
+              ));
+            }
           }
         }
 

@@ -21,8 +21,8 @@ export class LocalApprovals {
       if ((await fs.lstat(this.directory)).isSymbolicLink()) throw new Error('Approval directory must not be a link.');
     });
   }
-  authorize(body, authorization, { signal } = {}) {
-    if (!requiresApproval(body)) return Promise.resolve({ approved: true });
+  authorize(body, authorization, { signal, force = false } = {}) {
+    if (!force && !requiresApproval(body)) return Promise.resolve({ approved: true });
     const action = this.queue.then(async () => {
       await this.ready;
       signal?.throwIfAborted();
