@@ -612,3 +612,22 @@ test('R5-H6: adapters reject mismatched JSON-RPC replies, sanitize nested schema
   returnMismatchedId = true;
   await assert.rejects(() => cf.listTools({ refresh: true }), /invalid or mismatched JSON-RPC/i);
 });
+
+test('Round 7 adapter network hardening: trailing-dot FQDN blockedOrigins and single-timeout pinned DNS lookup', async () => {
+  const { fetchBounded } = await import('../src/network.mjs');
+  // Trailing dot cannot bypass blockedOrigins:
+  assert.throws(
+    () => assertSafeIntegrationOrigin('https://bridge.example.test.', { blockedOrigins: ['https://bridge.example.test'] }),
+    /blockedOrigins/i,
+  );
+  // Stalled DNS lookup respects fetchBounded timeoutMs instead of hanging past the budget!
+  const startedAt = Date.now();
+  await assert.rejects(
+    () => fetchBounded('https://never-resolves.example.test/ping', {
+      timeoutMs: 80,
+      dnsLookup: () => new Promise(() => {}),
+    }),
+    err => err.code === 'UPSTREAM_TIMEOUT',
+  );
+  assert.ok(Date.now() - startedAt < 2000);
+});

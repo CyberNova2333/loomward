@@ -8,8 +8,10 @@ foreach($moduleName in @('Microsoft.PowerShell.Management','Microsoft.PowerShell
 }
 
 function Assert-PlainLocalPath([string]$LiteralPath) {
-  if(-not [IO.Path]::IsPathRooted($LiteralPath) -or $LiteralPath.StartsWith('\\')){throw 'A local absolute path is required.'}
-  $resolved=[IO.Path]::GetFullPath($LiteralPath).TrimEnd('\')
+  if([string]::IsNullOrWhiteSpace($LiteralPath) -or $LiteralPath -notmatch '^[A-Za-z]:[\\/]' -or $LiteralPath.StartsWith('\\')){throw 'A local absolute path is required.'}
+  $resolved=[IO.Path]::GetFullPath($LiteralPath)
+  if($resolved.Length -gt 3){$resolved=$resolved.TrimEnd('\')}
+  if($resolved.StartsWith('\\') -or $resolved -notmatch '^[A-Za-z]:\\'){throw 'A local absolute path is required.'}
   $cursor=$resolved
   while($cursor){
     $item=Get-Item -LiteralPath $cursor -Force -ErrorAction Stop

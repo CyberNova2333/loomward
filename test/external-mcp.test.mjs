@@ -1307,4 +1307,33 @@ rl.on('line', line => {
   assert.ok(tempCwdUsed && tempCwdUsed.includes('agentdock-mcp-'));
   await hub.close();
   await assert.rejects(fs.access(tempCwdUsed), { code: 'ENOENT' });
+
+  // R7-C1/C5: Percent-encoded query secrets & bare query tokens never leak; saveMcpProbeResultSync invalidates liveToolsByServer.
+  const pctSecretUrl = 'https://func.example.test/api/mcp?code=abc%2Fdef%2B123%3D%3D';
+  const pctRedacted = redactSecretsFromText(`HTTP 401 ${pctSecretUrl}`, { url: pctSecretUrl });
+  assert.equal(pctRedacted.includes('abc%2Fdef'), false);
+  const bareSecretUrl = 'https://mcp.example.test/sse?sk_live_supersecret999';
+  const bareDisplay = redactUrlForDisplay(bareSecretUrl);
+  assert.equal(bareDisplay.includes('sk_live_supersecret999'), false);
+  assert.equal(redactSecretsFromText(`Err ${bareSecretUrl}`, { url: bareSecretUrl }).includes('sk_live_supersecret999'), false);
+
+  saveMcpProbeResultSync(stateDir, 'slow_sf', {
+    ok: true,
+    latencyMs: 5,
+    tools: [{ name: 'slow_echo', description: 'echo', inputSchema: { type: 'object', properties: {} } }],
+  }, { workspaceRoots: [workspace] });
+  const refreshHub = createExternalMcpHub({ stateDir, workspaceRoots: [workspace], auditFile: path.join(stateDir, 'audit.jsonl') });
+  const liveRes = await refreshHub.callTool('mcp__slow_sf__slow_echo', {});
+  assert.notEqual(liveRes.isError, true);
+  assert.equal(refreshHub.getConfiguredToolScopes().has('mcp__slow_sf__slow_echo_v2'), false);
+  saveMcpProbeResultSync(stateDir, 'slow_sf', {
+    ok: true,
+    latencyMs: 4,
+    tools: [
+      { name: 'slow_echo', description: 'echo', inputSchema: { type: 'object', properties: {} } },
+      { name: 'slow_echo_v2', description: 'echo v2', inputSchema: { type: 'object', properties: {} } },
+    ],
+  }, { workspaceRoots: [workspace] });
+  assert.equal(refreshHub.getConfiguredToolScopes().has('mcp__slow_sf__slow_echo_v2'), true);
+  await refreshHub.close();
 });

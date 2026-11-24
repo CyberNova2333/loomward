@@ -42,6 +42,11 @@ POLICY_PATH = (
     or os.environ.get('GUARD_POLICY')
     or ('/root/.claude/policy/policy.json' if os.path.exists('/root/.claude/policy/policy.json') else os.path.join(_ENGINE_DIR, 'policy.json'))
 )
+def norm_fp(s):
+    s = (s or '').strip()
+    return s.split(':', 1)[1] if s.upper().startswith('SHA256:') else s
+
+
 _pfd = None
 try:
     _pflags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
@@ -54,6 +59,22 @@ try:
     with os.fdopen(_pfd, 'r', encoding='utf-8') as _pf:
         _pfd = None
         POLICY = json.load(_pf)
+    FORBIDDEN = re.compile('|'.join(POLICY['forbidden_patterns']), re.I)
+    SECRETS = [re.compile(p) for p in POLICY['secret_regexes']]
+    FINGER = norm_fp(POLICY['agent_signing_fingerprint'])
+    BRANCH_PREFIXES = [p.casefold() for p in POLICY['agent_branch_prefixes']]
+    SIGN_HELP = POLICY.get('signing_instructions', '请生成独立的 ed25519 SSH Signing Key 并把公钥发给维护者。')
+    PROVIDER_EMAILS = [e.casefold() for e in POLICY['agent_provider_emails']]
+    CACHE = os.environ.get('LOOMWARD_ANTILEAK_CACHE') or POLICY['private_cache']
+    REFRESH = (
+        os.environ.get('LOOMWARD_ANTILEAK_REFRESH')
+        or (os.path.join(_ENGINE_DIR, 'refresh-private.py') if os.environ.get('LOOMWARD_ANTILEAK_POLICY') else POLICY.get('refresh_script', os.path.join(_ENGINE_DIR, 'refresh-private.py')))
+    )
+    RESOLVE = (
+        os.environ.get('LOOMWARD_ANTILEAK_RESOLVE')
+        or (os.path.join(_ENGINE_DIR, 'resolve-private.py') if os.environ.get('LOOMWARD_ANTILEAK_POLICY') else POLICY.get('resolve_script', os.path.join(os.path.dirname(REFRESH), 'resolve-private.py')))
+    )
+    RESOLVE_BUDGET = int(POLICY.get('resolve_budget', 30))
 except Exception:
     if _pfd is not None:
         try:
@@ -62,30 +83,7 @@ except Exception:
             pass
     print('error')
     print('  ✘ 无法读取策略文件(fail-closed)', file=sys.stderr)
-    sys.exit(0)
-
-
-def norm_fp(s):
-    s = (s or '').strip()
-    return s.split(':', 1)[1] if s.upper().startswith('SHA256:') else s
-
-
-FORBIDDEN = re.compile('|'.join(POLICY['forbidden_patterns']), re.I)
-SECRETS = [re.compile(p) for p in POLICY['secret_regexes']]
-FINGER = norm_fp(POLICY['agent_signing_fingerprint'])
-BRANCH_PREFIXES = [p.casefold() for p in POLICY['agent_branch_prefixes']]
-SIGN_HELP = POLICY.get('signing_instructions', '请生成独立的 ed25519 SSH Signing Key 并把公钥发给维护者。')
-PROVIDER_EMAILS = [e.casefold() for e in POLICY['agent_provider_emails']]
-CACHE = os.environ.get('LOOMWARD_ANTILEAK_CACHE') or POLICY['private_cache']
-REFRESH = (
-    os.environ.get('LOOMWARD_ANTILEAK_REFRESH')
-    or (os.path.join(_ENGINE_DIR, 'refresh-private.py') if os.environ.get('LOOMWARD_ANTILEAK_POLICY') else POLICY.get('refresh_script', os.path.join(_ENGINE_DIR, 'refresh-private.py')))
-)
-RESOLVE = (
-    os.environ.get('LOOMWARD_ANTILEAK_RESOLVE')
-    or (os.path.join(_ENGINE_DIR, 'resolve-private.py') if os.environ.get('LOOMWARD_ANTILEAK_POLICY') else POLICY.get('resolve_script', os.path.join(os.path.dirname(REFRESH), 'resolve-private.py')))
-)
-RESOLVE_BUDGET = int(POLICY.get('resolve_budget', 30))
+    sys.exit(1)
 NET = False                                               # 由 main 按 --net 设置
 ZERO = '0' * 40
 # xxx-xxx 裸名候选: 由 - 连接的 ≥2 段，段内字母数字(可含 .)，前后不是路径/单词字符(排除 --flag、a/b-c 路径段)
@@ -112,17 +110,31 @@ def mask(s):
 RX_B64CHAR = re.compile(r'[A-Za-z0-9+/]')
 
 
-def in_b64_run(text, a, b, minlen=24):
-    """命中 [a,b) 是否整个落在一段 ≥minlen、无分隔符、大小写与数字混杂的 base64 形态串里
-    (JSON 里内嵌的图片/音频等编码数据)。真实型号名不会有 24 个以上连续字母数字且没有任何分隔符。
+def in_b64_run(text, a, b, minlen=40):
+    """命中 [a,b) 是否整个落在一段 ≥minlen、纯 base64 字符组成、大小写与数字混杂的编码串里
+    (JSON 里内嵌的图片/音频等编码数据)。仅当命中子串自身全由 base64 字符构成，且不含 URL/路径特征时才豁免；
     只用于 R2 型号/会话规则；R7 凭据规则不走这里(凭据本身就是这种形态)。"""
+    matched = text[a:b]
+    if not matched or not re.fullmatch(r'[A-Za-z0-9+/]+', matched):
+        return False
     i, j = a, b
     while i > 0 and RX_B64CHAR.match(text[i - 1]):
         i -= 1
     while j < len(text) and RX_B64CHAR.match(text[j]):
         j += 1
     run = text[i:j]
-    return len(run) >= minlen and bool(re.search(r'[a-z]', run) and re.search(r'[A-Z]', run) and re.search(r'[0-9]', run))
+    if len(run) < minlen:
+        return False
+    if '//' in run or text[max(0, i - 3):i].endswith('://'):
+        return False
+    if j < len(text) and text[j] == '.':
+        return False
+    if '/' in run and (
+        len(run) < 48
+        or re.search(r'(?:^|/)(?:src|lib|app|pkg|packages|plugins|local|cloud|docs|tests?|chat|share|api|v\d+)/', run, re.I)
+    ):
+        return False
+    return bool(re.search(r'[a-z]', run) and re.search(r'[A-Z]', run) and re.search(r'[0-9]', run))
 
 
 def scan(text):
@@ -244,8 +256,11 @@ def private_check(text):
 def slug_candidates(text, priv, owners=()):
     out = set()
     owners_cf = {o.casefold() for o in owners}
-    for m in re.finditer(r'(?<![\w.-])([\w.-]+)/([\w.-]+)', text):     # 已知 owner 下的 owner/repo 也即时查
-        if m.group(1).casefold() in owners_cf and ck(m.group(0)) not in priv and 1 <= len(m.group(2)) <= 100:
+    for m in re.finditer(r'(?<![A-Za-z0-9._-])([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)', text):     # 已知 owner 下的 owner/repo 也即时查
+        repo_part = m.group(2)
+        if repo_part in ('.', '..'):
+            continue
+        if m.group(1).casefold() in owners_cf and ck(m.group(0)) not in priv and 1 <= len(repo_part) <= 100:
             out.add(m.group(0))
     for m in RX_SLUG.finditer(text):
         t = m.group(1)
@@ -359,12 +374,23 @@ def cmd_commit(msgfile=None, cwd=None):
             msg = _mf.read()
     else:
         msg = read_stdin()
-    # git 会在 commit-msg 之后才剥掉注释行；这里先剥，避免状态注释里的文件名误伤
+    # 仅剥离 Git 自动生成的剪刀线（--- >8 ---）及其后内容，或交互式 COMMIT_EDITMSG 末尾模板注释块；
+    # 绝不无条件剥离普通 '#' 行（git commit -m / -F 默认保留 '#' 行并直接写入提交对象）。
     ok, cc = git(['config', '--get', 'core.commentChar'], cwd)
     cc = cc.strip() if ok else ''
     if len(cc) != 1:
-        cc = '#'                                          # 未设置 / "auto" / 多字符 => 按默认 '#'
-    body = '\n'.join(l for l in msg.splitlines() if not l.startswith(cc))
+        cc = '#'
+    raw_lines = msg.splitlines()
+    scissors_marker = cc + ' ------------------------ >8 ------------------------'
+    for idx, line in enumerate(raw_lines):
+        if line == scissors_marker:
+            raw_lines = raw_lines[:idx]
+            break
+    for idx, line in enumerate(raw_lines):
+        if line.startswith(cc + ' Please enter the commit message for your changes.') and all(l.startswith(cc) for l in raw_lines[idx:]):
+            raw_lines = raw_lines[:idx]
+            break
+    body = '\n'.join(raw_lines)
     res, note = full_check(body)
     if res != PASS:
         return res, note
@@ -439,7 +465,7 @@ def patch_id(sha, cwd, cache):
         return cache[sha]
     pid = None
     try:
-        d = subprocess.run(['git', 'diff-tree', '-r', '-m', '-p', '--no-color', sha], cwd=cwd, capture_output=True, timeout=300)
+        d = subprocess.run(['git', 'diff-tree', '--root', '-r', '-m', '-p', '--no-color', sha], cwd=cwd, capture_output=True, timeout=300)
         if d.returncode == 0 and d.stdout.strip():
             r = subprocess.run(['git', 'patch-id', '--stable'], cwd=cwd, input=d.stdout, capture_output=True, timeout=300)
             if r.returncode == 0 and r.stdout.split():
@@ -510,10 +536,10 @@ def cmd_push(remote=None, cwd=None):
             c = c.strip()
             if not c:
                 continue
-            ok, info = git(['show', '-s', '--format=%ae|%ce|%B', c], cwd, 30)
-            if not ok or '|' not in info:
+            ok, info = git(['show', '-s', '--format=%ae%x00%ce%x00%B', c], cwd, 30)
+            if not ok or info.count('\x00') < 2:
                 return ERROR, ['无法读取提交 ' + c[:9]]
-            ae, ce, body = info.split('|', 2)
+            ae, ce, body = info.split('\x00', 2)
             kind, fp = commit_signature(c, cwd)
             if kind == 'error':
                 return ERROR, ['无法验证提交 %s 的签名(git cat-file / ssh-keygen 不可用)' % c[:9]]
@@ -543,8 +569,8 @@ def cmd_push(remote=None, cwd=None):
 
 
 def added_lines(sha, cwd):
-    """该提交相对其父提交新增的行 + 涉及路径(合并提交对每个父分别比)。"""
-    ok, out = git(['diff-tree', '-r', '-m', '--no-color', '--unified=0', '--diff-filter=ACMR', '-p', sha], cwd, 300)
+    """该提交相对其父提交新增的行 + 涉及路径(合并提交对每个父分别比；含根提交 --root)。"""
+    ok, out = git(['diff-tree', '--root', '-r', '-m', '--no-color', '--unified=0', '--diff-filter=ACMR', '-p', sha], cwd, 300)
     if not ok:
         return False, ''
     lines = []

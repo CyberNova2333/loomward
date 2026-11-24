@@ -35,14 +35,20 @@ except Exception as e:
 # 1) Claude hooks(本机 CLI 部署)
 SET = os.path.expanduser('~/.claude/settings.json')
 try:
-    s = json.load(open(SET, encoding='utf-8'))
+    with open(SET, encoding='utf-8') as _sf:
+        s = json.load(_sf)
     cmds = ' '.join(h.get('command', '') for grp in s.get('hooks', {}).get('PreToolUse', []) for h in grp.get('hooks', []))
     for n in ('forbid-content.sh', 'forbid-commit.sh', 'forbid-push.sh', 'forbid-read-secret.sh'):
         ok('Claude PreToolUse hook %s' % n, n in cmds)
     warn('Claude PreToolUse hook forbid-tamper.sh(可选)', 'forbid-tamper.sh' in cmds)
     ok('SessionStart 刷新钩子', 'refresh-private.py' in ' '.join(h.get('command', '') for grp in s.get('hooks', {}).get('SessionStart', []) for h in grp.get('hooks', [])))
     ok('attribution.sessionUrl 关闭', s.get('attribution', {}).get('sessionUrl') is False)
-    ok('未输出 permissionDecision=allow(旧版会跳过全部权限确认)', 'permissionDecision":"allow' not in open(os.path.join(H, 'forbid-content.sh'), encoding='utf-8').read())
+    forbid_content_path = os.path.join(H, 'forbid-content.sh')
+    if os.path.isfile(forbid_content_path):
+        with open(forbid_content_path, encoding='utf-8') as _fcf:
+            ok('未输出 permissionDecision=allow(旧版会跳过全部权限确认)', 'permissionDecision":"allow' not in _fcf.read())
+    else:
+        ok('未输出 permissionDecision=allow(旧版会跳过全部权限确认)', False, '缺少 %s' % forbid_content_path)
     if os.environ.get('CLAUDE_CODE_REMOTE') == 'true':
         print('[WARN] 当前是 Anthropic 云端 云会话: 官方文档称云端不读 ~/.claude/settings.json，以上 Claude hooks 可能根本没生效，请用仓库 .claude/settings.json'); warns.append('cloud')
 except Exception as e:
@@ -57,14 +63,23 @@ for hk in ('pre-commit', 'pre-merge-commit', 'commit-msg', 'pre-push'):
 ok('policy/check.py 可执行', exe(os.path.join(P, 'check.py')))
 ok('hooks/resolve-private.py 可执行', exe(os.path.join(H, 'resolve-private.py')))
 def _code(path):
-    return '\n'.join(l for l in open(path, encoding='utf-8', errors='replace').read().splitlines() if not l.lstrip().startswith('#'))
-ok('git 钩子带 --net(懒刷新/即时查询只在 git 层)', all('--net' in _code(os.path.join(G, hk)) for hk in ('pre-commit', 'commit-msg', 'pre-push')))
-ok('Claude hooks 不带 --net(不在 hook 内联网)', not any('--net' in _code(os.path.join(H, f)) for f in os.listdir(H) if f.endswith('.sh')))
+    with open(path, encoding='utf-8', errors='replace') as _f:
+        return '\n'.join(l for l in _f.read().splitlines() if not l.lstrip().startswith('#'))
+if os.path.isdir(G) and all(os.path.isfile(os.path.join(G, hk)) for hk in ('pre-commit', 'commit-msg', 'pre-push')):
+    ok('git 钩子带 --net(懒刷新/即时查询只在 git 层)', all('--net' in _code(os.path.join(G, hk)) for hk in ('pre-commit', 'commit-msg', 'pre-push')))
+else:
+    ok('git 钩子带 --net(懒刷新/即时查询只在 git 层)', False, 'hooks/git 目录或钩子文件不存在')
+if os.path.isdir(H):
+    ok('Claude hooks 不带 --net(不在 hook 内联网)', not any('--net' in _code(os.path.join(H, f)) for f in os.listdir(H) if f.endswith('.sh')))
+else:
+    ok('Claude hooks 不带 --net(不在 hook 内联网)', False, 'hooks 目录不存在')
 # 3) R1 动态名单
 cache = os.environ.get('LOOMWARD_ANTILEAK_CACHE') or pol.get('private_cache', os.path.join(H, 'private-repos.json'))
 if os.path.isfile(cache):
     try:
-        d = json.load(open(cache, encoding='utf-8')); exp = d.get('expires_at', 0)
+        with open(cache, encoding='utf-8') as _cf:
+            d = json.load(_cf)
+        exp = d.get('expires_at', 0)
         ok('私有仓缓存存在', True)
         ok('缓存新鲜', time.time() <= exp, '过期于 %s —— git 钩子会就地刷新，Claude hooks 会直接拦并要求手动 refresh' % time.strftime('%Y-%m-%d %H:%M', time.localtime(exp)))
         ok('缓存非空', len(d.get('private', [])) > 0)

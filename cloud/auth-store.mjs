@@ -80,8 +80,6 @@ export class AuthStore {
   }
 
   async refreshRecord(token) { return this.get(`refresh:${await digest(token)}`, 'json'); }
-  async codeWasUsed(code) { return !!await this.get(`used-code:${await digest(code)}`); }
-  async consumeCode(code) { await this.put(`used-code:${await digest(code)}`, '1', { expirationTtl: 600 }); }
 
   async #revokeRefreshIndex(userId, grantId) {
     const indexPrefix = `refresh-by-grant:${userId}:${grantId}:`;

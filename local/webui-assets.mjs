@@ -4523,9 +4523,10 @@ export const WEBUI_JS = `(() => {
     if (els.inputMcpArgs) els.inputMcpArgs.value = formatArgsForEditor(srv.args);
     if (els.inputMcpCwd) els.inputMcpCwd.value = srv.cwd || '';
     if (els.inputMcpEnv) els.inputMcpEnv.value = '';
-    if (preserveUrlInput && els.inputMcpUrl && els.inputMcpUrl.value.trim()) {
-      editingMcpUrlRedacted = false;
-      editingMcpInitialUrl = els.inputMcpUrl.value.trim();
+    const currentUrlInput = els.inputMcpUrl ? els.inputMcpUrl.value.trim() : '';
+    if (preserveUrlInput && currentUrlInput) {
+      editingMcpUrlRedacted = Boolean(srv.urlRedacted) && currentUrlInput === (srv.url || '');
+      editingMcpInitialUrl = currentUrlInput;
     } else {
       editingMcpUrlRedacted = Boolean(srv.urlRedacted);
       editingMcpInitialUrl = srv.url || '';
@@ -4894,6 +4895,7 @@ export const WEBUI_JS = `(() => {
         probe: Boolean(probe),
         ...(editingMcpServerId && els.inputMcpReplaceSecrets?.checked ? { replaceSecrets: true } : {}),
       };
+      let keepRedactedUrl = false;
       if (transport === 'stdio') {
         payload.command = els.inputMcpCommand.value.trim();
         payload.args = parseArgsInput(els.inputMcpArgs.value);
@@ -4903,7 +4905,7 @@ export const WEBUI_JS = `(() => {
         if (markedDeleteEnvKeys.size) payload.removeEnvKeys = [...markedDeleteEnvKeys];
       } else {
         const urlVal = els.inputMcpUrl.value.trim();
-        const keepRedactedUrl = Boolean(
+        keepRedactedUrl = Boolean(
           editingMcpServerId &&
           editingMcpTransport === 'http' &&
           editingMcpUrlRedacted &&
@@ -4925,7 +4927,7 @@ export const WEBUI_JS = `(() => {
           resetMcpForm();
         } else {
           showMcpFeedback('err', '配置已保存，但连接探测失败（已保留表单便于继续修改）：' + (out.probe.error || '请检查命令/端点与鉴权头'));
-          if (out.server) loadServerIntoMcpForm(out.server, { keepFeedback: true, focus: false, preserveUrlInput: true });
+          if (out.server) loadServerIntoMcpForm(out.server, { keepFeedback: true, focus: false, preserveUrlInput: !keepRedactedUrl });
         }
       } else {
         showMcpFeedback('ok', '第三方 MCP 配置「' + savedName + '」已保存。');

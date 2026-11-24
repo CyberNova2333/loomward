@@ -78,7 +78,28 @@ test('Worker enforces OAuth, browser-bound consent, PKCE, scopes and an authenti
   assert.deepEqual(exchanges.map(response => response.status).sort(), [200, 400]);
   const exchange = exchanges.find(response => response.status === 200);
   assert.equal(exchange.status, 200);
-  const tokens = await exchange.json();
+  const revokedTokens = await exchange.json();
+  assert.ok(revokedTokens.access_token && revokedTokens.refresh_token);
+  // RFC 9700 / OAuth 2.1 §4.1.2: duplicate code exchange revokes the issued grant and its tokens.
+  assert.equal((await request('/mcp', { method: 'POST', headers: { authorization: `Bearer ${revokedTokens.access_token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) })).status, 401);
+  assert.equal((await request('/oauth/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'refresh_token', client_id: client.client_id, refresh_token: revokedTokens.refresh_token, resource: `${origin}/mcp` }).toString() })).status, 400);
+
+  // Acquire a fresh single-use grant without replay to continue the integration flow.
+  const freshVerifier = randomBytes(32).toString('base64url');
+  const freshChallenge = createHash('sha256').update(freshVerifier).digest('base64url');
+  const freshParameters = new URLSearchParams({ client_id: client.client_id, redirect_uri: 'https://chatgpt.com/connector/oauth/test', response_type: 'code', code_challenge_method: 'S256', code_challenge: freshChallenge, scope: 'computer:read computer:write computer:execute offline_access', resource: `${origin}/mcp`, state: 'opaque-test-state-2' });
+  const freshConsent = await request(`/authorize?${freshParameters}`);
+  assert.equal(freshConsent.status, 200);
+  const freshHandle = (await freshConsent.text()).match(/name="handle" value="([^"]+)"/)?.[1];
+  assert.ok(freshHandle);
+  const freshCookie = freshConsent.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+  const freshAuthorization = await request('/authorize', { method: 'POST', headers: { origin, cookie: freshCookie, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ handle: freshHandle, password, decision: 'approve' }).toString() });
+  assert.equal(freshAuthorization.status, 303);
+  const freshCode = new URL(freshAuthorization.headers.get('location')).searchParams.get('code');
+  assert.ok(freshCode);
+  const freshExchange = await request('/oauth/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', client_id: client.client_id, code: freshCode, code_verifier: freshVerifier, redirect_uri: freshParameters.get('redirect_uri'), resource: `${origin}/mcp` }).toString() });
+  assert.equal(freshExchange.status, 200);
+  const tokens = await freshExchange.json();
   assert.ok(tokens.access_token && tokens.refresh_token);
   const authHeaders = { authorization: `Bearer ${tokens.access_token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
   assert.equal((await request('/mcp', { method: 'POST', headers: authHeaders, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) })).status, 503);

@@ -73,7 +73,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 class Config:
     def __init__(self, data: Dict[str, Any], base_dir: Path):
         self._data = data
-        self.base_dir = base_dir
+        self.base_dir = Path(base_dir).resolve()
 
     @property
     def project_name(self) -> str:
@@ -172,7 +172,7 @@ class Config:
 def load_config(config_path: Path = None, base_dir: Path = None) -> Config:
     """显式配置的相对路径以配置目录为基准；坏配置必须中止。"""
     if base_dir is None:
-        base_dir = Path(config_path).resolve().parent if config_path is not None else Path.cwd()
+        base_dir = Path(config_path).resolve().parent if config_path is not None else Path.cwd().resolve()
 
     cfg_file = config_path or (base_dir / "dashboard.config.json")
     loaded_data = copy.deepcopy(DEFAULT_CONFIG)

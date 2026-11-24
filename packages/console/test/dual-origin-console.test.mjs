@@ -795,3 +795,114 @@ test('R6-H2/R6-H4: built console assets enforce allowlist, safe URL filtering, a
   assert.equal(isSafeNavigationUrl('/\\evil.example/path', { allowRelative: true }), false);
   assert.equal(isSafeNavigationUrl('/panels/overview', { allowRelative: true }), true);
 });
+
+test('Round 7 console hardening: tab settings preserves snapshot race, startDualOriginConsole cleans up control socket on bind failure, and Console mirrors requirePasskey', async t => {
+  const { startDualOriginConsole } = await import('../src/server.mjs');
+  const { stateDir, workspace } = await makeTempState(t);
+  const sockPath = path.join(stateDir, 'bind-fail-control.sock');
+  const blocker = http.createServer();
+  await new Promise(resolve => blocker.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => blocker.close(resolve)));
+  const occupiedPort = blocker.address().port;
+
+  await assert.rejects(
+    () => startDualOriginConsole({
+      stateDir,
+      workspaceRoots: [workspace],
+      trustPort: occupiedPort,
+      consolePort: 0,
+      requirePrivateState: true,
+      enableControlSocket: true,
+      controlSocketPath: sockPath,
+    }),
+    /EADDRINUSE|listen/i,
+  );
+  await assert.rejects(() => fs.access(sockPath), { code: 'ENOENT' });
+
+  const dual = await startDualOriginConsole({
+    stateDir,
+    workspaceRoots: [workspace],
+    trustPort: 0,
+    consolePort: 0,
+    requirePrivateState: true,
+    enableControlSocket: false,
+    passkeyDetector: () => ({ supported: true, reason: 'linux-fido2-hid' }),
+    statusLoader: async () => ({
+      security: {
+        initialized: true,
+        mode: 'passkey',
+        passkeyRequired: true,
+        passkeyCount: 1,
+        sessionPersistence: 'browser',
+      },
+      approvals: { pendingCount: 0, items: [] },
+    }),
+    dockerProbe: async () => ({ dockerOk: true, runningContainers: [] }),
+    systemdProbe: async () => ({ supported: false, installed: false, enabled: false, active: false, linger: false }),
+    serviceController: async () => {},
+  });
+  t.after(() => dual.close());
+
+  const trustLocalhost = `http://localhost:${dual.trust.port}`;
+  const home = await httpCall(trustLocalhost, '/', { headers: { host: `localhost:${dual.trust.port}` } });
+  let csrf = home.text.match(/<meta name="loomward-csrf" content="([^"]+)"/)?.[1];
+  let cookie = mergeCookieHeader('', home.headers['set-cookie']);
+  const ticket = issueSetupTicketSync(stateDir, {
+    workspaceRoots: [workspace],
+    passkeyDetector: () => ({ supported: true, reason: 'linux-fido2-hid' }),
+  });
+  const optRes = await httpCall(trustLocalhost, '/api/auth/setup/passkey/options', {
+    method: 'POST',
+    headers: { host: `localhost:${dual.trust.port}`, origin: trustLocalhost, cookie, 'x-loomward-csrf': csrf, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
+    body: JSON.stringify({ setupToken: ticket.setupToken }),
+  });
+  const optJson = optRes.json();
+  const key = createVirtualEs256Passkey({ origin: trustLocalhost, rpId: 'localhost' });
+  const verifyRes = await httpCall(trustLocalhost, '/api/auth/setup/passkey/verify', {
+    method: 'POST',
+    headers: { host: `localhost:${dual.trust.port}`, origin: trustLocalhost, cookie, 'x-loomward-csrf': csrf, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
+    body: JSON.stringify({ challengeId: optJson.challengeId, setupToken: ticket.setupToken, label: 'K', credential: key.register(optJson.publicKey.challenge) }),
+  });
+  const verified = verifyRes.json();
+  csrf = verified.csrfToken;
+  let tTab = verified.tabToken;
+  cookie = mergeCookieHeader(cookie, verifyRes.headers['set-cookie']);
+
+  // Verify browser -> tab settings rotates tabToken reliably and still authorizes handoff + Console requirePasskey=true.
+  const toBrowser = await httpCall(trustLocalhost, '/api/auth/settings', {
+    method: 'POST',
+    headers: { host: `localhost:${dual.trust.port}`, origin: trustLocalhost, cookie, 'x-loomward-csrf': csrf, 'x-loomward-tab-auth': tTab, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionPersistence: 'browser' }),
+  });
+  assert.equal(toBrowser.status, 200);
+  const toTab = await httpCall(trustLocalhost, '/api/auth/settings', {
+    method: 'POST',
+    headers: { host: `localhost:${dual.trust.port}`, origin: trustLocalhost, cookie, 'x-loomward-csrf': csrf, 'x-loomward-tab-auth': tTab, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionPersistence: 'tab' }),
+  });
+  assert.equal(toTab.status, 200);
+  const rotatedTab = toTab.json().tabToken;
+  assert.ok(rotatedTab && rotatedTab !== tTab);
+
+  const handoff = await httpCall(trustLocalhost, '/api/trust/issue-console-ticket', {
+    method: 'POST',
+    headers: { host: `localhost:${dual.trust.port}`, origin: trustLocalhost, cookie, 'x-loomward-csrf': csrf, 'x-loomward-tab-auth': rotatedTab, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
+    body: '{}',
+  });
+  assert.equal(handoff.status, 200);
+
+  const cHome = await httpCall(dual.console.url, '/');
+  const cCsrf = cHome.text.match(/<meta name="loomward-csrf" content="([^"]+)"/)?.[1];
+  let cCookie = mergeCookieHeader('', cHome.headers['set-cookie']);
+  const cEx = await httpCall(dual.console.url, '/api/console/session/exchange', {
+    method: 'POST',
+    headers: { origin: dual.console.url, cookie: cCookie, 'x-loomward-csrf': cCsrf, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
+    body: JSON.stringify({ ticket: handoff.json().ticket }),
+  });
+  cCookie = mergeCookieHeader(cCookie, cEx.headers['set-cookie']);
+  const cStatus = await httpCall(dual.console.url, '/api/status', {
+    headers: { cookie: cCookie, 'x-loomward-tab-auth': cEx.json().tabToken },
+  });
+  assert.equal(cStatus.status, 200);
+  assert.equal(cStatus.json().security.requirePasskey, true);
+});

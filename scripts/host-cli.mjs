@@ -631,6 +631,17 @@ export async function runSupervisor({ stateDir = defaultStateDirectory() } = {})
     while (Date.now() < deadline && (activeChild || findOwnedProcess(childFile, connectorScript))) {
       await new Promise(resolve => setTimeout(resolve, 250));
     }
+    const waitOwnedExit = (pid, expectedExe, timeoutMs) => new Promise(resolve => {
+      const end = Date.now() + timeoutMs;
+      const poll = () => {
+        const cur = findOwnedProcess(childFile, connectorScript);
+        if (!cur || cur.pid !== pid || cur.executable !== expectedExe) return resolve(true);
+        if (Date.now() >= end) return resolve(false);
+        setTimeout(poll, 100);
+      };
+      poll();
+    });
+
     if (activeChild && activeChild.exitCode === null && activeChild.signalCode === null) {
       const waitExit = (child, ms) => new Promise(resolve => {
         if (child.exitCode !== null || child.signalCode !== null) return resolve(true);
@@ -644,9 +655,24 @@ export async function runSupervisor({ stateDir = defaultStateDirectory() } = {})
         try { activeChild.kill('SIGKILL'); } catch {}
         await waitExit(activeChild, 1500);
       }
+    } else if (!activeChild) {
+      const orphan = findOwnedProcess(childFile, connectorScript);
+      if (orphan) {
+        try { process.kill(orphan.pid, 'SIGTERM'); } catch {}
+        const exited = await waitOwnedExit(orphan.pid, orphan.executable, 3000);
+        if (!exited) {
+          const stillOwned = findOwnedProcess(childFile, connectorScript);
+          if (stillOwned && stillOwned.pid === orphan.pid && stillOwned.executable === orphan.executable) {
+            try { process.kill(stillOwned.pid, 'SIGKILL'); } catch {}
+            await waitOwnedExit(stillOwned.pid, stillOwned.executable, 1500);
+          }
+        }
+      }
     }
   } finally {
-    fs.rmSync(childFile, { force: true });
+    if (!findOwnedProcess(childFile, connectorScript)) {
+      fs.rmSync(childFile, { force: true });
+    }
     await new Promise(resolve => lockServer.close(resolve));
     fs.rmSync(sockPath, { force: true });
     fs.rmSync(stopFile, { force: true });
@@ -842,11 +868,25 @@ export async function showPassword({ stateDir = defaultStateDirectory() } = {}) 
 }
 
 function escapeSystemdExecArg(value) {
-  return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+  const str = String(value);
+  if (/[\r\n\0]/.test(str)) {
+    throw new Error('Systemd ExecStart arguments cannot contain newline or NUL characters.');
+  }
+  return `"${str
+    .replaceAll('\\', '\\\\')
+    .replaceAll('"', '\\"')
+    .replaceAll('%', '%%')
+    .replaceAll('$', () => '$$')}"`;
 }
 
 export function renderSystemdUnits({ stateDir = defaultStateDirectory(), host = '127.0.0.1', port = 18797 } = {}) {
+  if (/[\r\n\0]/.test(String(stateDir || ''))) {
+    throw new Error('State directory path must not contain control newlines or NUL bytes.');
+  }
   const resolvedState = path.resolve(stateDir);
+  if (/[\r\n\0]/.test(resolvedState)) {
+    throw new Error('State directory path must not contain control newlines or NUL bytes.');
+  }
   if (!isLoopbackHost(host)) throw new Error('WebUI host must be a loopback address.');
   const portNum = Number(port);
   if (!Number.isInteger(portNum) || portNum < 1024 || portNum > 65535) {

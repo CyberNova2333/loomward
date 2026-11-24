@@ -276,9 +276,11 @@ export class BridgeConnector {
           this.status(receivedPong && Date.now() - lastPong <= 65000);
         }, 20000);
       });
-      socket.on('unexpected-response', (_request, response) => {
+      socket.on('unexpected-response', (request, response) => {
         this.record('socket_unexpected_response', { status: Number(response?.statusCode) || 0 });
         try { response?.resume(); } catch {}
+        try { request?.destroy(); } catch {}
+        try { socket.terminate(); } catch {}
       });
       socket.on('message', async (data, isBinary) => {
         if (!this.running || this.socket !== socket) return;

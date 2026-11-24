@@ -187,7 +187,7 @@ export function getProcessIdentity(pid) {
   }
   if (process.platform === 'darwin') {
     try {
-      const psEnv = { ...process.env, LC_ALL: 'C' };
+      const psEnv = { ...process.env, LC_ALL: 'C', TZ: 'UTC' };
       const raw = execFileSync('/bin/ps', ['-ww', '-p', String(pid), '-o', 'lstart=,comm='], {
         encoding: 'utf8',
         env: psEnv,

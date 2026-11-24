@@ -111,17 +111,35 @@ test('changed CIMD callback metadata is revalidated before code issuance, and mi
   assert.equal((await f.req('/authorize?'+f.parameters(metadataUrl).params)).status,400);
 });
 
-test('simultaneous code exchange has one winner and simultaneous refresh cannot revive a reused family', {timeout:30000}, async t => {
+test('simultaneous code exchange triggers replay revocation and simultaneous refresh cannot revive a reused family', {timeout:30000}, async t => {
   const f = await fixture(t), clientId = await f.register();
   const exchange = await f.codeFor(clientId);
   const codes = await Promise.all([f.form(exchange),f.form(exchange)]);
   assert.deepEqual(codes.map(value=>value.status).sort(),[200,400]);
   const tokens = await codes.find(value=>value.status===200).json();
-  const refreshes = await Promise.all([f.refresh(clientId,tokens.refresh_token),f.refresh(clientId,tokens.refresh_token)]);
+  // OAuth 2.1 §4.1.2 / RFC 6749 §10.5: second exchange revokes the grant's issued tokens.
+  assert.equal((await f.access(tokens.access_token)).status, 401);
+  assert.equal((await f.refresh(clientId, tokens.refresh_token)).status, 400);
+
+  const fresh = await f.authorize(clientId);
+  const refreshes = await Promise.all([f.refresh(clientId, fresh.refresh_token), f.refresh(clientId, fresh.refresh_token)]);
   assert.deepEqual(refreshes.map(value=>value.status).sort(),[200,400]);
   const rotated = await refreshes.find(value=>value.status===200).json();
   assert.equal((await f.access(rotated.access_token)).status,401);
   assert.equal((await f.refresh(clientId,rotated.refresh_token)).status,400);
+});
+
+test('token revocation with empty grant_type revokes rotated token family without 503', { timeout: 30000 }, async t => {
+  const f = await fixture(t), clientId = await f.register();
+  const first = await f.authorize(clientId);
+  const refreshed = await f.refresh(clientId, first.refresh_token);
+  assert.equal(refreshed.status, 200);
+  const current = await refreshed.json();
+  assert.equal((await f.access(current.access_token)).status, 503);
+  const revoked = await f.form({ grant_type: '', token: first.refresh_token, client_id: clientId });
+  assert.equal(revoked.status, 200);
+  assert.equal((await f.access(current.access_token)).status, 401);
+  assert.equal((await f.refresh(clientId, current.refresh_token)).status, 400);
 });
 
 test('v2 authorization generation retires old deployed grants and remains stable across ordinary restarts', {timeout:30000}, async t => {

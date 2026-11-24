@@ -93,9 +93,11 @@ export function createCloudflareRelayIngress({
         beat.unref?.();
       });
 
-      socket.on('unexpected-response', (_request, response) => {
+      socket.on('unexpected-response', (request, response) => {
         safeRecord('socket_unexpected_response', { status: Number(response?.statusCode) || 0 });
         try { response?.resume(); } catch {}
+        try { request?.destroy(); } catch {}
+        try { socket.terminate(); } catch {}
       });
 
       socket.on('message', async (data, isBinary) => {

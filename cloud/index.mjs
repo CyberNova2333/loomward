@@ -578,7 +578,7 @@ export class AuthCoordinator {
     if (path === '/oauth/token' && request.method === 'POST' && request.headers.get('content-type')?.toLowerCase().startsWith('application/x-www-form-urlencoded')) {
       form = new URLSearchParams(await request.clone().text());
       for (const name of new Set(form.keys())) if (name !== 'resource' && form.getAll(name).length !== 1) return json({ error: 'invalid_request' }, 400);
-      if (form.get('grant_type') === 'authorization_code' && form.get('code') && (form.get('code').length > 1024 || await store.codeWasUsed(form.get('code')))) return json({ error: 'invalid_grant' }, 400);
+      if (form.get('grant_type') === 'authorization_code' && form.get('code') && form.get('code').length > 1024) return json({ error: 'invalid_grant' }, 400);
       if (form.get('grant_type') === 'refresh_token') {
         refreshToken = form.get('refresh_token');
         if (!refreshToken || refreshToken.length > 1024) return json({ error: 'invalid_grant' }, 400);
@@ -596,7 +596,7 @@ export class AuthCoordinator {
     // Provider persistence must finish staging before the revision-guarded commit.
     while (background.length) await Promise.all(background.splice(0));
     if (response.ok && form) {
-      if (form.has('grant_type')) {
+      if (form.get('grant_type')) {
         const tokens = await response.clone().json();
         if (tokens.refresh_token) {
           await store.recordIssuedRefresh(tokens.refresh_token, refreshToken);
@@ -608,8 +608,7 @@ export class AuthCoordinator {
             response = new Response(JSON.stringify(tokens), {status:response.status,headers});
           }
         }
-        if (form.get('grant_type') === 'authorization_code' && tokens.access_token) await store.consumeCode(form.get('code'));
-      } else if (form.has('token')) {
+      } else if (form.get('token')) {
         // Revocation of an older, already rotated token must also revoke its family.
         const record = await store.refreshRecord(form.get('token'));
         let clientId = form.get('client_id');

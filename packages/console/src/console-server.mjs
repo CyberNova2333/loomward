@@ -85,7 +85,7 @@ export async function createConsoleOriginServer({
       ? {
           initialized: Boolean(snap.security.initialized),
           mode: snap.security.mode,
-          requirePasskey: Boolean(snap.security.requirePasskey),
+          requirePasskey: Boolean(snap.security.passkeyRequired ?? snap.security.requirePasskey),
           passkeyCount: Number(snap.security.passkeyCount || 0),
           sessionPersistence: snap.security.sessionPersistence || 'tab',
         }

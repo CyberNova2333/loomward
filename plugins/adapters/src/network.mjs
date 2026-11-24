@@ -2,6 +2,8 @@
 // This file is part of LoomWard (织盾) and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
 // Shared network boundary checks, full 8-hextet IPv6 SSRF classifier, DNS IP check, & bounded JSON/SSE HTTP helpers for standalone project adapters.
 import dns from 'node:dns';
+import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
 
 export const DEFAULT_MAX_RESPONSE_BYTES = 512 * 1024;
@@ -119,13 +121,20 @@ export function classifyIpLiteral(hostname) {
   return 'public';
 }
 
+function canonicalOriginKey(parsed) {
+  const host = String(parsed.hostname || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  const formattedHost = host.includes(':') ? `[${host}]` : host;
+  const port = parsed.port ? `:${parsed.port}` : '';
+  return `${parsed.protocol.toLowerCase()}//${formattedHost}${port}`;
+}
+
 function normalizeOriginList(blockedOrigins = []) {
   const set = new Set();
   if (!Array.isArray(blockedOrigins)) return set;
   for (const item of blockedOrigins) {
     if (typeof item !== 'string' || !item.trim()) continue;
     try {
-      set.add(new URL(item.trim()).origin.toLowerCase());
+      set.add(canonicalOriginKey(new URL(item.trim())));
     } catch {}
   }
   return set;
@@ -159,7 +168,7 @@ export function assertSafeIntegrationOrigin(
   }
 
   const blockedSet = normalizeOriginList(blockedOrigins);
-  if (blockedSet.has(parsed.origin.toLowerCase())) {
+  if (blockedSet.has(canonicalOriginKey(parsed))) {
     throw new Error(`${label} origin is in the blockedOrigins exclusion list.`);
   }
 
@@ -278,6 +287,187 @@ export async function readBoundedText(response, maxBytes = DEFAULT_MAX_RESPONSE_
   return Buffer.concat(chunks, total).toString('utf8');
 }
 
+function createPinnedSafeLookup({
+  allowLoopbackHttp = false,
+  allowPrivateNetwork = false,
+  dnsLookup = dns.promises.lookup,
+} = {}) {
+  return (hostname, options, callback) => {
+    let opts = options;
+    let cb = callback;
+    if (typeof options === 'function') {
+      cb = options;
+      opts = {};
+    } else if (typeof options === 'number') {
+      opts = { family: options };
+    } else if (!options || typeof options !== 'object') {
+      opts = {};
+    }
+    const bare = String(hostname || '').replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+    const wantAll = opts.all === true;
+    const directVer = net.isIP(bare);
+    if (directVer) {
+      const cls = classifyIpLiteral(bare);
+      if (cls === 'blocked' || (cls === 'loopback' && !allowLoopbackHttp && !allowPrivateNetwork) || (cls === 'private' && !allowPrivateNetwork)) {
+        cb(new Error('Target IP address is blocked by network boundary policy.'));
+        return;
+      }
+      if (wantAll) cb(null, [{ address: bare, family: directVer }]);
+      else cb(null, bare, directVer);
+      return;
+    }
+    Promise.resolve(dnsLookup(bare, { all: true, verbatim: true }))
+      .then(records => {
+        if (!Array.isArray(records) || records.length === 0) {
+          cb(new Error('DNS resolution returned no addresses.'));
+          return;
+        }
+        const safe = [];
+        for (const rec of records) {
+          const cls = classifyIpLiteral(rec?.address);
+          if (cls === 'blocked') {
+            cb(new Error('Resolved DNS address targets a blocked link-local or metadata IP.'));
+            return;
+          }
+          if (cls === 'loopback' && !allowLoopbackHttp && !allowPrivateNetwork) {
+            cb(new Error('Resolved DNS address targets a loopback IP.'));
+            return;
+          }
+          if (cls === 'private' && !allowPrivateNetwork) {
+            cb(new Error('Resolved DNS address targets a private network IP.'));
+            return;
+          }
+          safe.push({ address: rec.address, family: rec.family || net.isIP(rec.address) || 4 });
+        }
+        if (wantAll) cb(null, safe);
+        else cb(null, safe[0].address, safe[0].family);
+      })
+      .catch(err => cb(err));
+  };
+}
+
+function sendPinnedNodeRequest(
+  url,
+  {
+    method = 'GET',
+    headers = {},
+    body = undefined,
+    maxBytes = DEFAULT_MAX_RESPONSE_BYTES,
+    signal,
+    allowLoopbackHttp = false,
+    allowPrivateNetwork = false,
+    dnsLookup = dns.promises.lookup,
+  },
+) {
+  const parsed = new URL(url);
+  const isHttps = parsed.protocol === 'https:';
+  const reqMod = isHttps ? https : http;
+  const bareHost = parsed.hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  const payloadBuf = body === undefined || body === null
+    ? null
+    : (Buffer.isBuffer(body) || body instanceof Uint8Array ? Buffer.from(body) : Buffer.from(String(body), 'utf8'));
+  const reqHeaders = {};
+  if (headers && typeof headers === 'object') {
+    for (const [k, v] of Object.entries(headers)) {
+      if (v !== undefined) reqHeaders[k] = String(v);
+    }
+  }
+  if (payloadBuf !== null && !Object.keys(reqHeaders).some(k => k.toLowerCase() === 'content-length')) {
+    reqHeaders['content-length'] = String(payloadBuf.length);
+  }
+
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason || new Error('Upstream request was cancelled.'));
+      return;
+    }
+    let settled = false;
+    let req = null;
+    const done = (err, val) => {
+      if (settled) return;
+      settled = true;
+      if (signal) signal.removeEventListener('abort', onAbort);
+      if (err) reject(err);
+      else resolve(val);
+    };
+    const onAbort = () => {
+      try { req?.destroy(signal.reason || new Error('Upstream request was cancelled.')); } catch {}
+      done(signal.reason || new Error('Upstream request was cancelled.'));
+    };
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+
+    req = reqMod.request(
+      {
+        protocol: parsed.protocol,
+        hostname: bareHost,
+        port: parsed.port || (isHttps ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method,
+        headers: reqHeaders,
+        agent: false,
+        lookup: createPinnedSafeLookup({ allowLoopbackHttp, allowPrivateNetwork, dnsLookup }),
+        ...(isHttps ? { minVersion: 'TLSv1.2' } : {}),
+        ...(isHttps && net.isIP(bareHost) === 0 ? { servername: bareHost } : {}),
+      },
+      res => {
+        const status = res.statusCode || 0;
+        if (status >= 300 && status < 400) {
+          res.destroy();
+          done(new Error('HTTP redirects are disabled by network boundary policy.'));
+          return;
+        }
+        const declared = Number(res.headers?.['content-length']);
+        if (Number.isFinite(declared) && declared > maxBytes) {
+          res.destroy();
+          const err = new Error(`Upstream response exceeded ${maxBytes} byte limit.`);
+          err.code = 'UPSTREAM_PAYLOAD_TOO_LARGE';
+          done(err);
+          return;
+        }
+        const chunks = [];
+        let total = 0;
+        res.on('data', chunk => {
+          if (settled) return;
+          total += chunk.length;
+          if (total > maxBytes) {
+            res.destroy();
+            const err = new Error(`Upstream response exceeded ${maxBytes} byte limit.`);
+            err.code = 'UPSTREAM_PAYLOAD_TOO_LARGE';
+            done(err);
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on('aborted', () => done(new Error('Upstream response stream aborted.')));
+        res.on('error', err => done(err));
+        res.on('end', () => {
+          if (!res.complete) {
+            done(new Error('Upstream response stream ended prematurely.'));
+            return;
+          }
+          const respHeaders = new Headers();
+          for (const [k, v] of Object.entries(res.headers || {})) {
+            if (Array.isArray(v)) {
+              for (const item of v) respHeaders.append(k, String(item));
+            } else if (v !== undefined) {
+              respHeaders.set(k, String(v));
+            }
+          }
+          done(null, {
+            ok: status >= 200 && status < 300,
+            status,
+            headers: respHeaders,
+            text: Buffer.concat(chunks, total).toString('utf8'),
+          });
+        });
+      },
+    );
+    req.on('error', err => done(err));
+    if (payloadBuf !== null) req.write(payloadBuf);
+    req.end();
+  });
+}
+
 export async function fetchBounded(
   url,
   {
@@ -301,14 +491,6 @@ export async function fetchBounded(
     err.code = 'UPSTREAM_ABORTED';
     throw err;
   }
-  const effectiveDnsLookup = dnsLookup ?? (fetchImpl === globalThis.fetch ? dns.promises.lookup : null);
-  if (effectiveDnsLookup) {
-    await assertSafeResolvedHostname(url, {
-      allowLoopbackHttp,
-      allowPrivateNetwork,
-      dnsLookup: effectiveDnsLookup,
-    });
-  }
   const controller = new AbortController();
   let timedOut = false;
   const onCallerAbort = () => controller.abort(new Error('Upstream request was cancelled.'));
@@ -322,6 +504,44 @@ export async function fetchBounded(
   timer.unref?.();
   const startedAt = Date.now();
   try {
+    if (fetchImpl === globalThis.fetch) {
+      const effectiveDnsLookup = dnsLookup ?? dns.promises.lookup;
+      const result = await sendPinnedNodeRequest(url, {
+        method,
+        headers,
+        body,
+        maxBytes,
+        signal: controller.signal,
+        allowLoopbackHttp,
+        allowPrivateNetwork,
+        dnsLookup: effectiveDnsLookup,
+      });
+      return {
+        ...result,
+        latencyMs: Math.max(0, Date.now() - startedAt),
+      };
+    }
+
+    if (dnsLookup) {
+      await Promise.race([
+        assertSafeResolvedHostname(url, {
+          allowLoopbackHttp,
+          allowPrivateNetwork,
+          dnsLookup,
+        }),
+        new Promise((_resolve, reject) => {
+          if (controller.signal.aborted) {
+            reject(controller.signal.reason || new Error('Upstream request was aborted.'));
+            return;
+          }
+          controller.signal.addEventListener(
+            'abort',
+            () => reject(controller.signal.reason || new Error('Upstream request was aborted.')),
+            { once: true },
+          );
+        }),
+      ]);
+    }
     const response = await fetchImpl(url, {
       method,
       headers,

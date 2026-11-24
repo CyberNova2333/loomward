@@ -220,25 +220,31 @@ export async function startDualOriginConsole({
     await controlChannel.startSocketServer(controlSocketPath || path.join(resolvedState, 'control.sock')).catch(() => null);
   }
 
-  trustServer = await createTrustOriginServer({
-    host,
-    port: trustPort,
-    stateDir: resolvedState,
-    requirePrivateState,
-    broker,
-    controlChannel,
-    loadCurrentWorkspaceRoots,
-    loadCurrentAuthRecord,
-    refreshSnapshot,
-    getLastSnapshot: () => lastSnapshot,
-    getConsoleOrigin: () => consoleServer?.url || '',
-    getBlockedOrigins,
-    passkeyDetector,
-    mcpProber,
-    serviceController,
-    getKernelSummary,
-    trustDecider,
-  });
+  try {
+    trustServer = await createTrustOriginServer({
+      host,
+      port: trustPort,
+      stateDir: resolvedState,
+      requirePrivateState,
+      broker,
+      controlChannel,
+      loadCurrentWorkspaceRoots,
+      loadCurrentAuthRecord,
+      refreshSnapshot,
+      getLastSnapshot: () => lastSnapshot,
+      getConsoleOrigin: () => consoleServer?.url || '',
+      getBlockedOrigins,
+      passkeyDetector,
+      mcpProber,
+      serviceController,
+      getKernelSummary,
+      trustDecider,
+    });
+  } catch (err) {
+    unsubChannel();
+    if (ownsChannel) await controlChannel.close();
+    throw err;
+  }
 
   try {
     consoleServer = await createConsoleOriginServer({

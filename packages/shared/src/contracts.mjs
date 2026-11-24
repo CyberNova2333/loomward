@@ -17,6 +17,7 @@ const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 function assertStringArray(list, label, pattern) {
   if (!Array.isArray(list)) throw new Error(`${label} must be an array.`);
+  const normalized = [];
   const seen = new Set();
   for (const item of list) {
     if (typeof item !== 'string' || !pattern.test(item)) {
@@ -24,143 +25,166 @@ function assertStringArray(list, label, pattern) {
     }
     if (seen.has(item)) throw new Error(`Duplicate entry in ${label}: ${item}`);
     seen.add(item);
+    normalized.push(item);
   }
+  return normalized;
 }
 
 export function validateContractDecl(decl) {
   if (!decl || typeof decl !== 'object' || Array.isArray(decl)) {
     throw new Error('Contract declaration must be an object.');
   }
-  if (decl.schemaVersion !== CONTRACT_SCHEMA_VERSION) {
-    throw new Error(`Unsupported contract schemaVersion: ${String(decl.schemaVersion)}`);
+  const schemaVersion = decl.schemaVersion;
+  const id = decl.id;
+  const kind = decl.kind;
+  const version = decl.version;
+  const executionBoundary = decl.executionBoundary;
+  const archiveSource = decl.archiveSource;
+
+  if (schemaVersion !== CONTRACT_SCHEMA_VERSION) {
+    throw new Error(`Unsupported contract schemaVersion: ${String(schemaVersion)}`);
   }
-  if (typeof decl.id !== 'string' || !ID_RE.test(decl.id)) {
-    throw new Error(`Invalid contract id: ${String(decl.id)}`);
+  if (typeof id !== 'string' || !ID_RE.test(id)) {
+    throw new Error(`Invalid contract id: ${String(id)}`);
   }
-  if (!CONTRACT_KINDS.includes(decl.kind)) {
-    throw new Error(`Invalid contract kind for ${decl.id}: ${String(decl.kind)}`);
+  if (!CONTRACT_KINDS.includes(kind)) {
+    throw new Error(`Invalid contract kind for ${id}: ${String(kind)}`);
   }
-  if (typeof decl.version !== 'string' || !SEMVER_RE.test(decl.version)) {
-    throw new Error(`Invalid contract version for ${decl.id}: ${String(decl.version)}`);
+  if (typeof version !== 'string' || !SEMVER_RE.test(version)) {
+    throw new Error(`Invalid contract version for ${id}: ${String(version)}`);
   }
-  if (!EXECUTION_BOUNDARIES.includes(decl.executionBoundary)) {
-    throw new Error(`Invalid executionBoundary for ${decl.id}: ${String(decl.executionBoundary)}`);
+  if (!EXECUTION_BOUNDARIES.includes(executionBoundary)) {
+    throw new Error(`Invalid executionBoundary for ${id}: ${String(executionBoundary)}`);
   }
-  if (decl.kind === 'root-plugin' && decl.executionBoundary !== 'in-process-root') {
-    throw new Error(`Root plugin ${decl.id} must declare executionBoundary="in-process-root".`);
+  if (kind === 'root-plugin' && executionBoundary !== 'in-process-root') {
+    throw new Error(`Root plugin ${id} must declare executionBoundary="in-process-root".`);
   }
-  if (decl.kind === 'extension-plugin' && decl.executionBoundary === 'in-process-root') {
-    throw new Error(`Extension plugin ${decl.id} cannot declare executionBoundary="in-process-root".`);
+  if (kind === 'extension-plugin' && executionBoundary === 'in-process-root') {
+    throw new Error(`Extension plugin ${id} cannot declare executionBoundary="in-process-root".`);
   }
 
-  assertStringArray(decl.provides ?? [], `${decl.id}.provides`, SERVICE_OR_SLOT_RE);
-  assertStringArray(decl.consumes ?? [], `${decl.id}.consumes`, SERVICE_OR_SLOT_RE);
+  const provides = assertStringArray(decl.provides ?? [], `${id}.provides`, SERVICE_OR_SLOT_RE);
+  const consumes = assertStringArray(decl.consumes ?? [], `${id}.consumes`, SERVICE_OR_SLOT_RE);
 
-  const implSlots = decl.implSlots ?? [];
-  if (!Array.isArray(implSlots)) throw new Error(`${decl.id}.implSlots must be an array.`);
+  const rawImplSlots = decl.implSlots ?? [];
+  if (!Array.isArray(rawImplSlots)) throw new Error(`${id}.implSlots must be an array.`);
   const seenSlots = new Set();
-  for (const slot of implSlots) {
-    if (!slot || typeof slot !== 'object' || Array.isArray(slot)) {
-      throw new Error(`Invalid implSlot entry in ${decl.id}.`);
+  const implSlots = [];
+  for (const rawSlot of rawImplSlots) {
+    if (!rawSlot || typeof rawSlot !== 'object' || Array.isArray(rawSlot)) {
+      throw new Error(`Invalid implSlot entry in ${id}.`);
     }
-    if (typeof slot.name !== 'string' || !SERVICE_OR_SLOT_RE.test(slot.name)) {
-      throw new Error(`Invalid implSlot name in ${decl.id}: ${String(slot.name)}`);
+    const name = rawSlot.name;
+    const cardinality = rawSlot.cardinality;
+    const policy = rawSlot.policy;
+    if (typeof name !== 'string' || !SERVICE_OR_SLOT_RE.test(name)) {
+      throw new Error(`Invalid implSlot name in ${id}: ${String(name)}`);
     }
-    if (!SLOT_CARDINALITIES.includes(slot.cardinality)) {
-      throw new Error(`Invalid implSlot cardinality in ${decl.id}: ${String(slot.cardinality)}`);
+    if (!SLOT_CARDINALITIES.includes(cardinality)) {
+      throw new Error(`Invalid implSlot cardinality in ${id}: ${String(cardinality)}`);
     }
-    if (!SLOT_POLICIES.includes(slot.policy)) {
-      throw new Error(`Invalid implSlot policy in ${decl.id}: ${String(slot.policy)}`);
+    if (!SLOT_POLICIES.includes(policy)) {
+      throw new Error(`Invalid implSlot policy in ${id}: ${String(policy)}`);
     }
-    if (seenSlots.has(slot.name)) throw new Error(`Duplicate slot in ${decl.id}: ${slot.name}`);
-    seenSlots.add(slot.name);
+    if (seenSlots.has(name)) throw new Error(`Duplicate slot in ${id}: ${name}`);
+    seenSlots.add(name);
+    implSlots.push(Object.freeze({ name, cardinality, policy }));
   }
 
-  const mechanismSlots = decl.mechanismSlots ?? [];
-  if (!Array.isArray(mechanismSlots)) throw new Error(`${decl.id}.mechanismSlots must be an array.`);
-  for (const slot of mechanismSlots) {
-    if (!slot || typeof slot !== 'object' || Array.isArray(slot)) {
-      throw new Error(`Invalid mechanismSlot entry in ${decl.id}.`);
+  const rawMechanismSlots = decl.mechanismSlots ?? [];
+  if (!Array.isArray(rawMechanismSlots)) throw new Error(`${id}.mechanismSlots must be an array.`);
+  const mechanismSlots = [];
+  for (const rawSlot of rawMechanismSlots) {
+    if (!rawSlot || typeof rawSlot !== 'object' || Array.isArray(rawSlot)) {
+      throw new Error(`Invalid mechanismSlot entry in ${id}.`);
     }
-    if (typeof slot.name !== 'string' || !SERVICE_OR_SLOT_RE.test(slot.name)) {
-      throw new Error(`Invalid mechanismSlot name in ${decl.id}: ${String(slot.name)}`);
+    const name = rawSlot.name;
+    const policy = rawSlot.policy;
+    const allowReplace = rawSlot.allowReplace;
+    if (typeof name !== 'string' || !SERVICE_OR_SLOT_RE.test(name)) {
+      throw new Error(`Invalid mechanismSlot name in ${id}: ${String(name)}`);
     }
-    if (!SLOT_POLICIES.includes(slot.policy)) {
-      throw new Error(`Invalid mechanismSlot policy in ${decl.id}: ${String(slot.policy)}`);
+    if (!SLOT_POLICIES.includes(policy)) {
+      throw new Error(`Invalid mechanismSlot policy in ${id}: ${String(policy)}`);
     }
-    if (slot.allowReplace !== undefined && typeof slot.allowReplace !== 'boolean') {
-      throw new Error(`Invalid mechanismSlot allowReplace in ${decl.id}: must be boolean.`);
+    if (allowReplace !== undefined && typeof allowReplace !== 'boolean') {
+      throw new Error(`Invalid mechanismSlot allowReplace in ${id}: must be boolean.`);
     }
-    if (seenSlots.has(slot.name)) throw new Error(`Duplicate slot in ${decl.id}: ${slot.name}`);
-    seenSlots.add(slot.name);
+    if (seenSlots.has(name)) throw new Error(`Duplicate slot in ${id}: ${name}`);
+    seenSlots.add(name);
+    mechanismSlots.push(Object.freeze({
+      name,
+      policy,
+      ...(typeof allowReplace === 'boolean' ? { allowReplace } : {}),
+    }));
   }
 
-  const registers = decl.registers ?? [];
-  if (!Array.isArray(registers)) throw new Error(`${decl.id}.registers must be an array.`);
+  const rawRegisters = decl.registers ?? [];
+  if (!Array.isArray(rawRegisters)) throw new Error(`${id}.registers must be an array.`);
   const seenRegisters = new Set();
-  for (const reg of registers) {
-    if (!reg || typeof reg !== 'object' || Array.isArray(reg)) {
-      throw new Error(`Invalid register entry in ${decl.id}.`);
+  const registers = [];
+  for (const rawReg of rawRegisters) {
+    if (!rawReg || typeof rawReg !== 'object' || Array.isArray(rawReg)) {
+      throw new Error(`Invalid register entry in ${id}.`);
     }
-    if (typeof reg.slot !== 'string' || !SERVICE_OR_SLOT_RE.test(reg.slot)) {
-      throw new Error(`Invalid register slot in ${decl.id}: ${String(reg.slot)}`);
+    const slot = rawReg.slot;
+    const name = rawReg.name;
+    if (typeof slot !== 'string' || !SERVICE_OR_SLOT_RE.test(slot)) {
+      throw new Error(`Invalid register slot in ${id}: ${String(slot)}`);
     }
-    if (typeof reg.name !== 'string' || !ID_RE.test(reg.name)) {
-      throw new Error(`Invalid register name in ${decl.id}: ${String(reg.name)}`);
+    if (typeof name !== 'string' || !ID_RE.test(name)) {
+      throw new Error(`Invalid register name in ${id}: ${String(name)}`);
     }
-    const key = `${reg.slot}#${reg.name}`;
-    if (seenRegisters.has(key)) throw new Error(`Duplicate register in ${decl.id}: ${key}`);
+    const key = `${slot}#${name}`;
+    if (seenRegisters.has(key)) throw new Error(`Duplicate register in ${id}: ${key}`);
     seenRegisters.add(key);
+    registers.push(Object.freeze({ slot, name }));
   }
 
   const rawWrites = decl.writes ?? {};
   if (!rawWrites || typeof rawWrites !== 'object' || Array.isArray(rawWrites)) {
-    throw new Error(`${decl.id}.writes must be an object.`);
+    throw new Error(`${id}.writes must be an object.`);
   }
   const rawHooks = rawWrites.hooks ?? [];
-  if (!Array.isArray(rawHooks)) throw new Error(`${decl.id}.writes.hooks must be an array.`);
+  if (!Array.isArray(rawHooks)) throw new Error(`${id}.writes.hooks must be an array.`);
   const seenHooks = new Set();
-  for (const hook of rawHooks) {
-    if (!hook || typeof hook !== 'object' || Array.isArray(hook)) {
-      throw new Error(`Invalid hook write entry in ${decl.id}.`);
+  const hooks = [];
+  for (const rawHook of rawHooks) {
+    if (!rawHook || typeof rawHook !== 'object' || Array.isArray(rawHook)) {
+      throw new Error(`Invalid hook write entry in ${id}.`);
     }
-    if (typeof hook.slot !== 'string' || !SERVICE_OR_SLOT_RE.test(hook.slot)) {
-      throw new Error(`Invalid hook write slot in ${decl.id}: ${String(hook.slot)}`);
+    const slot = rawHook.slot;
+    const phase = rawHook.phase;
+    if (typeof slot !== 'string' || !SERVICE_OR_SLOT_RE.test(slot)) {
+      throw new Error(`Invalid hook write slot in ${id}: ${String(slot)}`);
     }
-    if (!['before', 'after', 'replace'].includes(hook.phase)) {
-      throw new Error(`Invalid hook write phase in ${decl.id}: ${String(hook.phase)}`);
+    if (!['before', 'after', 'replace'].includes(phase)) {
+      throw new Error(`Invalid hook write phase in ${id}: ${String(phase)}`);
     }
-    const key = `${hook.slot}@${hook.phase}`;
-    if (seenHooks.has(key)) throw new Error(`Duplicate hook write in ${decl.id}: ${key}`);
+    const key = `${slot}@${phase}`;
+    if (seenHooks.has(key)) throw new Error(`Duplicate hook write in ${id}: ${key}`);
     seenHooks.add(key);
+    hooks.push(Object.freeze({ slot, phase }));
   }
-  assertStringArray(rawWrites.intercepts ?? [], `${decl.id}.writes.intercepts`, SERVICE_OR_SLOT_RE);
-  assertStringArray(rawWrites.isolateProvides ?? [], `${decl.id}.writes.isolateProvides`, SERVICE_OR_SLOT_RE);
+  const intercepts = assertStringArray(rawWrites.intercepts ?? [], `${id}.writes.intercepts`, SERVICE_OR_SLOT_RE);
+  const isolateProvides = assertStringArray(rawWrites.isolateProvides ?? [], `${id}.writes.isolateProvides`, SERVICE_OR_SLOT_RE);
 
   return Object.freeze({
-    schemaVersion: decl.schemaVersion,
-    id: decl.id,
-    kind: decl.kind,
-    version: decl.version,
-    executionBoundary: decl.executionBoundary,
-    provides: Object.freeze([...(decl.provides ?? [])]),
-    consumes: Object.freeze([...(decl.consumes ?? [])]),
-    implSlots: Object.freeze(implSlots.map(s => Object.freeze({
-      name: s.name,
-      cardinality: s.cardinality,
-      policy: s.policy,
-    }))),
-    mechanismSlots: Object.freeze(mechanismSlots.map(s => Object.freeze({
-      name: s.name,
-      policy: s.policy,
-      ...(typeof s.allowReplace === 'boolean' ? { allowReplace: s.allowReplace } : {}),
-    }))),
-    registers: Object.freeze(registers.map(r => Object.freeze({ slot: r.slot, name: r.name }))),
+    schemaVersion,
+    id,
+    kind,
+    version,
+    executionBoundary,
+    provides: Object.freeze(provides),
+    consumes: Object.freeze(consumes),
+    implSlots: Object.freeze(implSlots),
+    mechanismSlots: Object.freeze(mechanismSlots),
+    registers: Object.freeze(registers),
     writes: Object.freeze({
-      hooks: Object.freeze(rawHooks.map(h => Object.freeze({ slot: h.slot, phase: h.phase }))),
-      intercepts: Object.freeze([...(rawWrites.intercepts ?? [])]),
-      isolateProvides: Object.freeze([...(rawWrites.isolateProvides ?? [])]),
+      hooks: Object.freeze(hooks),
+      intercepts: Object.freeze(intercepts),
+      isolateProvides: Object.freeze(isolateProvides),
     }),
-    ...(typeof decl.archiveSource === 'string' ? { archiveSource: decl.archiveSource } : {}),
+    ...(typeof archiveSource === 'string' ? { archiveSource } : {}),
   });
 }

@@ -662,6 +662,7 @@
             const res = await client.api("/api/auth/settings", { method: "POST", body: { sessionPersistence: "tab" } });
             if (res.authState) state.auth = res.authState;
             if (res.snapshot) state.snapshot = res.snapshot;
+            startLiveStream();
             setNotice("\u5DF2\u542F\u7528\u6807\u7B7E\u9875\u9694\u79BB\u8BA4\u8BC1\u5E76\u8F6E\u6362\u4EE4\u724C\u3002");
           })
         }),

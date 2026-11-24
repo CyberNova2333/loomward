@@ -35,7 +35,7 @@
 #
 # rev4 修复: 去掉写死的私有仓名种子; gh --jq 输出裸字符串(非 JSON)导致 me 永远取不到; user/repos 只翻第 1 页;
 #            user/repos 返回的组织仓被错记到 username 下; 路径全部来自 policy.json(bootstrap 只需改写 policy.json)。
-import json, subprocess, os, sys, re, urllib.request, urllib.error, time
+import json, subprocess, os, sys, re, secrets, urllib.request, urllib.error, time
 # 中文 Windows / GBK 区域设置下 Python 默认按本地编码读写标准流：统一走 UTF-8，
 # 否则读到的中文会乱码或抛错（抛错多半落进 fail-open 分支），输出 ✘ 等字符也会崩。
 for _s in (sys.stdin, sys.stdout, sys.stderr):
@@ -274,7 +274,7 @@ def cnb_api_once(path, tok):
         with urllib.request.urlopen(req, timeout=15) as resp:
             return 'resolved', json.load(resp)
     except urllib.error.HTTPError as e:
-        if e.code in (403, 404):
+        if e.code == 404:
             return 'skipped', None
         return 'error', None
     except Exception:
@@ -333,8 +333,8 @@ def cnb_collect(group_path, items):
 _cnb_tok = cnb_token()
 if _cnb_tok:
     kind, groups = cnb_pages('/user/groups', _cnb_tok)
-    if kind == 'error':
-        fail('CNB 令牌已配置，但枚举 /user/groups 失败(网络/令牌无效)')
+    if kind != 'resolved':
+        fail('CNB 令牌已配置，但枚举 /user/groups 失败(网络/权限不足/令牌无效)')
     # 组织可能有子组织；逐层展开。对象里带 path(完整路径)。
     queue = [g.get('path') for g in (groups or []) if isinstance(g, dict) and g.get('path')]
     seen_paths = set()
@@ -372,15 +372,23 @@ if not EXPECTED and not priv:
          '不回写(否则会写出空名单，R1 会静默放行一切)。请配置 expected_owners，或在私有种子里列出 owners/private')
 
 now = time.time()
-os.makedirs(os.path.dirname(CACHE), mode=0o700, exist_ok=True)
-tmp = '%s.%d.tmp' % (CACHE, os.getpid())
-_tflags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0)
-_tfd = os.open(tmp, _tflags, 0o600)
-with os.fdopen(_tfd, 'w', encoding='utf-8') as _tf:
-    json.dump({'generated_at': now, 'expires_at': now + TTL, 'status': 'fresh',
-               'sources': sources, 'covered_owners': sorted(covered),
-               'private': sorted(priv), 'owners': sorted(owners), 'patterns': patterns, 'token_owners': token_owners,
-               'cnb_groups': cnb_groups},
-              _tf, ensure_ascii=False, indent=0)
-os.replace(tmp, CACHE)                                   # 原子替换，check.py 不会读到半截文件
+cache_dir = os.path.dirname(os.path.abspath(CACHE))
+os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+tmp = '%s.%d.%s.tmp' % (CACHE, os.getpid(), secrets.token_hex(6))
+_tflags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+try:
+    _tfd = os.open(tmp, _tflags, 0o600)
+    with os.fdopen(_tfd, 'w', encoding='utf-8') as _tf:
+        json.dump({'generated_at': now, 'expires_at': now + TTL, 'status': 'fresh',
+                   'sources': sources, 'covered_owners': sorted(covered),
+                   'private': sorted(priv), 'owners': sorted(owners), 'patterns': patterns, 'token_owners': token_owners,
+                   'cnb_groups': cnb_groups},
+                  _tf, ensure_ascii=False, indent=0)
+    os.replace(tmp, CACHE)                                   # 原子替换，check.py 不会读到半截文件
+except Exception:
+    try:
+        os.unlink(tmp)
+    except Exception:
+        pass
+    raise
 print('private=%d owners=%d patterns=%d sources=%s ttl=%ds' % (len(priv), len(owners), len(patterns), '+'.join(sources), TTL))

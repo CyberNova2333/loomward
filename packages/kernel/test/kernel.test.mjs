@@ -540,3 +540,130 @@ test('KernelGuard blocks Cordis context escapes (ctx.root/reflect/registry/event
     StartupRejectedError,
   );
 });
+
+test('Round 7 kernel hardening: effect/wrapService escapes blocked, rootCtx.fiber unpoisoned, wildcard extraNodes denied, isolate works per-name, and unmount/stop are bounded', async () => {
+  const { control } = await bootMinimalKernel();
+
+  let effectThis = 'unset';
+  let capturedCtx;
+  let capturedSvc;
+  let isolatedTwo;
+  await control.mountExtensionUnit({
+    contract: {
+      schemaVersion: 1,
+      id: 'r7-hardening-ext',
+      kind: 'extension-plugin',
+      version: '3.0.0-alpha.0',
+      executionBoundary: 'out-of-process',
+      consumes: ['demo:service'],
+      writes: {
+        hooks: [],
+        intercepts: [],
+        isolateProvides: ['ext:a', 'ext:b', 'ext:tracker'],
+      },
+    },
+    trust: { autoApproveTrusted: true },
+    serviceMethods: {
+      'demo:service': {
+        readInfo: { policy: 'public', mode: 'read' },
+        syncDanger: { policy: 'closed', mode: 'admin' },
+      },
+    },
+    extraNodes: [
+      // B5: wildcard extraNodes must NEVER override closed slots or root-only services.
+      { node: 'service.invoke.read:*', effect: 'allow' },
+      { node: 'service.invoke.write:host:*', effect: 'allow' },
+      { node: `service.invoke.admin:${VAULT_SLOT}#*`, effect: 'allow' },
+    ],
+    load: () => ({
+      name: 'r7-hardening-ext',
+      apply(ctx) {
+        capturedCtx = ctx;
+        capturedSvc = ctx.get('demo:service');
+        ctx.effect(function checkThis() {
+          effectThis = this;
+        });
+        // B10: array isolate isolates EVERY listed service name cleanly.
+        isolatedTwo = ctx.isolate(['ext:a', 'ext:b']);
+        isolatedTwo.provide('ext:a', { a: 1 });
+        isolatedTwo.provide('ext:b', { b: 2 });
+      },
+    }),
+  });
+
+  // B1: ctx.effect never binds raw Cordis Fiber as `this`.
+  assert.equal(effectThis, undefined);
+  // B2: shadow-target Proxy blocks descriptor bypass, mutation, prototype walk, and cordis.tracker provide.
+  assert.equal(Object.getPrototypeOf(capturedSvc), null);
+  assert.equal(typeof capturedSvc.syncDanger, 'function');
+  assert.throws(() => Object.getOwnPropertyDescriptor(capturedSvc, 'syncDanger').value(), SlotError);
+  assert.throws(() => { capturedSvc.readInfo = () => 'hacked'; }, TypeError);
+  assert.throws(
+    () => capturedCtx.isolate(['ext:tracker']).provide('ext:tracker', { [Symbol.for('cordis.tracker')]: { property: 'ctx' } }),
+    SlotError,
+  );
+  assert.throws(
+    () => capturedCtx.isolate(['ext:tracker']).provide('ext:tracker', { ok: true }, () => true),
+    SlotError,
+  );
+  // B3: rootCtx.fiber stays clean so control.getService(VAULT_SLOT) still works after mounting extensions!
+  const vaultSlot = control.getService(VAULT_SLOT);
+  assert.ok(vaultSlot);
+  assert.equal(vaultSlot.current()?.name, 'demo-vault');
+  assert.deepEqual(vaultSlot.current()?.impl.exportSecrets(), { secret: 'top-secret' });
+
+  // B5: wildcard extraNodes are stripped by evaluateGuard/compileUnitGrant and cannot override closed slots.
+  const wildcardEval = evaluateGuard({
+    contract: {
+      schemaVersion: 1,
+      id: 'wildcard-probe',
+      kind: 'extension-plugin',
+      version: '3.0.0-alpha.0',
+      executionBoundary: 'out-of-process',
+    },
+    slotRegistry: new Map([[VAULT_SLOT, { decl: { name: VAULT_SLOT, policy: 'closed' } }]]),
+    trust: { approvedActions: [], signed: true },
+    extraNodes: [
+      { node: 'service.invoke.read:*', effect: 'allow' },
+      { node: 'service.invoke.write:host:*', effect: 'allow' },
+      { node: `service.invoke.admin:${VAULT_SLOT}#*`, effect: 'allow' },
+    ],
+  });
+  assert.equal(
+    evaluatePermissionTree(
+      wildcardEval.grant.tree,
+      wildcardEval.subject,
+      `service.invoke.read:${VAULT_SLOT}#exportSecrets`,
+    ).effect,
+    'deny',
+  );
+  assert.equal(
+    evaluatePermissionTree(
+      wildcardEval.grant.tree,
+      wildcardEval.subject,
+      'service.invoke.write:host:vault#exportSecrets',
+    ).effect,
+    'deny',
+  );
+
+  // B7: hung dispose() inside extension does not wedge unmountExtensionUnit or control.stop().
+  await control.mountExtensionUnit({
+    contract: {
+      schemaVersion: 1,
+      id: 'hung-dispose-ext',
+      kind: 'extension-plugin',
+      version: '3.0.0-alpha.0',
+      executionBoundary: 'out-of-process',
+    },
+    load: () => ({
+      name: 'hung-dispose-ext',
+      apply(ctx) {
+        ctx.effect(() => () => new Promise(() => {}));
+      },
+    }),
+  });
+
+  const startedAt = Date.now();
+  await control.stop();
+  assert.ok(Date.now() - startedAt < 5000, 'control.stop() must complete boundedly despite hung extension dispose()');
+});

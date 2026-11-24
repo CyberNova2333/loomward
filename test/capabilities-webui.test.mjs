@@ -889,6 +889,14 @@ test('renderSystemdUnits builds hardened user service templates with loopback gu
   assert.match(webuiUnit, /--host/);
   assert.match(webuiUnit, /127\.0\.0\.1/);
   assert.match(webuiUnit, /18797/);
+
+  assert.throws(() => renderSystemdUnits({ stateDir: '/home/user/\nExecStartPre=/bin/id\n.state' }), /newline/i);
+  const { bridgeUnit: escapedBridge } = renderSystemdUnits({
+    stateDir: '/home/user/100%safe${HOME}',
+    host: '127.0.0.1',
+    port: 18797,
+  });
+  assert.match(escapedBridge, /100%%safe\$\$\{HOME\}/);
 });
 
 test('Docker sandbox dynamically hides disabled tools and mounts /workspace readonly when write is off', {

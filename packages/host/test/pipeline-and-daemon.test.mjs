@@ -544,3 +544,48 @@ test('Wave 2 hardening: sandbox lockdown blocks before approval, forceApproval c
   );
   assert.equal(afterStop.error.code, -32001);
 });
+
+test('Round 7 ingress hardening: unexpected-response terminates socket to trigger reconnect backoff and normalizes oversized error rpcId', async t => {
+  const { stateDir, workspace } = await makeTempState(t);
+  let terminateCalls = 0;
+  let fakeSocket;
+  const socketFactory = () => {
+    fakeSocket = new EventEmitter();
+    fakeSocket.readyState = 0; // CONNECTING
+    fakeSocket.terminate = () => {
+      terminateCalls += 1;
+      fakeSocket.readyState = 3;
+      fakeSocket.emit('close', 1006);
+    };
+    fakeSocket.close = () => { fakeSocket.readyState = 3; fakeSocket.emit('close', 1000); };
+    return fakeSocket;
+  };
+
+  const daemon = await startLoomWardDaemon({
+    rootDir: REPO_ROOT,
+    stateDir,
+    origin: 'https://bridge.example.test',
+    workspaceRoots: [workspace],
+    sandboxRuntime: createFakeSandboxRuntime(),
+    enableMcpHub: false,
+    relay: {
+      origin: 'https://bridge.example.test',
+      bridgeToken: 'synthetic-token-value-1234567890abcdef',
+      proxyProvider: () => [null],
+      socketFactory,
+    },
+  });
+  t.after(() => daemon.stop());
+
+  assert.ok(fakeSocket);
+  fakeSocket.emit('unexpected-response', { destroy() {} }, { statusCode: 503, resume() {} });
+  assert.equal(terminateCalls, 1);
+
+  const oversizedId = 'X'.repeat(400);
+  const badEnvelopeReply = await daemon.localIngress.dispatchRpc(
+    { jsonrpc: '2.0', id: oversizedId, method: 'ping' },
+    { requestId: 'invalid request id with spaces' },
+  );
+  assert.equal(badEnvelopeReply.id, null);
+  assert.ok(badEnvelopeReply.error);
+});

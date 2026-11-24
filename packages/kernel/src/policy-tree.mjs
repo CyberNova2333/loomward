@@ -146,12 +146,25 @@ function collectClosedTargets(slotRegistry) {
 function nodeTouchesForbiddenTarget(nodeStr, closedTargets) {
   if (typeof nodeStr !== 'string') return true;
   if (nodeStr === '*' || nodeStr.startsWith('impl.select:')) return true;
-  const colon = nodeStr.indexOf(':');
-  if (colon === -1) return false;
-  const res = nodeStr.slice(colon + 1);
-  const hash = res.indexOf('#');
-  const target = hash === -1 ? res : res.slice(0, hash);
-  return closedTargets.has(target);
+  if (matchPermissionNode(nodeStr, 'impl.select:__probe__') >= 0) return true;
+  for (const closedName of closedTargets) {
+    const probes = [
+      `impl.register:${closedName}`,
+      `impl.select:${closedName}`,
+      `service.intercept:${closedName}`,
+      `service.isolate-provide:${closedName}`,
+      `service.invoke.read:${closedName}#__probe__`,
+      `service.invoke.write:${closedName}#__probe__`,
+      `service.invoke.admin:${closedName}#__probe__`,
+      `mechanism.hook.before:${closedName}`,
+      `mechanism.hook.after:${closedName}`,
+      `mechanism.hook.replace:${closedName}`,
+    ];
+    for (const probe of probes) {
+      if (matchPermissionNode(nodeStr, probe) >= 0) return true;
+    }
+  }
+  return false;
 }
 
 export function compileUnitGrant(
@@ -171,6 +184,12 @@ export function compileUnitGrant(
       { node: `service.intercept:${closedName}`, effect: 'deny' },
       { node: `service.isolate-provide:${closedName}`, effect: 'deny' },
       { node: `service.invoke.*:${closedName}#*`, effect: 'deny' },
+      { node: `service.invoke.read:${closedName}#*`, effect: 'deny' },
+      { node: `service.invoke.write:${closedName}#*`, effect: 'deny' },
+      { node: `service.invoke.admin:${closedName}#*`, effect: 'deny' },
+      { node: `mechanism.hook.before:${closedName}`, effect: 'deny' },
+      { node: `mechanism.hook.after:${closedName}`, effect: 'deny' },
+      { node: `mechanism.hook.replace:${closedName}`, effect: 'deny' },
     );
   }
 

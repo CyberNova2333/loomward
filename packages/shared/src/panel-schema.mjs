@@ -53,20 +53,23 @@ function isSafePanelHref(href) {
 
 function sanitizeTable(rawTable) {
   if (!rawTable || typeof rawTable !== 'object' || Array.isArray(rawTable)) return null;
-  const columns = Array.isArray(rawTable.columns)
-    ? rawTable.columns
+  const rawColumns = rawTable.columns;
+  const rawRows = rawTable.rows;
+  const rawTitle = rawTable.title;
+  const columns = Array.isArray(rawColumns)
+    ? rawColumns
         .filter(c => typeof c === 'string')
         .slice(0, MAX_TABLE_COLUMNS)
         .map(c => clampText(c, 40))
     : [];
   if (columns.length === 0) return null;
-  const rows = Array.isArray(rawTable.rows)
-    ? rawTable.rows
+  const rows = Array.isArray(rawRows)
+    ? rawRows
         .filter(row => Array.isArray(row))
         .slice(0, MAX_TABLE_ROWS)
         .map(row => row.slice(0, columns.length).map(cell => safeScalarText(cell, 160)))
     : [];
-  const title = typeof rawTable.title === 'string' ? clampText(rawTable.title, 80) : '';
+  const title = typeof rawTitle === 'string' ? clampText(rawTitle, 80) : '';
   return {
     ...(title ? { title } : {}),
     columns,
@@ -78,85 +81,117 @@ export function validateConsolePanelDecl(decl) {
   if (!decl || typeof decl !== 'object' || Array.isArray(decl)) {
     throw new Error('Console panel declaration must be an object.');
   }
-  if (decl.schemaVersion !== undefined && decl.schemaVersion !== CONSOLE_PANEL_SCHEMA_VERSION) {
-    throw new Error(`Unsupported console panel schemaVersion: ${String(decl.schemaVersion)}`);
+  const schemaVersion = decl.schemaVersion;
+  const id = decl.id;
+  const rawTitle = decl.title;
+  const rawCategory = decl.category;
+  const getSnapshot = decl.getSnapshot;
+  const rawOrder = decl.order;
+  const rawSubtitle = decl.subtitle;
+  const rawBoundary = decl.executionBoundary;
+  const rawTrustReq = decl.trustOriginRequiredForMutations;
+
+  if (schemaVersion !== undefined && schemaVersion !== CONSOLE_PANEL_SCHEMA_VERSION) {
+    throw new Error(`Unsupported console panel schemaVersion: ${String(schemaVersion)}`);
   }
-  if (typeof decl.id !== 'string' || !PANEL_ID_RE.test(decl.id)) {
-    throw new Error(`Invalid console panel id: ${String(decl.id)}`);
+  if (typeof id !== 'string' || !PANEL_ID_RE.test(id)) {
+    throw new Error(`Invalid console panel id: ${String(id)}`);
   }
-  const title = clampText(decl.title, 80);
-  if (!title) throw new Error(`Console panel ${decl.id} requires a non-empty title.`);
-  const category = decl.category ?? 'integrations';
+  const title = clampText(rawTitle, 80);
+  if (!title) throw new Error(`Console panel ${id} requires a non-empty title.`);
+  const category = rawCategory ?? 'integrations';
   if (!PANEL_CATEGORIES.includes(category)) {
-    throw new Error(`Invalid console panel category for ${decl.id}: ${String(category)}`);
+    throw new Error(`Invalid console panel category for ${id}: ${String(category)}`);
   }
-  if (decl.getSnapshot !== undefined && typeof decl.getSnapshot !== 'function') {
-    throw new Error(`Console panel ${decl.id}.getSnapshot must be a function.`);
+  if (getSnapshot !== undefined && typeof getSnapshot !== 'function') {
+    throw new Error(`Console panel ${id}.getSnapshot must be a function.`);
   }
-  const order = Number.isFinite(decl.order) ? Math.trunc(decl.order) : 100;
+  const order = Number.isFinite(rawOrder) ? Math.trunc(rawOrder) : 100;
   return Object.freeze({
     schemaVersion: CONSOLE_PANEL_SCHEMA_VERSION,
-    id: decl.id,
+    id,
     title,
-    subtitle: clampText(decl.subtitle ?? '', 160),
+    subtitle: clampText(rawSubtitle ?? '', 160),
     category,
     order,
-    executionBoundary: decl.executionBoundary === 'in-process-root' ? 'in-process-root' : 'out-of-process',
+    executionBoundary: rawBoundary === 'in-process-root' ? 'in-process-root' : 'out-of-process',
     readOnly: true,
-    trustOriginRequiredForMutations: decl.trustOriginRequiredForMutations !== false,
-    ...(typeof decl.getSnapshot === 'function' ? { getSnapshot: decl.getSnapshot } : {}),
+    trustOriginRequiredForMutations: rawTrustReq !== false,
+    ...(typeof getSnapshot === 'function' ? { getSnapshot } : {}),
   });
 }
 
 export function sanitizeConsolePanelSnapshot(panelDecl, rawSnapshot, { executionBoundary } = {}) {
-  const rawStatus = rawSnapshot?.status === 'degraded' ? 'warn' : rawSnapshot?.status;
+  const snapObj = rawSnapshot && typeof rawSnapshot === 'object' ? rawSnapshot : null;
+  const snapStatus = snapObj?.status;
+  const rawStatus = snapStatus === 'degraded' ? 'warn' : snapStatus;
   const safeStatus = PANEL_STATUSES.includes(rawStatus) ? rawStatus : 'idle';
-  const summary = Array.isArray(rawSnapshot?.summary)
-    ? rawSnapshot.summary
+  const rawSummary = snapObj?.summary;
+  const summary = Array.isArray(rawSummary)
+    ? rawSummary
         .filter(item => item && typeof item === 'object' && !Array.isArray(item))
         .slice(0, MAX_SUMMARY_ITEMS)
-        .map(item => ({
-          label: clampText(item.label, 48) || '指标',
-          value: safeScalarText(item.value, 96),
-          tone: PANEL_TONES.includes(item.tone) ? item.tone : 'neutral',
-        }))
+        .map(item => {
+          const itemLabel = item.label;
+          const itemValue = item.value;
+          const itemTone = item.tone;
+          return {
+            label: clampText(itemLabel, 48) || '指标',
+            value: safeScalarText(itemValue, 96),
+            tone: PANEL_TONES.includes(itemTone) ? itemTone : 'neutral',
+          };
+        })
     : [];
 
   const tables = [];
-  if (Array.isArray(rawSnapshot?.tables)) {
-    for (const rawTable of rawSnapshot.tables) {
+  const rawTables = snapObj?.tables;
+  if (Array.isArray(rawTables)) {
+    for (const rawTable of rawTables) {
       if (tables.length >= MAX_TABLES) break;
       const sanitized = sanitizeTable(rawTable);
       if (sanitized) tables.push(sanitized);
     }
   }
-  if (tables.length === 0 && rawSnapshot?.table) {
-    const sanitized = sanitizeTable(rawSnapshot.table);
+  const rawSingleTable = tables.length === 0 ? snapObj?.table : null;
+  if (tables.length === 0 && rawSingleTable) {
+    const sanitized = sanitizeTable(rawSingleTable);
     if (sanitized) tables.push(sanitized);
   }
   const table = tables[0] ?? null;
 
-  const notices = Array.isArray(rawSnapshot?.notices)
-    ? rawSnapshot.notices
+  const rawNotices = snapObj?.notices;
+  const notices = Array.isArray(rawNotices)
+    ? rawNotices
         .filter(n => n && typeof n === 'object' && !Array.isArray(n))
         .slice(0, MAX_NOTICES)
-        .map(n => ({
-          tone: PANEL_TONES.includes(n.tone) ? n.tone : 'info',
-          text: clampText(n.text, 240),
-        }))
+        .map(n => {
+          const nTone = n.tone;
+          const nText = n.text;
+          return {
+            tone: PANEL_TONES.includes(nTone) ? nTone : 'info',
+            text: clampText(nText, 240),
+          };
+        })
         .filter(n => n.text.length > 0)
     : [];
 
-  const links = Array.isArray(rawSnapshot?.links)
-    ? rawSnapshot.links
-        .filter(l => l && typeof l === 'object' && !Array.isArray(l) && isSafePanelHref(l.href))
-        .slice(0, MAX_LINKS)
-        .map(l => ({
-          label: clampText(l.label, 48) || '打开链接',
-          href: l.href.trim(),
-        }))
-    : [];
+  const rawLinks = snapObj?.links;
+  const links = [];
+  if (Array.isArray(rawLinks)) {
+    for (const l of rawLinks) {
+      if (links.length >= MAX_LINKS) break;
+      if (!l || typeof l !== 'object' || Array.isArray(l)) continue;
+      const href = l.href;
+      if (!isSafePanelHref(href)) continue;
+      const label = l.label;
+      links.push({
+        label: clampText(label, 48) || '打开链接',
+        href: href.trim(),
+      });
+    }
+  }
 
+  const rawUpdatedAt = snapObj?.updatedAt;
   const effectiveBoundary = executionBoundary === 'in-process-root' || executionBoundary === 'out-of-process'
     ? executionBoundary
     : panelDecl.executionBoundary;
@@ -171,7 +206,7 @@ export function sanitizeConsolePanelSnapshot(panelDecl, rawSnapshot, { execution
     executionBoundary: effectiveBoundary,
     readOnly: true,
     status: safeStatus,
-    updatedAt: typeof rawSnapshot?.updatedAt === 'string' ? clampText(rawSnapshot.updatedAt, 64) : new Date().toISOString(),
+    updatedAt: typeof rawUpdatedAt === 'string' ? clampText(rawUpdatedAt, 64) : new Date().toISOString(),
     summary,
     table,
     tables,

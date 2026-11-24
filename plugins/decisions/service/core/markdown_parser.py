@@ -20,6 +20,31 @@ from core.contracts import canonical_impl_state
 MAX_MARKDOWN_BYTES = 10 * 1024 * 1024
 
 
+def _split_lines_lf(text: str, keepends: bool = False) -> List[str]:
+    """仅按 LF/CRLF 拆分行，防止 \\u2028 / \\u2029 / \\x85 撕裂 Frontmatter 键值对。"""
+    if not text:
+        return []
+    parts = re.split(r'(\r\n|\n)', text)
+    lines: List[str] = []
+    for idx in range(0, len(parts), 2):
+        chunk = parts[idx]
+        sep = parts[idx + 1] if idx + 1 < len(parts) else ""
+        if not chunk and not sep:
+            continue
+        lines.append((chunk + sep) if keepends else chunk)
+    return lines
+
+
+def _yaml_json_str(value: Any) -> str:
+    """将 Frontmatter 标量序列化为单行安全 JSON 字符串，显式转义 Unicode 行分隔符。"""
+    return (
+        json.dumps(value, ensure_ascii=False)
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+        .replace("\x85", "\\u0085")
+    )
+
+
 def _read_regular_markdown_bytes(file_path: Path, max_bytes: int = MAX_MARKDOWN_BYTES) -> Optional[bytes]:
     """安全读取普通 Markdown 文件字节：拒绝符号链接、非普通文件及超大文件。"""
     if file_path.is_symlink():
@@ -88,7 +113,7 @@ class TopicMarkdownParser:
         返回 (metadata_dict, remaining_body)
         """
         metadata: Dict[str, Any] = {}
-        lines = text.splitlines(keepends=True)
+        lines = _split_lines_lf(text, keepends=True)
         if not lines:
             return metadata, text
 
@@ -237,7 +262,7 @@ class TopicMarkdownParser:
         topic_id = str(meta.get("id", "")).strip() or default_id
         title = str(meta.get("title", "")).strip()
 
-        lines = body.splitlines()
+        lines = _split_lines_lf(body)
 
         # 1. 提取标题（若 Frontmatter 未声明）：必须在代码围栏之外扫描
         if not title:
@@ -443,7 +468,7 @@ class TopicMarkdownParser:
     @classmethod
     def amend_round(cls, original, replacements):
         """Replace selected reply fields; preserve title, other fields and preamble."""
-        lines = original["content"].splitlines()
+        lines = _split_lines_lf(original["content"])
         starts = []
         fence = None
         for index, line in enumerate(lines):
@@ -563,22 +588,22 @@ class TopicMarkdownParser:
         front = [
             "---",
             'schema_version: "2.0"',
-            f'id: {json.dumps(topic_id, ensure_ascii=False)}',
-            f'title: {json.dumps(title, ensure_ascii=False)}',
+            f'id: {_yaml_json_str(topic_id)}',
+            f'title: {_yaml_json_str(title)}',
             f'version: {version}',
-            f'section: {json.dumps(section, ensure_ascii=False)}',
-            f'object: {json.dumps(obj, ensure_ascii=False)}',
-            f'function: {json.dumps(func, ensure_ascii=False)}',
-            f'priority: {json.dumps(priority, ensure_ascii=False)}',
-            f'workflow_state: {json.dumps(workflow_state, ensure_ascii=False)}',
-            f'decision_status: {json.dumps(decision_status, ensure_ascii=False)}',
-            f'sources: {json.dumps(sources, ensure_ascii=False)}',
-            f'decision_outcome: {json.dumps(decision_outcome, ensure_ascii=False)}',
-            f'rejection_reason: {json.dumps(rejection_reason, ensure_ascii=False)}',
-            f'superseded_by: {json.dumps(superseded_by, ensure_ascii=False)}',
-            f'implementation_state: {json.dumps(implementation_state, ensure_ascii=False)}',
-            f'impl_commit: {json.dumps(impl_commit, ensure_ascii=False)}',
-            f'impl_verifier: {json.dumps(impl_verifier, ensure_ascii=False)}',
+            f'section: {_yaml_json_str(section)}',
+            f'object: {_yaml_json_str(obj)}',
+            f'function: {_yaml_json_str(func)}',
+            f'priority: {_yaml_json_str(priority)}',
+            f'workflow_state: {_yaml_json_str(workflow_state)}',
+            f'decision_status: {_yaml_json_str(decision_status)}',
+            f'sources: {_yaml_json_str(sources)}',
+            f'decision_outcome: {_yaml_json_str(decision_outcome)}',
+            f'rejection_reason: {_yaml_json_str(rejection_reason)}',
+            f'superseded_by: {_yaml_json_str(superseded_by)}',
+            f'implementation_state: {_yaml_json_str(implementation_state)}',
+            f'impl_commit: {_yaml_json_str(impl_commit)}',
+            f'impl_verifier: {_yaml_json_str(impl_verifier)}',
             "---",
             ""
         ]

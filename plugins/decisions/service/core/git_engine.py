@@ -48,7 +48,7 @@ class GitCommitResult:
 
 class GitEngine:
     def __init__(self, repo_root: Path, config: Optional[Config] = None):
-        self.repo_root = repo_root
+        self.repo_root = Path(repo_root).resolve()
         self.config = config
         self._git_bin = shutil.which("git") or "git"
 
@@ -110,7 +110,11 @@ class GitEngine:
             rel = path.relative_to(self.repo_root)
             return str(rel).replace("\\", "/")
         except ValueError:
-            return str(path).replace("\\", "/")
+            try:
+                rel = path.resolve().relative_to(self.repo_root)
+                return str(rel).replace("\\", "/")
+            except ValueError:
+                return str(path).replace("\\", "/")
 
     def get_commit_history(self, limit: int = 30) -> List[Dict[str, str]]:
         """获取最近 Git 提交记录"""
@@ -131,8 +135,15 @@ class GitEngine:
         return commits
 
     def stage_files(self, paths: List[Path]) -> bool:
-        """添加指定文件至暂存区"""
-        rel_paths = [self.normalize_rel_path(p) for p in paths]
+        """添加指定文件至暂存区（跳过既不存在于磁盘也未曾被索引跟踪的可选/临时路径）。"""
+        rel_paths = []
+        for p in paths:
+            rel = self.normalize_rel_path(p)
+            if not p.exists() and not p.is_symlink():
+                tracked, _, _ = self.run_git(["ls-files", "--error-unmatch", "--", f":(literal){rel}"])
+                if not tracked:
+                    continue
+            rel_paths.append(rel)
         if not rel_paths:
             self.last_stage_error = ""
             return True

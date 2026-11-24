@@ -46,9 +46,13 @@ export function createLocalMcpIngress({
       } = {},
     ) {
       if (!running) {
+        const rawId = body?.id;
+        const safeId = rawId === null || (typeof rawId === 'number' && Number.isFinite(rawId)) || (typeof rawId === 'string' && rawId.length <= 256)
+          ? rawId
+          : null;
         return {
           jsonrpc: '2.0',
-          id: body?.id ?? null,
+          id: safeId,
           error: { code: -32001, message: 'Local ingress is not running.' },
         };
       }

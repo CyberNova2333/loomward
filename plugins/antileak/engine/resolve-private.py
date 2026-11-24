@@ -18,7 +18,7 @@
 #     非 Public 即 private；404/403 -> 看不到；其余 -> error。owner/repo 形态只查该 owner 恰好是某个组织路径末段的那些。
 #   * 被问到的来源都说看不到 -> absent(不是任何已知 owner 的私有仓 => 放行)；有来源报错 -> error(拦)。
 #   * 结果写入 <private_cache>.resolve.json 负缓存: public/absent 24h，private 也 24h(下一次 refresh 会把它并进正式名单)。
-import sys, os, re, json, time, subprocess, urllib.request, urllib.error
+import sys, os, re, json, time, secrets, subprocess, urllib.request, urllib.error, urllib.parse
 # 中文 Windows / GBK 区域设置下 Python 默认按本地编码读写标准流：统一走 UTF-8，
 # 否则读到的中文会乱码或抛错（抛错多半落进 fail-open 分支），输出 ✘ 等字符也会崩。
 for _s in (sys.stdin, sys.stdout, sys.stderr):
@@ -73,10 +73,20 @@ def cnb_token():
     return None
 
 
+def _safe_seg(seg):
+    return urllib.parse.quote(seg, safe='')
+
+
+def _safe_group_path(group_path):
+    return '/'.join(_safe_seg(p) for p in group_path.split('/') if p)
+
+
 def api(owner, repo, tok):
+    if owner in ('', '.', '..') or repo in ('', '.', '..'):
+        return 'skip'
     for attempt in range(2):
         try:
-            req = urllib.request.Request('https://api.github.com/repos/%s/%s' % (owner, repo),
+            req = urllib.request.Request('https://api.github.com/repos/%s/%s' % (_safe_seg(owner), _safe_seg(repo)),
                                          headers={'Authorization': 'Bearer ' + tok, 'Accept': 'application/vnd.github+json',
                                                   'User-Agent': 'resolve-private'})
             with urllib.request.urlopen(req, timeout=PER_CALL_TIMEOUT) as resp:
@@ -97,8 +107,10 @@ def api(owner, repo, tok):
 
 
 def gh_api(owner, repo):
+    if owner in ('', '.', '..') or repo in ('', '.', '..'):
+        return 'skip'
     try:
-        r = subprocess.run(['gh', 'api', 'repos/%s/%s' % (owner, repo), '--jq', '.private'],
+        r = subprocess.run(['gh', 'api', 'repos/%s/%s' % (_safe_seg(owner), _safe_seg(repo)), '--jq', '.private'],
                            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=8)
         if r.returncode == 0 and r.stdout.strip() in ('true', 'false'):
             return 'private' if r.stdout.strip() == 'true' else 'public'
@@ -111,9 +123,11 @@ def gh_api(owner, repo):
 
 def cnb_api(group_path, repo, tok):
     """GET /{组织路径}/{仓名}：200 看 visibility_level；404/403 看不到；其余 error。必须带 accept: application/json。"""
+    if repo in ('', '.', '..') or any(p in ('', '.', '..') for p in group_path.split('/')):
+        return 'skip'
     for attempt in range(2):
         try:
-            req = urllib.request.Request('%s/%s/%s' % (CNB_API, group_path, repo),
+            req = urllib.request.Request('%s/%s/%s' % (CNB_API, _safe_group_path(group_path), _safe_seg(repo)),
                                          headers={'Authorization': 'Bearer ' + tok, 'accept': 'application/json',
                                                   'User-Agent': 'resolve-private'})
             with urllib.request.urlopen(req, timeout=PER_CALL_TIMEOUT) as resp:
@@ -135,7 +149,7 @@ def cnb_api(group_path, repo, tok):
     return 'error'
 
 
-def resolve_github(name, owners, toks, token_owners):
+def resolve_github(name, owners, toks, token_owners, use_gh=False):
     if '/' in name:
         o, repo = name.split('/', 1); owners = [o]
     else:
@@ -151,8 +165,8 @@ def resolve_github(name, owners, toks, token_owners):
                 got = r; break
             if r == 'error':
                 any_error = True
-        if got is None:
-            # 没有 token，或者所有 token 都答不上来 —— 两种情况都要问 gh(对等来源，不是末位兜底)。
+        if got is None and use_gh:
+            # 仅当 refresh 成功记录了 gh 来源时才查询 gh CLI，避免纯 PAT 环境被未登录的 gh 阻塞。
             r = gh_api(o, repo)
             if r in ('private', 'public'):
                 got = r
@@ -201,7 +215,9 @@ def main(names):
     owners = sorted(set(cache.get('owners', [])) | set(cache.get('covered_owners', [])) | set(seed.get('owners', [])))
     token_owners = cache.get('token_owners', {})
     srcs = cache.get('sources', [])
-    use_github = any(s == 'gh' or s.startswith('token') for s in srcs)
+    use_gh = 'gh' in srcs
+    use_tokens = any(s.startswith('token') or s == 'token' for s in srcs)
+    use_github = use_gh or use_tokens
     use_cnb = 'cnb' in srcs
     toks = tokens(); ctok = cnb_token() if use_cnb else None
     neg = load(NEG); now = time.time(); out = {}
@@ -212,25 +228,39 @@ def main(names):
             out[n] = {'status': e['status'], 'owner': e.get('owner', ''), 'cached': True}; continue
         results = []
         if use_github and owners:
-            results.append(resolve_github(n, owners, toks, token_owners))
-        if use_cnb and ctok and cache.get('cnb_groups'):
-            results.append(resolve_cnb(n, cache.get('cnb_groups', []), ctok))
+            if not use_gh and not toks:
+                results.append({'status': 'error', 'owner': ''})
+            else:
+                results.append(resolve_github(n, owners, toks, token_owners, use_gh=use_gh))
+        if use_cnb:
+            if not ctok or not cache.get('cnb_groups'):
+                results.append({'status': 'error', 'owner': ''})
+            else:
+                results.append(resolve_cnb(n, cache.get('cnb_groups', []), ctok))
         if not results:
             out[n] = {'status': 'error', 'owner': '', 'note': 'no usable source (refresh recorded none)'}; continue
         r = merge(results)
         out[n] = r
         if r['status'] != 'error':
             neg[key] = {'status': r['status'], 'owner': r.get('owner', ''), 'ts': now}
+    tmp = None
     try:
         neg = {k: v for k, v in neg.items() if now - v.get('ts', 0) < NEG_TTL}
-        tmp = '%s.%d.tmp' % (NEG, os.getpid())
-        _tflags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0)
+        neg_dir = os.path.dirname(os.path.abspath(NEG))
+        os.makedirs(neg_dir, mode=0o700, exist_ok=True)
+        tmp = '%s.%d.%s.tmp' % (NEG, os.getpid(), secrets.token_hex(6))
+        _tflags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
         _tfd = os.open(tmp, _tflags, 0o600)
         with os.fdopen(_tfd, 'w', encoding='utf-8') as _tf:
             json.dump(neg, _tf)
         os.replace(tmp, NEG)
+        tmp = None
     except Exception:
-        pass
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
     print(json.dumps(out, ensure_ascii=False))
 
 

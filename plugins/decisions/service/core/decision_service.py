@@ -19,7 +19,7 @@ from typing import Dict, Any, Optional, List
 
 from core.config import Config
 from core.db import DatabaseManager, VersionConflictError
-from core.markdown_parser import TopicMarkdownParser
+from core.markdown_parser import TopicMarkdownParser, _read_regular_markdown_bytes
 from core.git_engine import GitEngine, GitCommitResult
 from core.recovery import RecoveryManager
 from core.contracts import (validate_portable_id, canonical_impl_state, decision_axes,
@@ -256,12 +256,12 @@ class DecisionService:
                     )
                 allocated_version = initial_version
 
-        if md_file.exists():
+        if md_file.exists() or md_file.is_symlink():
             if not existing_row and not cached_prep:
                 raise TopicValidationError("议题 Markdown 已存在但尚未索引，请先核对并重建索引")
             try:
-                existing_disk_text = md_file.read_text(encoding="utf-8")
                 parsed_disk = self.parser.parse_markdown_file(md_file)
+                existing_disk_text = parsed_disk.get("raw_text") if parsed_disk else None
                 if parsed_disk:
                     disk_ver = parsed_disk.get("version", 1)
                     if is_interrupted_prior_attempt:
@@ -446,7 +446,23 @@ class DecisionService:
         # user words into another field or swallowing history with an open fence.
         expected_rounds = render_rounds + ([new_round_info] if new_round_info else [])
         new_round_num = len(expected_rounds)
-        self._validate_document(md_text, topic_id, core_content, expected_rounds)
+        self._validate_document(
+            md_text,
+            topic_id,
+            core_content,
+            expected_rounds,
+            expected_meta={
+                "title": title,
+                "version": allocated_version,
+                "workflow_state": wf_state,
+                "decision_outcome": outcome,
+                "implementation_state": impl_state,
+                "impl_commit": impl_commit,
+                "impl_verifier": impl_verifier,
+                "rejection_reason": rejection_reason,
+                "superseded_by": superseded_by,
+            },
+        )
         if not cached_prep:
             # 外部 Markdown 改动检测：若在本次保存前磁盘轮次已被直接编辑，先将该真实前态导入为独立基线 (F10, G02)
             if existing_row and existing_doc:
@@ -844,10 +860,16 @@ class DecisionService:
 
         return result
 
-    def _validate_document(self, md_text, topic_id, core_content, expected_rounds):
+    def _validate_document(self, md_text, topic_id, core_content, expected_rounds, expected_meta: Optional[Dict[str, Any]] = None):
         parsed_result = self.parser.parse_markdown_text(md_text, topic_id)
         normalize = lambda value: value.replace("\r\n", "\n").strip()
         valid = normalize(parsed_result["core_content"]) == normalize(core_content)
+        valid = valid and parsed_result.get("id") == topic_id
+        if valid and expected_meta:
+            for meta_key, meta_val in expected_meta.items():
+                if parsed_result.get(meta_key) != meta_val:
+                    valid = False
+                    break
         valid = valid and len(parsed_result["rounds"]) == len(expected_rounds)
         if valid:
             for actual, wanted in zip(parsed_result["rounds"], expected_rounds):
@@ -857,15 +879,23 @@ class DecisionService:
                 if "content" in wanted and normalize(actual["content"]) != normalize(wanted["content"]):
                     valid = False
         if not valid:
-            raise TopicValidationError("正文或讨论与 Markdown 记录分隔符冲突，无法完整保存。请闭合代码围栏；如需引用历史标题或用户/团队字段标头，请放入闭合的代码围栏中。")
+            raise TopicValidationError("正文、Frontmatter 元数据或讨论与 Markdown 记录分隔符冲突，无法完整保存。请闭合代码围栏；如需引用历史标题或用户/团队字段标头，请放入闭合的代码围栏中。")
 
     def _render_snapshot_topic(self, topic_id, row, version=None):
         wf_state = row.get("workflow_state") or row.get("lifecycle_status", "discussing")
         lifecycle_badge = self.get_lifecycle_badge(wf_state)
         rounds = self._reconstruct_rounds_from_topic(row)
+        eff_version = version if version is not None else row.get("version", 1)
+        eff_title = row.get("title", topic_id)
+        eff_outcome = row.get("decision_outcome", "")
+        eff_rejection = row.get("rejection_reason", "")
+        eff_superseded = row.get("superseded_by", "")
+        eff_impl_state = canonical_impl_state(row.get("implementation_state") or row.get("impl_status", "not_started"))
+        eff_impl_commit = row.get("impl_commit", "")
+        eff_impl_verifier = row.get("impl_verifier", "")
         md_text = self.parser.serialize_markdown(
             topic_id=topic_id,
-            title=row.get("title", topic_id),
+            title=eff_title,
             lifecycle_badge=lifecycle_badge,
             decision_status=row.get("decision_status", "已定"),
             impl_status=row.get("impl_status", "未实现"),
@@ -875,17 +905,33 @@ class DecisionService:
             core_content=row.get("content", ""),
             existing_rounds=rounds,
             workflow_state=wf_state,
-            decision_outcome=row.get("decision_outcome", ""),
-            rejection_reason=row.get("rejection_reason", ""),
-            superseded_by=row.get("superseded_by", ""),
-            implementation_state=canonical_impl_state(row.get("implementation_state") or row.get("impl_status", "not_started")),
-            impl_commit=row.get("impl_commit", ""),
-            impl_verifier=row.get("impl_verifier", ""),
-            version=version if version is not None else row.get("version", 1),
+            decision_outcome=eff_outcome,
+            rejection_reason=eff_rejection,
+            superseded_by=eff_superseded,
+            implementation_state=eff_impl_state,
+            impl_commit=eff_impl_commit,
+            impl_verifier=eff_impl_verifier,
+            version=eff_version,
             section=row.get("section", "未分类"),
             sources=row.get("sources", "")
         )
-        self._validate_document(md_text, topic_id, row.get("content", ""), rounds)
+        self._validate_document(
+            md_text,
+            topic_id,
+            row.get("content", ""),
+            rounds,
+            expected_meta={
+                "title": eff_title,
+                "version": eff_version,
+                "workflow_state": wf_state,
+                "decision_outcome": eff_outcome,
+                "implementation_state": eff_impl_state,
+                "impl_commit": eff_impl_commit,
+                "impl_verifier": eff_impl_verifier,
+                "rejection_reason": eff_rejection,
+                "superseded_by": eff_superseded,
+            },
+        )
         return md_text
 
     @staticmethod
@@ -935,6 +981,10 @@ class DecisionService:
         P1-C: 精准恢复单个议题至历史快照状态，不波及其他议题，并保留完整字段与轮次结构 (R06, F02, F06, F07, F08)
         """
         topic_id = self.validate_topic_id(topic_id)
+        if not isinstance(author, str) or not author.strip() or not isinstance(reason, str):
+            raise TopicValidationError("操作人与原因必须为字符串，且操作人不能为空")
+        author = author.strip()
+        reason = reason.strip()
 
         # 1. 幂等性校验 (F08, U04, N07)
         req_hash = self.restore_request_hash(topic_id, rev_id, author, reason, expected_version)
@@ -1274,6 +1324,10 @@ class DecisionService:
         """
         P1-C: 全库恢复至指定快照，同时清理目标快照外的多余文件并保持字段完整 (R05, R06, F04, F06)
         """
+        if not isinstance(author, str) or not author.strip():
+            raise TopicValidationError("操作人 author 必须为非空字符串")
+        author = author.strip()
+
         # 0. 预检快照有效性及路径安全，在产生任何状态变更前完成强校验 (F04, I07)
         rev_row = self.db.get_revision_by_id(rev_id)
         if not rev_row:
@@ -1290,7 +1344,10 @@ class DecisionService:
                 raise ValueError(f"快照中包含重复或仅大小写不同的 ID: [{tid}]")
             seen_ids.add(tid.casefold())
             self._render_snapshot_topic(tid, t)
-            md_file = (self.config.decisions_dir / f"{tid}.md").resolve()
+            raw_md = self.config.decisions_dir / f"{tid}.md"
+            if raw_md.is_symlink():
+                raise TopicValidationError(f"拒绝操作符号链接议题文件: [{tid}]")
+            md_file = raw_md.resolve()
             try:
                 md_file.relative_to(resolved_decisions_dir)
             except ValueError:
@@ -1304,32 +1361,37 @@ class DecisionService:
             if current_revision != expected_revision:
                 raise VersionConflictError(current_revision, expected_revision, "__board__")
 
-        # 备份数据库文件与当前 live 文件，以实现真正的原子性故障回滚 (U06, U07, R06, R12)
-        db_path = self.config.database_path
-        db_backup = db_path.with_suffix(f".bak.{uuid.uuid4().hex[:8]}")
-        bak_conn = None
-        try:
-            bak_conn = sqlite3.connect(str(db_backup))
-            with self.db.get_connection() as live_conn:
-                live_conn.backup(bak_conn)
-        except Exception:
-            shutil.copy2(db_path, db_backup)
-        finally:
-            if bak_conn is not None:
-                bak_conn.close()
-
-        orig_metadata_bytes = self.config.metadata_json_path.read_bytes() if self.config.metadata_json_path.exists() else None
-
         live_backups = {}
         if self.config.decisions_dir.exists():
             for p in self.config.decisions_dir.glob("*.md"):
-                live_backups[p.name] = p.read_bytes()
+                try:
+                    raw_bytes = _read_regular_markdown_bytes(p)
+                except ValueError as exc:
+                    raise TopicValidationError(f"决策目录包含非法或受限文件，已取消回滚: {exc}") from exc
+                if raw_bytes is not None:
+                    live_backups[p.name] = raw_bytes
 
+        # 备份数据库文件与当前 live 文件，以实现真正的原子性故障回滚 (U06, U07, R06, R12)
+        db_path = self.config.database_path
+        db_backup = db_path.with_suffix(f".bak.{uuid.uuid4().hex[:8]}")
         archive_dir = self.config.decisions_dir / ".archived_rollback"
         archived_moves = []
         staged_files = [self.config.metadata_json_path, self.config.database_path]
 
         try:
+            bak_conn = None
+            try:
+                bak_conn = sqlite3.connect(str(db_backup))
+                with self.db.get_connection() as live_conn:
+                    live_conn.backup(bak_conn)
+            except Exception:
+                shutil.copy2(db_path, db_backup)
+            finally:
+                if bak_conn is not None:
+                    bak_conn.close()
+
+            orig_metadata_bytes = self.config.metadata_json_path.read_bytes() if self.config.metadata_json_path.exists() else None
+
             # 1. 归档快照之外的多余文件
             if self.config.decisions_dir.exists():
                 for p in self.config.decisions_dir.glob("*.md"):
@@ -1347,7 +1409,10 @@ class DecisionService:
             # 3. 写回快照中的所有 Markdown 文件 (原子替换并保持完整字段)
             for t in target_topics:
                 tid = t["id"]
-                md_file = (self.config.decisions_dir / f"{tid}.md").resolve()
+                raw_md = self.config.decisions_dir / f"{tid}.md"
+                if raw_md.is_symlink():
+                    raise TopicValidationError(f"拒绝写入符号链接议题文件: [{tid}]")
+                md_file = raw_md.resolve()
                 md_text = self._render_snapshot_topic(tid, t)
                 temp_file = md_file.with_suffix(f".tmp.{uuid.uuid4().hex[:8]}")
                 try:

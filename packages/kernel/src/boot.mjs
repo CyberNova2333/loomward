@@ -21,6 +21,24 @@ import { KernelGuard, createGuardedUnitState } from './guard.mjs';
 import { createGuardPipeline, evaluateGuard } from './rules.mjs';
 
 const MAX_AUDIT_REPORT = 1000;
+const DISPOSE_TIMEOUT_MS = 2000;
+
+async function disposeFiberBounded(fiber, timeoutMs = DISPOSE_TIMEOUT_MS) {
+  if (!fiber || typeof fiber.dispose !== 'function') return;
+  let timer;
+  const disposePromise = Promise.resolve().then(() => fiber.dispose()).catch(() => {});
+  try {
+    await Promise.race([
+      disposePromise,
+      new Promise(resolve => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export const PLATFORM_SLOTS = Object.freeze({
   vaultBackend: Object.freeze({ name: VAULT_SLOT, cardinality: 'single', policy: 'closed' }),
@@ -249,6 +267,9 @@ export async function createLoomWardKernel({ rpm, roots = [], expectedTarget = n
       let fiber;
       try {
         const mod = typeof load === 'function' ? await load() : load;
+        if (stopped) {
+          throw new StartupRejectedError(REJECT_CODES.GUARD_INDETERMINATE, contract.id, 'Kernel stopped during extension mount.');
+        }
         const applyFn = typeof mod === 'function'
           ? mod
           : (mod && typeof mod === 'object' && typeof mod.apply === 'function' ? mod.apply : null);
@@ -266,6 +287,7 @@ export async function createLoomWardKernel({ rpm, roots = [], expectedTarget = n
         fiber = unitCtx.plugin({
           name: (mod && typeof mod === 'object' && mod.name) || contract.id,
           apply(childCtx, cfg) {
+            if (stopped) return;
             const facade = guard.createRestrictedFacade(childCtx, rootCtx, state);
             return applyFn(facade, cfg);
           },
@@ -279,9 +301,7 @@ export async function createLoomWardKernel({ rpm, roots = [], expectedTarget = n
         }
       } catch (error) {
         guard.unregisterUnit(contract.id);
-        if (fiber) {
-          await fiber.dispose().catch(() => {});
-        }
+        await disposeFiberBounded(fiber);
         throw error;
       } finally {
         inFlightMounts.delete(contract.id);
@@ -310,7 +330,7 @@ export async function createLoomWardKernel({ rpm, roots = [], expectedTarget = n
       if (!record) return false;
       mountedUnits.delete(unitId);
       guard.unregisterUnit(unitId);
-      await record.fiber.dispose();
+      await disposeFiberBounded(record.fiber);
       recordAudit(unitId, AUDIT_CODES.AUDIT_UNIT_UNMOUNTED);
       return true;
     }
@@ -348,7 +368,7 @@ export async function createLoomWardKernel({ rpm, roots = [], expectedTarget = n
           await unmountExtensionUnit(unitId).catch(() => {});
         }
         disposeGetHook();
-        await rootCtx.fiber.dispose();
+        await disposeFiberBounded(rootCtx.fiber);
         rootFibers.clear();
       },
     });

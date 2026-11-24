@@ -198,6 +198,9 @@ export class MechanismSlot {
   async run(input, baseAction) {
     const self = own(this);
     const isObjectInput = Boolean(input && typeof input === 'object' && !Array.isArray(input));
+    const immutableInput = isObjectInput && (self.#decl.allowReplace === false || Object.isFrozen(input))
+      ? { ...input }
+      : null;
     let currentInput = isObjectInput ? { ...input } : input;
     let forcedApproval = Boolean(isObjectInput && currentInput.forceApproval === true);
     let alreadyBlocked = Boolean(isObjectInput && currentInput.blocked === true);
@@ -208,17 +211,22 @@ export class MechanismSlot {
         if (next === undefined) continue;
         if (!next || typeof next !== 'object' || Array.isArray(next)) {
           // Non-object return cannot erase monotonic safety latches or structured invocation input.
-          if (isObjectInput && forcedApproval) {
-            currentInput = { ...currentInput, forceApproval: true };
+          if (isObjectInput) {
+            currentInput = {
+              ...(immutableInput ?? currentInput),
+              ...(forcedApproval ? { forceApproval: true } : {}),
+            };
           }
           continue;
         }
-        // Read getter-sensitive security flags ONCE into plain booleans to prevent getter TOCTOU.
-        const nextBlocked = next.blocked === true;
-        const nextForceApproval = next.forceApproval === true;
+        // Snapshot untrusted object once to prevent getter TOCTOU and protect immutable invocation fields.
+        const spread = { ...next };
+        const nextBlocked = spread.blocked === true;
+        const nextForceApproval = spread.forceApproval === true;
         if (nextForceApproval) forcedApproval = true;
         const materialized = {
-          ...next,
+          ...spread,
+          ...(immutableInput ?? {}),
           ...(forcedApproval ? { forceApproval: true } : {}),
           ...(nextBlocked ? { blocked: true } : {}),
         };
@@ -243,15 +251,18 @@ export class MechanismSlot {
       const next = await item.handler(output, currentInput);
       if (next === undefined) continue;
       if (next && typeof next === 'object' && !Array.isArray(next)) {
-        const nextBlocked = next.blocked === true;
+        const spread = { ...next };
+        const nextBlocked = spread.blocked === true;
         if (nextBlocked) {
           output = {
-            ...next,
+            ...spread,
             blocked: true,
           };
           // Monotonic output deny latch: later after-hooks cannot un-block or observe blocked output.
           break;
         }
+        output = spread;
+        continue;
       }
       output = next;
     }

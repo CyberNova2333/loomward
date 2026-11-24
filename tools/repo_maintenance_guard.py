@@ -216,7 +216,7 @@ def staged(exceptions: dict) -> list[str]:
     try:
         entries = []
         for offset in range(0, len(paths), 200):
-            entries.extend(git('ls-files', '--stage', '-z', '--', *paths[offset:offset + 200]).split(b'\0'))
+            entries.extend(git('--literal-pathspecs', 'ls-files', '--stage', '-z', '--', *paths[offset:offset + 200]).split(b'\0'))
         for entry in filter(None, entries):
             info, raw_path = entry.split(b'\t', 1)
             path = os.fsdecode(raw_path)

@@ -131,8 +131,28 @@ export function redactSecretsFromText(text, serverConfig = null, maxLength = 512
     if (typeof serverConfig.url === 'string' && serverConfig.url) {
       try {
         const parsed = new URL(serverConfig.url);
-        for (const [, val] of parsed.searchParams) addSecret(val);
-        if (parsed.hash && parsed.hash.length > 1) addSecret(parsed.hash.slice(1));
+        if (parsed.search && parsed.search.length > 1) {
+          for (const seg of parsed.search.slice(1).split('&')) {
+            if (!seg) continue;
+            const eq = seg.indexOf('=');
+            const rawSecret = eq >= 0 ? seg.slice(eq + 1) : seg;
+            addSecret(rawSecret);
+            try {
+              const decoded = decodeURIComponent(rawSecret.replaceAll('+', ' '));
+              addSecret(decoded);
+              addSecret(encodeURIComponent(decoded));
+            } catch {}
+          }
+        }
+        for (const [, val] of parsed.searchParams) {
+          addSecret(val);
+          try { addSecret(encodeURIComponent(val)); } catch {}
+        }
+        if (parsed.hash && parsed.hash.length > 1) {
+          const rawHash = parsed.hash.slice(1);
+          addSecret(rawHash);
+          try { addSecret(decodeURIComponent(rawHash)); } catch {}
+        }
       } catch {}
     }
     const secretVals = [...secretSet].sort((a, b) => b.length - a.length);
@@ -149,12 +169,19 @@ export function redactUrlForDisplay(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return '';
   try {
     const parsed = new URL(rawUrl);
-    if (parsed.search) {
-      const redacted = new URLSearchParams();
-      for (const [k] of parsed.searchParams) {
-        redacted.append(k, '[REDACTED]');
-      }
-      parsed.search = `?${redacted.toString()}`;
+    if (parsed.search && parsed.search.length > 1) {
+      const redactedSegs = parsed.search
+        .slice(1)
+        .split('&')
+        .filter(Boolean)
+        .map(seg => {
+          const eq = seg.indexOf('=');
+          if (eq >= 0) {
+            return `${seg.slice(0, eq)}=%5BREDACTED%5D`;
+          }
+          return '%5BREDACTED%5D';
+        });
+      parsed.search = redactedSegs.length ? `?${redactedSegs.join('&')}` : '';
     }
     if (parsed.hash && parsed.hash.length > 1) {
       parsed.hash = '#[REDACTED]';

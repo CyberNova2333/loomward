@@ -8,7 +8,9 @@ import https from 'node:https';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { computeManifestHash } from '@loomward/shared';
 import { cloudflare } from './cloudflare-api.mjs';
+import { buildReleaseRpm } from './generate-rpm.mjs';
 import { defaultStateDirectory, proxyCandidates } from '../local/connector.mjs';
 const exec = promisify(execFile);
 const sha256File = filePath => new Promise((resolve, reject) => {
@@ -82,9 +84,25 @@ async function walk(directory) {
 }
 await walk(root);
 for (const [relative, hash] of Object.entries(installation.sha256)) {
+  const normRel = relative.replaceAll('\\', '/');
   const installed = path.join(config.sourceRoot, relative);
   if (await sha256File(installed) !== hash) throw new Error('Installed runtime integrity mismatch');
-  if (hashes[relative.replaceAll('\\', '/')] !== hash) throw new Error('Installed runtime differs from reviewed source');
+  if (normRel === 'rpm.json') {
+    const installedRpm = JSON.parse(await fs.readFile(installed, 'utf8'));
+    if (
+      !installation.rpmManifestHash
+      || installedRpm?.manifestHash !== installation.rpmManifestHash
+      || await computeManifestHash(installedRpm) !== installation.rpmManifestHash
+    ) {
+      throw new Error('Installed RPM manifest hash mismatch');
+    }
+    const expectedRpm = await buildReleaseRpm({ sourceRoot: root, destinationRoot: config.sourceRoot });
+    if (expectedRpm.manifestHash !== installedRpm.manifestHash) {
+      throw new Error('Installed runtime RPM differs from reviewed source');
+    }
+    continue;
+  }
+  if (hashes[normRel] !== hash) throw new Error('Installed runtime differs from reviewed source');
 }
 const installedFiles = new Set(Object.keys(installation.sha256).map(relative => relative.replaceAll('\\', '/')));
 for (const relative of Object.keys(hashes)) {

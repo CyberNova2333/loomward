@@ -3,7 +3,6 @@
 // Out-of-process manager and strict loopback HTTP client for the Python+SQLite decision ledger service.
 import crypto from 'node:crypto';
 import http from 'node:http';
-import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
@@ -37,19 +36,6 @@ function assertLoopbackUrl(rawUrl) {
   return parsed.origin;
 }
 
-function findFreeLoopbackPort(host = '127.0.0.1') {
-  const safeHost = assertLoopbackHost(host);
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.once('error', reject);
-    srv.listen(0, safeHost, () => {
-      const addr = srv.address();
-      const port = typeof addr === 'object' && addr ? addr.port : 0;
-      srv.close(err => (err ? reject(err) : resolve(port)));
-    });
-  });
-}
-
 function sanitizedServiceEnv() {
   const env = {
     PYTHONUTF8: '1',
@@ -67,7 +53,7 @@ function normalizeTimeoutMs(raw, fallback = 10000) {
   return Number.isFinite(n) ? Math.max(500, Math.trunc(n)) : fallback;
 }
 
-function httpJsonRequest(baseUrl, pathname, { method = 'GET', body, timeoutMs = 10000, signal, token = null } = {}) {
+function httpJsonRequest(baseUrl, pathname, { method = 'GET', body, timeoutMs = 10000, signal, token = null, extraHeaders = null } = {}) {
   const origin = assertLoopbackUrl(baseUrl);
   if (typeof pathname !== 'string' || !pathname.startsWith('/') || pathname.startsWith('//')) {
     throw new Error('Invalid decisions loopback request path.');
@@ -80,6 +66,7 @@ function httpJsonRequest(baseUrl, pathname, { method = 'GET', body, timeoutMs = 
   const payloadBuf = body !== undefined ? Buffer.from(JSON.stringify(body), 'utf8') : null;
   const headers = {
     Accept: 'application/json',
+    ...(extraHeaders && typeof extraHeaders === 'object' ? extraHeaders : {}),
     ...(typeof token === 'string' && token ? { 'X-LoomWard-Service-Token': token } : {}),
     ...(payloadBuf !== null
       ? { 'Content-Type': 'application/json', 'Content-Length': String(payloadBuf.length) }
@@ -204,9 +191,8 @@ export function createDecisionsServiceClient({
 
     if (!starting) {
       starting = (async () => {
-        const targetPort = port > 0 ? port : await findFreeLoopbackPort(safeHost);
+        const targetPort = port > 0 ? port : 0;
         if (closed) throw new Error('Decisions ledger plugin is closed.');
-        const url = assertLoopbackUrl(`http://${formatLoopbackHostForUrl(safeHost)}:${targetPort}`);
         const spawnToken = crypto.randomBytes(32).toString('base64url');
         const proc = spawn(
           pythonPath,
@@ -223,27 +209,59 @@ export function createDecisionsServiceClient({
         activeToken = spawnToken;
         let exited = false;
         let spawnErr = null;
+        let readyPort = 0;
+        let stdoutBuf = '';
         proc.on('error', err => {
           spawnErr = err;
           exited = true;
         });
         proc.once('exit', () => { exited = true; });
-        proc.stdout?.resume();
+        proc.stdout?.on('data', chunk => {
+          stdoutBuf += chunk.toString('utf8');
+          if (stdoutBuf.length > 65536) stdoutBuf = stdoutBuf.slice(-16384);
+          let nl;
+          while ((nl = stdoutBuf.indexOf('\n')) >= 0) {
+            const line = stdoutBuf.slice(0, nl).trim();
+            stdoutBuf = stdoutBuf.slice(nl + 1);
+            if (!readyPort && line.startsWith('LOOMWARD_READY ')) {
+              try {
+                const parsed = JSON.parse(line.slice('LOOMWARD_READY '.length));
+                const bound = Number(parsed?.port);
+                if (Number.isInteger(bound) && bound > 0 && bound <= 65535 && (targetPort === 0 || bound === targetPort)) {
+                  readyPort = bound;
+                }
+              } catch {}
+            }
+          }
+        });
         proc.stderr?.resume();
 
         const deadline = Date.now() + Math.max(3000, boundedTimeoutMs);
         while (Date.now() < deadline && !closed && !exited) {
-          try {
-            const probe = await httpJsonRequest(url, '/api/status', { timeoutMs: 1000 });
-            if (probe.status === 200 && probe.data?.status === 'ok') {
-              if (closed) break;
-              activeBaseUrl = url;
-              return url;
-            }
-          } catch {}
-          await new Promise(r => setTimeout(r, 120));
+          if (readyPort > 0) {
+            const url = assertLoopbackUrl(`http://${formatLoopbackHostForUrl(safeHost)}:${readyPort}`);
+            try {
+              const challenge = crypto.randomBytes(16).toString('hex');
+              const expectedProof = crypto.createHmac('sha256', spawnToken).update(`status:${challenge}`, 'utf8').digest('hex');
+              const probe = await httpJsonRequest(url, '/api/status', {
+                timeoutMs: 1000,
+                extraHeaders: { 'X-LoomWard-Challenge': challenge },
+              });
+              const actualProof = typeof probe.data?.token_proof === 'string' ? probe.data.token_proof : '';
+              const proofMatches =
+                actualProof.length === expectedProof.length
+                && crypto.timingSafeEqual(Buffer.from(actualProof, 'utf8'), Buffer.from(expectedProof, 'utf8'));
+              if (probe.status === 200 && probe.data?.status === 'ok' && proofMatches) {
+                if (closed) break;
+                activeBaseUrl = url;
+                return url;
+              }
+            } catch {}
+          }
+          await new Promise(r => setTimeout(r, 80));
         }
         if (child === proc) child = null;
+        if (spawnService) activeToken = null;
         await terminateChildProcess(proc);
         throw new Error(spawnErr ? `Failed to spawn Decisions service (${spawnErr.code || 'spawn_error'}).` : 'Failed to start out-of-process Decisions SQLite service.');
       })().finally(() => {
@@ -275,7 +293,12 @@ export function createDecisionsServiceClient({
 
   async function requestJson(pathname, opts = {}) {
     const url = await ensureRunning({ signal: opts.signal });
-    return httpJsonRequest(url, pathname, { timeoutMs: boundedTimeoutMs, ...opts, token: activeToken });
+    const method = String(opts.method || 'GET').toUpperCase();
+    return httpJsonRequest(url, pathname, {
+      timeoutMs: boundedTimeoutMs,
+      ...opts,
+      token: method === 'POST' ? activeToken : null,
+    });
   }
 
   async function getStatus(opts = {}) {

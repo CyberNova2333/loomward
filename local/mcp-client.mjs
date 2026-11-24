@@ -1078,6 +1078,7 @@ export function createExternalMcpHub({ stateDir, workspaceRoots, auditFile, bloc
   const sessions = new Map(); // serverId -> { fingerprint, session, lastUsedAt, tools }
   const connecting = new Map(); // serverId -> { fingerprint, controller, waiters: Set<symbol>, promise }
   const liveToolsByServer = new Map(); // serverId -> Tool[]
+  const lastProbeAtByServer = new Map(); // serverId -> string | null
   let cachedFileSig = '';
   let cachedRegistry = { exists: false, servers: [], error: null };
   let auditQueue = Promise.resolve();
@@ -1119,6 +1120,11 @@ export function createExternalMcpHub({ stateDir, workspaceRoots, auditFile, bloc
           if (!srv.enabled) continue;
           const fp = serverConfigFingerprint(srv);
           validFpById.set(srv.id, fp);
+          const diskProbeAt = srv.lastProbeAt || null;
+          if (lastProbeAtByServer.has(srv.id) && lastProbeAtByServer.get(srv.id) !== diskProbeAt) {
+            liveToolsByServer.delete(srv.id);
+          }
+          lastProbeAtByServer.set(srv.id, diskProbeAt);
           const pooled = sessions.get(srv.id);
           if (pooled && pooled.fingerprint !== fp) {
             sessions.delete(srv.id);
@@ -1148,6 +1154,11 @@ export function createExternalMcpHub({ stateDir, workspaceRoots, auditFile, bloc
       for (const id of [...liveToolsByServer.keys()]) {
         if (!validFpById.has(id)) {
           liveToolsByServer.delete(id);
+        }
+      }
+      for (const id of [...lastProbeAtByServer.keys()]) {
+        if (!validFpById.has(id)) {
+          lastProbeAtByServer.delete(id);
         }
       }
     }

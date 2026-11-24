@@ -77,16 +77,20 @@ async function boot() {
     if (sess.trustOrigin) state.trustOrigin = sess.trustOrigin;
 
     if (handoffTicket) {
-      const exchanged = await client.api('/api/console/session/exchange', {
-        method: 'POST',
-        body: { ticket: handoffTicket },
-      });
-      state.session = {
-        authenticated: true,
-        role: exchanged.role,
-        sessionPersistence: exchanged.sessionPersistence,
-        trustOrigin: exchanged.trustOrigin || state.trustOrigin,
-      };
+      try {
+        const exchanged = await client.api('/api/console/session/exchange', {
+          method: 'POST',
+          body: { ticket: handoffTicket },
+        });
+        state.session = {
+          authenticated: true,
+          role: exchanged.role,
+          sessionPersistence: exchanged.sessionPersistence,
+          trustOrigin: exchanged.trustOrigin || state.trustOrigin,
+        };
+      } catch (err) {
+        state.error = err?.message || '移交票据已失效或不可用。';
+      }
     }
 
     if (state.session?.authenticated) {

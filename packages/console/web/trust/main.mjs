@@ -501,6 +501,7 @@ function renderSessionAndServiceCard() {
           const res = await client.api('/api/auth/settings', { method: 'POST', body: { sessionPersistence: 'tab' } });
           if (res.authState) state.auth = res.authState;
           if (res.snapshot) state.snapshot = res.snapshot;
+          startLiveStream();
           setNotice('已启用标签页隔离认证并轮换令牌。');
         }),
       }),

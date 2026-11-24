@@ -13,6 +13,24 @@ $self=$PSCommandPath
 $processFile=Join-Path $statePath 'supervisor.json'
 $childFile=Join-Path $statePath 'connector-process.json'
 $stopFile=Join-Path $statePath 'stop.request'
+function Resolve-RuntimePaths {
+  $supSource=$self
+  $connSource=$connector
+  $cfgFile=Join-Path $statePath 'config.json'
+  if(Test-Path -LiteralPath $cfgFile){
+    try {
+      $cfg=Get-Content -LiteralPath $cfgFile -Raw|ConvertFrom-Json
+      if($cfg.sourceRoot -and ($cfg.sourceRoot -match '^[A-Za-z]:[\\/]')){
+        $resolvedRoot=Assert-PlainLocalPath $cfg.sourceRoot
+        if($resolvedRoot -ine $root){
+          $supSource=Join-Path $resolvedRoot 'scripts\Manage.ps1'
+        }
+        $connSource=Join-Path $resolvedRoot 'local\connector.mjs'
+      }
+    } catch {}
+  }
+  return @{SupervisorSource=$supSource;ConnectorSource=$connSource}
+}
 function SaveProcess($file,$process,$marker){
   # The protected record is written atomically via temp file + move.
   $tmp=Join-Path $statePath ('.proc-'+[Guid]::NewGuid().ToString('N')+'.tmp')
@@ -80,8 +98,9 @@ function ProbePublicHealth([string]$Origin){
 }
 if($Action -eq 'Password') {& (Join-Path $PSScriptRoot 'Secrets.ps1') -Action ShowPassword -StateDir $statePath;exit}
 if($Action -eq 'Status') {
-  $supervisor=OwnedProcess $processFile $self
-  $child=OwnedProcess $childFile $connector
+  $runtimePaths=Resolve-RuntimePaths
+  $supervisor=OwnedProcess $processFile $runtimePaths.SupervisorSource
+  $child=OwnedProcess $childFile $runtimePaths.ConnectorSource
   $status=Join-Path $statePath 'connector-status.json'
   $connectorStatus=$null
   if(Test-Path -LiteralPath $status){
@@ -106,11 +125,12 @@ if($Action -eq 'Status') {
   exit
 }
 if($Action -eq 'Stop') {
+  $runtimePaths=Resolve-RuntimePaths
   [IO.File]::WriteAllText($stopFile,'stop')
-  $process=OwnedProcess $processFile $self
+  $process=OwnedProcess $processFile $runtimePaths.SupervisorSource
   if($process){$null=$process.WaitForExit(20000)}
-  if(OwnedProcess $processFile $self){throw 'Supervisor is still running. Inspect its status.'}
-  $child=OwnedProcess $childFile $connector
+  if(OwnedProcess $processFile $runtimePaths.SupervisorSource){throw 'Supervisor is still running. Inspect its status.'}
+  $child=OwnedProcess $childFile $runtimePaths.ConnectorSource
   if($child){throw 'Connector is still stopping. Inspect its status before forcing termination.'}
   if(Test-Path -LiteralPath $stopFile){Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue}
   'Stopped this connector and its supervisor.'
@@ -176,7 +196,7 @@ try {
     }
   }
 } finally {
-  if(Test-Path -LiteralPath $childFile){Remove-Item -LiteralPath $childFile -Force -ErrorAction SilentlyContinue}
+  if(-not (OwnedProcess $childFile $connector) -and (Test-Path -LiteralPath $childFile)){Remove-Item -LiteralPath $childFile -Force -ErrorAction SilentlyContinue}
   if(Test-Path -LiteralPath $stopFile){Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue}
   if(Test-Path -LiteralPath $processFile){Remove-Item -LiteralPath $processFile -Force -ErrorAction SilentlyContinue}
   $mutex.ReleaseMutex()

@@ -61,22 +61,33 @@ export function validateContentInspectVerdict(verdict, { stage = 'input' } = {})
   if (!verdict || typeof verdict !== 'object' || Array.isArray(verdict)) {
     throw new Error('Content inspection verdict must be an object.');
   }
-  if (verdict.protocolVersion !== CONTENT_INSPECT_PROTOCOL_VERSION) {
-    throw new Error(`Unsupported content inspection verdict protocolVersion: ${String(verdict.protocolVersion)}`);
+  const protocolVersion = verdict.protocolVersion;
+  const decision = verdict.decision;
+  const hasRedactedPayload = Object.hasOwn(verdict, 'redactedPayload');
+  const redactedPayload = hasRedactedPayload ? verdict.redactedPayload : undefined;
+  const rawCategories = verdict.categories ?? [];
+  const rawScore = verdict.score;
+  const rawRuleId = verdict.ruleId;
+  const rawReason = verdict.reason;
+  const rawRequestId = verdict.requestId;
+  const rawFailClosed = verdict.failClosed;
+  const rawLatencyMs = verdict.latencyMs;
+
+  if (protocolVersion !== CONTENT_INSPECT_PROTOCOL_VERSION) {
+    throw new Error(`Unsupported content inspection verdict protocolVersion: ${String(protocolVersion)}`);
   }
-  if (!CONTENT_INSPECT_DECISIONS.includes(verdict.decision)) {
-    throw new Error(`Invalid content inspection decision: ${String(verdict.decision)}`);
+  if (!CONTENT_INSPECT_DECISIONS.includes(decision)) {
+    throw new Error(`Invalid content inspection decision: ${String(decision)}`);
   }
-  if (verdict.decision === 'redact' && stage === 'input') {
+  if (decision === 'redact' && stage === 'input') {
     throw new Error('Input stage content inspection cannot silently rewrite arguments with redact; use block or escalate.');
   }
-  if (verdict.decision === 'escalate' && stage === 'output') {
+  if (decision === 'escalate' && stage === 'output') {
     throw new Error('Output stage content inspection cannot escalate post-execution; use allow, redact, or block.');
   }
-  if (verdict.decision === 'redact' && (!Object.hasOwn(verdict, 'redactedPayload') || verdict.redactedPayload === undefined)) {
+  if (decision === 'redact' && (!hasRedactedPayload || redactedPayload === undefined)) {
     throw new Error('Redaction verdict requires an explicit redactedPayload.');
   }
-  const rawCategories = verdict.categories ?? [];
   if (!Array.isArray(rawCategories) || rawCategories.length > 32) {
     throw new Error('Verdict categories must be an array of up to 32 strings.');
   }
@@ -92,29 +103,29 @@ export function validateContentInspectVerdict(verdict, { stage = 'input' } = {})
     }
   }
   let score = null;
-  if (verdict.score !== undefined && verdict.score !== null) {
-    if (typeof verdict.score !== 'number' || !Number.isFinite(verdict.score) || verdict.score < 0 || verdict.score > 1) {
+  if (rawScore !== undefined && rawScore !== null) {
+    if (typeof rawScore !== 'number' || !Number.isFinite(rawScore) || rawScore < 0 || rawScore > 1) {
       throw new Error('Verdict score must be a finite number in [0, 1].');
     }
-    score = verdict.score;
+    score = rawScore;
   }
   let ruleId = null;
-  if (verdict.ruleId !== undefined && verdict.ruleId !== null) {
-    if (typeof verdict.ruleId !== 'string' || !RULE_ID_RE.test(verdict.ruleId)) {
-      throw new Error(`Invalid verdict ruleId: ${String(verdict.ruleId)}`);
+  if (rawRuleId !== undefined && rawRuleId !== null) {
+    if (typeof rawRuleId !== 'string' || !RULE_ID_RE.test(rawRuleId)) {
+      throw new Error(`Invalid verdict ruleId: ${String(rawRuleId)}`);
     }
-    ruleId = verdict.ruleId;
+    ruleId = rawRuleId;
   }
-  const reason = clampReason(verdict.reason, 240);
-  const requestId = typeof verdict.requestId === 'string' && verdict.requestId ? verdict.requestId.slice(0, 128) : null;
-  const failClosed = typeof verdict.failClosed === 'boolean' ? verdict.failClosed : null;
-  const latencyMs = typeof verdict.latencyMs === 'number' && Number.isFinite(verdict.latencyMs) && verdict.latencyMs >= 0
-    ? Math.trunc(verdict.latencyMs)
+  const reason = clampReason(rawReason, 240);
+  const requestId = typeof rawRequestId === 'string' && rawRequestId ? rawRequestId.slice(0, 128) : null;
+  const failClosed = typeof rawFailClosed === 'boolean' ? rawFailClosed : null;
+  const latencyMs = typeof rawLatencyMs === 'number' && Number.isFinite(rawLatencyMs) && rawLatencyMs >= 0
+    ? Math.trunc(rawLatencyMs)
     : null;
 
   return Object.freeze({
     protocolVersion: CONTENT_INSPECT_PROTOCOL_VERSION,
-    decision: verdict.decision,
+    decision,
     categories: Object.freeze(categories),
     ...(score !== null ? { score } : {}),
     ...(ruleId !== null ? { ruleId } : {}),
@@ -122,7 +133,7 @@ export function validateContentInspectVerdict(verdict, { stage = 'input' } = {})
     ...(requestId !== null ? { requestId } : {}),
     ...(failClosed !== null ? { failClosed } : {}),
     ...(latencyMs !== null ? { latencyMs } : {}),
-    ...(verdict.decision === 'redact' ? { redactedPayload: verdict.redactedPayload } : {}),
+    ...(decision === 'redact' ? { redactedPayload } : {}),
   });
 }
 

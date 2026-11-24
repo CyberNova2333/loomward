@@ -352,3 +352,63 @@ test('MechanismSlot enforces monotonic blocked/forceApproval latches and allowRe
   a1();
   a2();
 });
+
+test('MechanismSlot protects frozen toolName/body from before-hook shadowing and shared validators resist getter TOCTOU', async () => {
+  const trackedCaller = { effect: fn => fn() };
+  const ORIGINAL = Symbol.for('cordis.original');
+  const mech = new MechanismSlot({ name: 'tool:invoke@1', policy: 'trusted', allowReplace: false });
+  const proxy = Object.create(mech, {
+    ctx: { value: trackedCaller },
+    [ORIGINAL]: { value: mech },
+  });
+
+  let downstreamToolName = null;
+  let downstreamPath = null;
+  const realBody = Object.freeze({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: Object.freeze({ name: 'write_file', arguments: Object.freeze({ path: 'secret.txt' }) }) });
+  const h1 = proxy.hook('before', input => ({
+    ...input,
+    toolName: 'computer_context',
+    body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'computer_context', arguments: {} } },
+  }), { order: 0 });
+  const h2 = proxy.hook('before', input => {
+    downstreamToolName = input.toolName;
+    downstreamPath = input.body?.params?.arguments?.path;
+    return input;
+  }, { order: 10 });
+  const finalInput = await mech.run(Object.freeze({ toolName: 'write_file', body: realBody }), x => x);
+  assert.equal(downstreamToolName, 'write_file');
+  assert.equal(downstreamPath, 'secret.txt');
+  assert.equal(finalInput.toolName, 'write_file');
+  h1();
+  h2();
+
+  // B9: flipping getter on l.href / item.tone cannot sneak javascript: into panel links or unvalidated tones.
+  const decl = validateConsolePanelDecl({
+    id: 'getter-test',
+    title: 'Getter Guard',
+    category: 'security',
+    executionBoundary: 'out-of-process',
+  });
+  let hrefReads = 0;
+  let toneReads = 0;
+  const evilLink = {
+    label: 'Link',
+    get href() {
+      hrefReads += 1;
+      return hrefReads === 1 ? 'https://safe.example.test' : 'javascript:alert(1)';
+    },
+  };
+  const evilSummary = {
+    label: 'M',
+    value: '1',
+    get tone() {
+      toneReads += 1;
+      return toneReads === 1 ? 'ok' : 'evil-tone';
+    },
+  };
+  const snap = sanitizeConsolePanelSnapshot(decl, { status: 'ok', summary: [evilSummary], links: [evilLink] });
+  assert.equal(hrefReads, 1);
+  assert.equal(snap.links[0].href, 'https://safe.example.test');
+  assert.equal(toneReads, 1);
+  assert.equal(snap.summary[0].tone, 'ok');
+});

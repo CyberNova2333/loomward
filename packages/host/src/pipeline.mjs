@@ -257,8 +257,15 @@ export function createToolDispatchPipeline({
     }
   }
 
+function normalizeErrorRpcId(raw) {
+  if (raw === null) return null;
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'string' && raw.length <= 256) return raw;
+  return null;
+}
+
   async function handleRequest(message, { signal: callerSignal } = {}) {
-    const rpcId = message?.body?.id ?? null;
+    const rpcId = normalizeErrorRpcId(message?.body?.id);
     let authorized;
     try {
       authorized = validateRequestEnvelope(message, Date.now(), {

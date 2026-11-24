@@ -19,19 +19,26 @@ function WriteDpapiAtomic([string]$targetPath,[byte[]]$cipher){
   } finally { if(Test-Path -LiteralPath $tmp){Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue} }
 }
 if($Action -eq 'Create') {
-  $normalizedState=[IO.Path]::GetFullPath($StateDir).TrimEnd('\')
-  Assert-WriteProtectedPath ([IO.Path]::GetDirectoryName($normalizedState))
-  if(Test-Path -LiteralPath $normalizedState){Assert-WriteProtectedPath $normalizedState}
+  if([string]::IsNullOrWhiteSpace($StateDir) -or $StateDir -notmatch '^[A-Za-z]:[\\/]' -or $StateDir.StartsWith('\\')){throw 'A local absolute path is required.'}
+  $normalizedState=[IO.Path]::GetFullPath($StateDir)
+  if($normalizedState.Length -gt 3){$normalizedState=$normalizedState.TrimEnd('\')}
+  if($normalizedState.StartsWith('\\') -or $normalizedState -notmatch '^[A-Za-z]:\\'){throw 'A local absolute path is required.'}
+  $parentState=Assert-PlainLocalPath ([IO.Path]::GetDirectoryName($normalizedState))
+  Assert-WriteProtectedPath $parentState
+  if(Test-Path -LiteralPath $normalizedState){
+    $null=Assert-PlainLocalPath $normalizedState
+    Assert-WriteProtectedPath $normalizedState
+  }
   $rawFile=Join-Path $normalizedState 'secrets.dpapi'
   if(Test-Path -LiteralPath $rawFile){throw 'Secrets already exist; preserve them.'}
-  if((Test-Path -LiteralPath $StateDir) -and @(Get-ChildItem -LiteralPath $StateDir -Force).Count -gt 0){throw 'Credential directory is not empty; inspect it before setup.'}
-  New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+  if((Test-Path -LiteralPath $normalizedState) -and @(Get-ChildItem -LiteralPath $normalizedState -Force).Count -gt 0){throw 'Credential directory is not empty; inspect it before setup.'}
+  New-Item -ItemType Directory -Path $normalizedState -Force | Out-Null
   $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-  & ([IO.Path]::Combine([Environment]::SystemDirectory,'icacls.exe')) $StateDir /inheritance:r /grant:r "*$($sid):(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' | Out-Null
+  & ([IO.Path]::Combine([Environment]::SystemDirectory,'icacls.exe')) $normalizedState /inheritance:r /grant:r "*$($sid):(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' | Out-Null
   if($LASTEXITCODE -ne 0){throw 'Cannot protect the credential directory.'}
-  $unexpected=@((Get-Acl -LiteralPath $StateDir).Access | Where-Object {$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin @($sid,'S-1-5-18')})
+  $unexpected=@((Get-Acl -LiteralPath $normalizedState).Access | Where-Object {$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin @($sid,'S-1-5-18')})
   if($unexpected.Count -gt 0){throw 'Credential directory has other explicit access rules; no secrets were saved.'}
-  $statePath=Assert-PrivateState $StateDir
+  $statePath=Assert-PrivateState $normalizedState
   $file=Join-Path $statePath 'secrets.dpapi'
   function RandomBytes([int]$count) {
     $b=New-Object byte[] $count

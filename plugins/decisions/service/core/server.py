@@ -372,6 +372,13 @@ def make_handler(server: DashboardServer):
                     "consistency": consistency,
                     "server_time": datetime.datetime.now().isoformat()
                 }
+                challenge = self.headers.get("X-LoomWard-Challenge", "")
+                if SERVICE_TOKEN and isinstance(challenge, str) and 1 <= len(challenge) <= 128:
+                    res["token_proof"] = hmac.new(
+                        SERVICE_TOKEN.encode("utf-8"),
+                        f"status:{challenge}".encode("utf-8"),
+                        hashlib.sha256,
+                    ).hexdigest()
                 self._send_json(200, res)
                 return
 
@@ -761,6 +768,8 @@ def make_handler(server: DashboardServer):
                 except VersionConflictError as e:
                     self._send_json(409, {"error": "revision_conflict", "message": "看板已有新记录，请重新打开历史列表并核对后再恢复",
                                          "current_revision": e.current_version})
+                except TopicValidationError as e:
+                    self._send_json(400, {"error": "validation_error", "message": str(e)})
                 except Exception as e:
                     self._send_json(500, {"error": "rollback_failed", "message": str(e)})
                 return
@@ -838,6 +847,7 @@ def main():
             pass
     url_host = f"[{host}]" if ":" in host else host
     url = f"http://{url_host}:{httpd.server_port}/dashboard.html"
+    print("LOOMWARD_READY " + json.dumps({"port": httpd.server_port, "host": host}, ensure_ascii=False), flush=True)
     print("=" * 64)
     print(f"  {config.project_name} - 服务已启动")
     print(f"  服务地址: {url}")

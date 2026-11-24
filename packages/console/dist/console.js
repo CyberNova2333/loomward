@@ -257,16 +257,20 @@
       state.session = sess;
       if (sess.trustOrigin) state.trustOrigin = sess.trustOrigin;
       if (handoffTicket) {
-        const exchanged = await client.api("/api/console/session/exchange", {
-          method: "POST",
-          body: { ticket: handoffTicket }
-        });
-        state.session = {
-          authenticated: true,
-          role: exchanged.role,
-          sessionPersistence: exchanged.sessionPersistence,
-          trustOrigin: exchanged.trustOrigin || state.trustOrigin
-        };
+        try {
+          const exchanged = await client.api("/api/console/session/exchange", {
+            method: "POST",
+            body: { ticket: handoffTicket }
+          });
+          state.session = {
+            authenticated: true,
+            role: exchanged.role,
+            sessionPersistence: exchanged.sessionPersistence,
+            trustOrigin: exchanged.trustOrigin || state.trustOrigin
+          };
+        } catch (err) {
+          state.error = err?.message || "\u79FB\u4EA4\u7968\u636E\u5DF2\u5931\u6548\u6216\u4E0D\u53EF\u7528\u3002";
+        }
       }
       if (state.session?.authenticated) {
         state.snapshot = await client.api("/api/status");
