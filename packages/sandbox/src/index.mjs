@@ -148,15 +148,21 @@ export async function apply(ctx, config = {}) {
 
   let runtime = config.runtime ?? null;
   if (!runtime && config.sandboxConfig?.sandbox?.enabled === true) {
+    const runtimeFactory = typeof config.createRuntime === 'function' ? config.createRuntime : createSandboxRuntime;
     const mergedConfig = {
       ...config.sandboxConfig,
       ...(effectiveStateDir ? { stateDir: effectiveStateDir } : {}),
+      ...(effectiveRoots ? { roots: effectiveRoots } : {}),
       allowExec: effectiveAllowExec,
+      sandbox: {
+        ...config.sandboxConfig.sandbox,
+        allowOutbound: effectiveAllowOutbound,
+      },
       ...(effectiveStateDir && !config.sandboxConfig.auditFile
         ? { auditFile: path.join(effectiveStateDir, 'audit.jsonl') }
         : {}),
     };
-    runtime = await createSandboxRuntime(mergedConfig);
+    runtime = await runtimeFactory(mergedConfig);
   }
   const provider = createSandboxToolProvider({
     runtime,

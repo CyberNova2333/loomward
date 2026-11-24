@@ -8,18 +8,48 @@ import https from 'node:https';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { HttpsProxyAgent } from 'https-proxy-agent';
-import { computeManifestHash } from '@loomward/shared';
+import { computeManifestHash } from '../packages/shared/src/index.mjs';
 import { cloudflare } from './cloudflare-api.mjs';
 import { buildReleaseRpm } from './generate-rpm.mjs';
 import { defaultStateDirectory, proxyCandidates } from '../local/connector.mjs';
 const exec = promisify(execFile);
-const sha256File = filePath => new Promise((resolve, reject) => {
-  const hash = crypto.createHash('sha256');
-  const stream = fsSync.createReadStream(filePath);
-  stream.on('data', chunk => hash.update(chunk));
-  stream.on('error', reject);
-  stream.on('end', () => resolve(hash.digest('hex')));
-});
+const readRegularBuffer = async filePath => {
+  const handle = await fs.open(filePath, fsSync.constants.O_RDONLY | (fsSync.constants.O_NOFOLLOW || 0));
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      throw new Error(`Expected regular file: ${filePath}`);
+    }
+    const chunks = [];
+    const buf = Buffer.allocUnsafe(65536);
+    while (true) {
+      const { bytesRead } = await handle.read(buf, 0, buf.length, null);
+      if (bytesRead === 0) break;
+      chunks.push(Buffer.from(buf.subarray(0, bytesRead)));
+    }
+    return Buffer.concat(chunks);
+  } finally {
+    await handle.close();
+  }
+};
+const sha256Buffer = buf => crypto.createHash('sha256').update(buf).digest('hex');
+const sha256File = async filePath => sha256Buffer(await readRegularBuffer(filePath));
+function assertSafeSourceChild(resolvedSourceRoot, relative) {
+  if (!relative || typeof relative !== 'string' || relative.includes('\0') || path.isAbsolute(relative)) {
+    throw new Error(`Invalid installed runtime path: '${String(relative)}'`);
+  }
+  const normalized = relative.replaceAll('\\', '/');
+  const segments = normalized.split('/');
+  if (segments.some(seg => !seg || seg === '.' || seg === '..')) {
+    throw new Error(`Invalid installed runtime path: '${relative}'`);
+  }
+  const candidate = path.resolve(resolvedSourceRoot, ...segments);
+  const rel = path.relative(resolvedSourceRoot, candidate);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`Installed runtime path escapes sourceRoot: '${relative}'`);
+  }
+  return candidate;
+}
 const MAX_HEALTH_BYTES = 1024 * 1024;
 const probeHealth = async origin => {
   const url = `${origin.replace(/\/+$/, '')}/healthz`;
@@ -83,12 +113,16 @@ async function walk(directory) {
   }
 }
 await walk(root);
+const resolvedSourceRoot = path.resolve(config.sourceRoot);
+let sawRpmManifest = false;
 for (const [relative, hash] of Object.entries(installation.sha256)) {
   const normRel = relative.replaceAll('\\', '/');
-  const installed = path.join(config.sourceRoot, relative);
-  if (await sha256File(installed) !== hash) throw new Error('Installed runtime integrity mismatch');
+  const installed = assertSafeSourceChild(resolvedSourceRoot, relative);
   if (normRel === 'rpm.json') {
-    const installedRpm = JSON.parse(await fs.readFile(installed, 'utf8'));
+    sawRpmManifest = true;
+    const rawRpm = await readRegularBuffer(installed);
+    if (sha256Buffer(rawRpm) !== hash) throw new Error('Installed runtime integrity mismatch');
+    const installedRpm = JSON.parse(rawRpm.toString('utf8'));
     if (
       !installation.rpmManifestHash
       || installedRpm?.manifestHash !== installation.rpmManifestHash
@@ -96,17 +130,32 @@ for (const [relative, hash] of Object.entries(installation.sha256)) {
     ) {
       throw new Error('Installed RPM manifest hash mismatch');
     }
-    const expectedRpm = await buildReleaseRpm({ sourceRoot: root, destinationRoot: config.sourceRoot });
+    const expectedRpm = await buildReleaseRpm({ sourceRoot: root, destinationRoot: root });
     if (expectedRpm.manifestHash !== installedRpm.manifestHash) {
       throw new Error('Installed runtime RPM differs from reviewed source');
     }
     continue;
   }
+  if (await sha256File(installed) !== hash) throw new Error('Installed runtime integrity mismatch');
   if (hashes[normRel] !== hash) throw new Error('Installed runtime differs from reviewed source');
 }
+if (!sawRpmManifest) throw new Error('Installed runtime RPM manifest is missing');
 const installedFiles = new Set(Object.keys(installation.sha256).map(relative => relative.replaceAll('\\', '/')));
+if (!installedFiles.has('rpm.json')) throw new Error('Installed runtime RPM manifest is missing');
+const isRequiredRuntimeRel = relative => {
+  if (relative.startsWith('local/') || relative.startsWith('scripts/')) return true;
+  if (['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml'].includes(relative)) return true;
+  if (relative.startsWith('packages/') || relative.startsWith('plugins/')) {
+    const segments = relative.split('/');
+    if (segments.some(seg => seg.startsWith('.'))) return false;
+    if (segments.includes('test') || segments.includes('__pycache__')) return false;
+    if (/\.test\.[cm]?[jt]s$|\.pyc$/i.test(relative)) return false;
+    return true;
+  }
+  return false;
+};
 for (const relative of Object.keys(hashes)) {
-  if ((relative.startsWith('local/') || relative.startsWith('scripts/') || ['package.json', 'pnpm-lock.yaml'].includes(relative)) && !installedFiles.has(relative)) throw new Error('Reviewed runtime file is missing from the installation');
+  if (isRequiredRuntimeRel(relative) && !installedFiles.has(relative)) throw new Error(`Reviewed runtime file is missing from the installation: ${relative}`);
 }
 const inventory = await exec(config.sandbox.dockerPath, ['--context', config.sandbox.context, 'run', '--rm', '--network', 'none', '--read-only', '--entrypoint', '/bin/cat', config.sandbox.image, '/opt/bridge/os-packages.txt', '/opt/bridge/npm-packages.json'], { windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 });
 await fs.writeFile(path.join(root, 'artifacts/container-packages.txt'), inventory.stdout);

@@ -134,16 +134,26 @@ class GitEngine:
                     })
         return commits
 
-    def stage_files(self, paths: List[Path]) -> bool:
-        """添加指定文件至暂存区（跳过既不存在于磁盘也未曾被索引跟踪的可选/临时路径）。"""
+    def filter_stageable_rel_paths(self, paths: List[Path]) -> List[str]:
+        """筛选实际存在于磁盘或已被 Git 索引跟踪的相对路径。"""
         rel_paths = []
+        seen = set()
         for p in paths:
             rel = self.normalize_rel_path(p)
+            if rel in seen:
+                continue
             if not p.exists() and not p.is_symlink():
                 tracked, _, _ = self.run_git(["ls-files", "--error-unmatch", "--", f":(literal){rel}"])
                 if not tracked:
                     continue
+            seen.add(rel)
             rel_paths.append(rel)
+        return rel_paths
+
+    def stage_files(self, paths: List[Path], *, rel_paths: Optional[List[str]] = None) -> bool:
+        """添加指定文件至暂存区（跳过既不存在于磁盘也未曾被索引跟踪的可选/临时路径）。"""
+        if rel_paths is None:
+            rel_paths = self.filter_stageable_rel_paths(paths)
         if not rel_paths:
             self.last_stage_error = ""
             return True
@@ -201,13 +211,12 @@ class GitEngine:
             )
 
         # 2. 暂存区保护检查 (P1-B)：严禁意外提交用户已经暂存的其他工作区文件
-        target_rel_files = set()
-        if staged_files:
-            target_rel_files = {self.normalize_rel_path(p) for p in staged_files}
+        stageable_rel_paths = self.filter_stageable_rel_paths(staged_files) if staged_files else []
+        target_rel_files = set(stageable_rel_paths)
 
         if not target_rel_files:
             return GitCommitResult(success=True, status="clean", commit_hash=self.get_head_hash(),
-                                   message="没有指定台账文件，跳过自动提交")
+                                   message="没有需要暂存或提交的台账文件，跳过自动提交")
 
         try:
             current_staged = self.get_staged_files()
@@ -247,8 +256,8 @@ class GitEngine:
             commit_msg += f"\n\nCo-authored-by: {co_author}"
 
         # 4. 暂存本次相关文件
-        if staged_files:
-            ok = self.stage_files(staged_files)
+        if stageable_rel_paths:
+            ok = self.stage_files(staged_files or [], rel_paths=stageable_rel_paths)
             if not ok:
                 err_msg = f"执行 git add 暂存文件失败: {self.last_stage_error}" if self.last_stage_error else "执行 git add 暂存文件失败"
                 return GitCommitResult(

@@ -26,29 +26,282 @@ function walkSourceFiles(dir) {
   return out;
 }
 
+const REGEX_PRECEDING_KEYWORDS = new Set([
+  'return', 'throw', 'case', 'delete', 'void', 'typeof', 'yield',
+  'await', 'in', 'instanceof', 'new', 'else', 'do', 'of',
+]);
+
+/**
+ * Lex JavaScript/TypeScript source into code tokens (excluding comments, regexes,
+ * and template/string internals so string-embedded comments cannot spoof stripping)
+ * plus a comment-stripped mirror preserving quoted literals.
+ */
+function scanJsSource(source) {
+  const tokens = [];
+  const codeChunks = [];
+  const len = source.length;
+  let i = 0;
+  let regexAllowed = true;
+  const braceStack = []; // tracks template `${ ... }` interpolation nesting
+
+  const readString = quote => {
+    let val = '';
+    const start = i++;
+    while (i < len) {
+      const ch = source[i++];
+      if (ch === '\\') {
+        if (i < len) val += source[i++];
+        continue;
+      }
+      if (ch === quote) break;
+      val += ch;
+    }
+    codeChunks.push(source.slice(start, i));
+    tokens.push({ kind: 'string', value: val });
+    regexAllowed = false;
+  };
+
+  const readRegex = () => {
+    const start = i++;
+    let inClass = false;
+    while (i < len) {
+      const ch = source[i++];
+      if (ch === '\\') {
+        if (i < len) i++;
+        continue;
+      }
+      if (ch === '[') { inClass = true; continue; }
+      if (ch === ']' && inClass) { inClass = false; continue; }
+      if (ch === '/' && !inClass) break;
+      if (ch === '\n' || ch === '\r') break;
+    }
+    while (i < len && /[a-z]/i.test(source[i])) i++;
+    codeChunks.push(' /re/ ');
+    tokens.push({ kind: 'regex', value: source.slice(start, i) });
+    regexAllowed = false;
+  };
+
+  const readTemplateSegment = (isStart) => {
+    let val = '';
+    const start = i;
+    if (isStart) i++; // skip opening `
+    let closedCleanly = false;
+    let interpolated = false;
+    while (i < len) {
+      const ch = source[i++];
+      if (ch === '\\') {
+        if (i < len) val += source[i++];
+        continue;
+      }
+      if (ch === '`') {
+        closedCleanly = true;
+        break;
+      }
+      if (ch === '$' && source[i] === '{') {
+        i++; // skip {
+        interpolated = true;
+        braceStack.push({ type: 'template', depth: 1 });
+        regexAllowed = true;
+        break;
+      }
+      val += ch;
+    }
+    codeChunks.push(source.slice(start, i));
+    if (isStart && closedCleanly) {
+      tokens.push({ kind: 'template', value: val });
+      regexAllowed = false;
+    } else if (interpolated) {
+      tokens.push({ kind: 'template_part', value: val });
+    } else {
+      regexAllowed = false;
+    }
+  };
+
+  while (i < len) {
+    const ch = source[i];
+    if (ch === '/' && source[i + 1] === '/') {
+      i += 2;
+      while (i < len && source[i] !== '\n' && source[i] !== '\r') i++;
+      codeChunks.push(' ');
+      continue;
+    }
+    if (ch === '/' && source[i + 1] === '*') {
+      const start = i;
+      i += 2;
+      while (i < len && !(source[i] === '*' && source[i + 1] === '/')) {
+        if (source[i] === '\n') codeChunks.push('\n');
+        i++;
+      }
+      if (i < len) i += 2;
+      codeChunks.push(' ');
+      if (start >= 0) continue;
+    }
+    if (ch === '\'' || ch === '"') {
+      readString(ch);
+      continue;
+    }
+    if (ch === '`') {
+      readTemplateSegment(true);
+      continue;
+    }
+    if (ch === '/' && regexAllowed) {
+      readRegex();
+      continue;
+    }
+    if (/[a-zA-Z_$]/.test(ch)) {
+      const start = i;
+      i++;
+      while (i < len && /[a-zA-Z0-9_$]/.test(source[i])) i++;
+      const word = source.slice(start, i);
+      codeChunks.push(word);
+      tokens.push({ kind: 'ident', value: word });
+      regexAllowed = REGEX_PRECEDING_KEYWORDS.has(word);
+      continue;
+    }
+    if (/[0-9]/.test(ch)) {
+      const start = i;
+      while (i < len && /[0-9a-fA-FxXoObBn._]/.test(source[i])) i++;
+      const num = source.slice(start, i);
+      codeChunks.push(num);
+      tokens.push({ kind: 'number', value: num });
+      regexAllowed = false;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      codeChunks.push(ch);
+      i++;
+      continue;
+    }
+    if (ch === '{') {
+      const top = braceStack[braceStack.length - 1];
+      if (top) top.depth++;
+      else braceStack.push({ type: 'block', depth: 1 });
+    } else if (ch === '}') {
+      const top = braceStack[braceStack.length - 1];
+      if (top) {
+        top.depth--;
+        if (top.depth === 0) {
+          braceStack.pop();
+          if (top.type === 'template') {
+            codeChunks.push('}');
+            tokens.push({ kind: 'punct', value: '}' });
+            i++;
+            readTemplateSegment(false);
+            continue;
+          }
+        }
+      }
+    }
+    codeChunks.push(ch);
+    if (ch === '=' && source[i + 1] === '>') {
+      tokens.push({ kind: 'punct', value: '=>' });
+      codeChunks.push('>');
+      i += 2;
+      regexAllowed = true;
+      continue;
+    }
+    tokens.push({ kind: 'punct', value: ch });
+    regexAllowed = '([{,;?:!~+-*%&|^<>=/'.includes(ch);
+    i++;
+  }
+  return { code: codeChunks.join(''), tokens };
+}
+
 function stripJsComments(source) {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:\\])\/\/.*$/gm, '$1');
+  return scanJsSource(source).code;
+}
+
+function parseImportSpecifiersFromSource(source) {
+  const { tokens } = scanJsSource(source);
+  const specs = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    const prev = i > 0 ? tokens[i - 1] : null;
+    if (tok.kind !== 'ident') continue;
+
+    if (tok.value === 'import' && !(prev?.kind === 'punct' && prev.value === '.')) {
+      const next = tokens[i + 1];
+      if (!next) continue;
+      if (next.kind === 'string') {
+        specs.push({ spec: next.value, typeOnly: false });
+        continue;
+      }
+      if (next.kind === 'punct' && next.value === '(') {
+        const arg = tokens[i + 2];
+        const close = tokens[i + 3];
+        if ((arg?.kind === 'string' || arg?.kind === 'template') && close?.kind === 'punct' && close.value === ')') {
+          specs.push({ spec: arg.value, typeOnly: false });
+        }
+        continue;
+      }
+      if (next.kind === 'punct' && next.value === '.') continue; // import.meta
+      const isTypeImport = next.kind === 'ident' && next.value === 'type'
+        && !(tokens[i + 2]?.kind === 'ident' && tokens[i + 2].value === 'from')
+        && !(tokens[i + 2]?.kind === 'punct' && (tokens[i + 2].value === ',' || tokens[i + 2].value === '.'));
+      let j = i + 1;
+      let braceDepth = 0;
+      while (j < tokens.length) {
+        const cur = tokens[j];
+        if (cur.kind === 'punct' && cur.value === '{') braceDepth++;
+        else if (cur.kind === 'punct' && cur.value === '}') {
+          if (braceDepth === 0) break;
+          braceDepth--;
+        } else if (braceDepth === 0 && cur.kind === 'punct' && cur.value === ';') {
+          break;
+        } else if (braceDepth === 0 && cur.kind === 'ident' && cur.value === 'from' && tokens[j + 1]?.kind === 'string') {
+          specs.push({ spec: tokens[j + 1].value, typeOnly: isTypeImport });
+          i = j + 1;
+          break;
+        }
+        j++;
+      }
+      continue;
+    }
+
+    if (tok.value === 'export' && !(prev?.kind === 'punct' && prev.value === '.')) {
+      const next = tokens[i + 1];
+      if (!next) continue;
+      const isReexportHead =
+        (next.kind === 'punct' && (next.value === '*' || next.value === '{')) ||
+        (next.kind === 'ident' && next.value === 'type'
+          && tokens[i + 2]?.kind === 'punct' && (tokens[i + 2].value === '*' || tokens[i + 2].value === '{'));
+      if (!isReexportHead) continue;
+      let j = i + 1;
+      let braceDepth = 0;
+      while (j < tokens.length) {
+        const cur = tokens[j];
+        if (cur.kind === 'punct' && cur.value === '{') braceDepth++;
+        else if (cur.kind === 'punct' && cur.value === '}') {
+          if (braceDepth === 0) break;
+          braceDepth--;
+        } else if (braceDepth === 0 && cur.kind === 'punct' && cur.value === ';') {
+          break;
+        } else if (braceDepth === 0 && cur.kind === 'ident' && cur.value === 'from' && tokens[j + 1]?.kind === 'string') {
+          specs.push({ spec: tokens[j + 1].value, typeOnly: next.kind === 'ident' && next.value === 'type' });
+          i = j + 1;
+          break;
+        }
+        j++;
+      }
+      continue;
+    }
+
+    if ((tok.value === 'require' || tok.value === 'getBuiltinModule')
+      && tokens[i + 1]?.kind === 'punct' && tokens[i + 1].value === '('
+      && (tokens[i + 2]?.kind === 'string' || tokens[i + 2]?.kind === 'template')
+      && tokens[i + 3]?.kind === 'punct' && tokens[i + 3].value === ')') {
+      const rawSpec = tokens[i + 2].value;
+      specs.push({
+        spec: tok.value === 'getBuiltinModule' ? `node:${rawSpec.replace(/^node:/, '')}` : rawSpec,
+        typeOnly: false,
+      });
+    }
+  }
+  return specs;
 }
 
 function parseImportSpecifiers(filePath) {
-  const raw = fs.readFileSync(filePath, 'utf8');
-  const text = stripJsComments(raw);
-  const specs = [];
-  for (const m of text.matchAll(/\b(?:import|export)\s+(type\s+)?[\s\S]*?\bfrom\s*['"]([^'"]+)['"]/g)) {
-    specs.push({ spec: m[2], typeOnly: Boolean(m[1]) });
-  }
-  for (const m of text.matchAll(/^\s*import\s*['"]([^'"]+)['"]/gm)) {
-    specs.push({ spec: m[1], typeOnly: false });
-  }
-  for (const m of text.matchAll(/\b(?:import|require)\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g)) {
-    specs.push({ spec: m[1], typeOnly: false });
-  }
-  for (const m of text.matchAll(/\bgetBuiltinModule\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g)) {
-    specs.push({ spec: `node:${m[1].replace(/^node:/, '')}`, typeOnly: false });
-  }
-  return specs;
+  return parseImportSpecifiersFromSource(fs.readFileSync(filePath, 'utf8'));
 }
 
 function rel(filePath) {
@@ -172,4 +425,27 @@ test('layering: every workspace root package and extension plugin declares a val
     }
   }
   assert.ok(checked.length >= 8, `Expected at least 8 declared packages/plugins, got ${checked.length}`);
+});
+
+test('layering scanner: blocks string-comment, regex-slash, zero-space import, and dynamic loader bypasses without string false positives', () => {
+  const bypassSource = [
+    'const s = "/*";',
+    'import{readFile}from\'node:fs/promises\';',
+    'const e = "*/";',
+    'const re = /https:\\/\\/example.test/; import\'node:path\';',
+    'export*from"node:crypto";',
+    'const loader = process.getBuiltinModule("os");',
+  ].join('\n');
+  const specs = parseImportSpecifiersFromSource(bypassSource).map(x => x.spec);
+  assert.deepEqual(specs, ['node:fs/promises', 'node:path', 'node:crypto', 'node:os']);
+  const stripped = stripJsComments(bypassSource);
+  assert.match(stripped, /\bprocess\.getBuiltinModule\b/);
+
+  const benignString = [
+    'const doc = "import fs from \'node:fs\';";',
+    'const tmpl = `/* ${1 + 2} */ export * from "node:child_process"`;',
+    '// import secret from "node:net";',
+    '/* export * from "node:http"; */',
+  ].join('\n');
+  assert.deepEqual(parseImportSpecifiersFromSource(benignString), []);
 });

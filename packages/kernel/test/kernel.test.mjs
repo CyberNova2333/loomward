@@ -613,27 +613,42 @@ test('Round 7 kernel hardening: effect/wrapService escapes blocked, rootCtx.fibe
   assert.deepEqual(vaultSlot.current()?.impl.exportSecrets(), { secret: 'top-secret' });
 
   // B5: wildcard extraNodes are stripped by evaluateGuard/compileUnitGrant and cannot override closed slots.
-  const wildcardEval = evaluateGuard({
-    contract: {
-      schemaVersion: 1,
-      id: 'wildcard-probe',
-      kind: 'extension-plugin',
-      version: '3.0.0-alpha.0',
-      executionBoundary: 'out-of-process',
+  const wildcardEval = evaluateGuard(
+    {
+      contract: {
+        schemaVersion: 1,
+        id: 'wildcard-probe',
+        kind: 'extension-plugin',
+        version: '3.0.0-alpha.0',
+        executionBoundary: 'out-of-process',
+      },
+      slotRegistry: new Map([[VAULT_SLOT, { decl: { name: VAULT_SLOT, policy: 'closed' } }]]),
+      trust: { approvedActions: [], signed: true },
     },
-    slotRegistry: new Map([[VAULT_SLOT, { decl: { name: VAULT_SLOT, policy: 'closed' } }]]),
-    trust: { approvedActions: [], signed: true },
-    extraNodes: [
-      { node: 'service.invoke.read:*', effect: 'allow' },
-      { node: 'service.invoke.write:host:*', effect: 'allow' },
-      { node: `service.invoke.admin:${VAULT_SLOT}#*`, effect: 'allow' },
-    ],
-  });
+    {
+      extraNodes: [
+        { node: 'service.invoke.read:*', effect: 'allow' },
+        { node: 'service.invoke.write:host:*', effect: 'allow' },
+        { node: `service.invoke.admin:${VAULT_SLOT}#*`, effect: 'allow' },
+        { node: `service.invoke.read:${VAULT_SLOT}#exportSecrets`, effect: 'allow' },
+        { node: 'service.invoke.write:host:vault#exportSecrets', effect: 'allow' },
+      ],
+    },
+  );
+  assert.equal(wildcardEval.decision, 'allow');
   assert.equal(
     evaluatePermissionTree(
       wildcardEval.grant.tree,
       wildcardEval.subject,
       `service.invoke.read:${VAULT_SLOT}#exportSecrets`,
+    ).effect,
+    'deny',
+  );
+  assert.equal(
+    evaluatePermissionTree(
+      wildcardEval.grant.tree,
+      wildcardEval.subject,
+      `service.invoke.admin:${VAULT_SLOT}#exportSecrets`,
     ).effect,
     'deny',
   );
@@ -666,4 +681,194 @@ test('Round 7 kernel hardening: effect/wrapService escapes blocked, rootCtx.fibe
   const startedAt = Date.now();
   await control.stop();
   assert.ok(Date.now() - startedAt < 5000, 'control.stop() must complete boundedly despite hung extension dispose()');
+});
+
+test('Round 8 kernel hardening: blocks all cordis.* symbols, wraps fluent/symbol members, blocks internal ctx leaks, snapshots isolate getters, and cancels in-flight mounts on stop', async () => {
+  const customSym = Symbol('customMethod');
+  const sourceBytes = new TextEncoder().encode('r8-root-fluent-v1');
+  const entryHash = await sha256Tagged(sourceBytes);
+  const contract = validateContractDecl({
+    schemaVersion: 1,
+    id: 'r8-root',
+    kind: 'root-plugin',
+    version: '3.0.0-alpha.0',
+    executionBoundary: 'in-process-root',
+    provides: ['demo:fluent'],
+  });
+  const rpm = await createFrozenRpm({
+    target: 'runtime',
+    rootPlugins: [
+      { id: contract.id, version: contract.version, entryHash, provides: [...contract.provides] },
+    ],
+  });
+  let rootCtxRef;
+  const { control } = await createLoomWardKernel({
+    rpm,
+    roots: [{
+      id: contract.id,
+      contract,
+      bytes: async () => sourceBytes,
+      load: async () => ({
+        name: 'r8-root',
+        apply(ctx) {
+          rootCtxRef = ctx;
+          ctx.provide('demo:fluent', {
+            [Symbol.for('cordis.invoke')]: () => 'leaked-invoke',
+            readOk() {
+              return 'safe';
+            },
+            fluentSelf() {
+              return this;
+            },
+            leakCtx() {
+              return { ctx: rootCtxRef };
+            },
+            leakLogger() {
+              return rootCtxRef.logger;
+            },
+            closedMethod() {
+              return 'secret-data';
+            },
+            [customSym]() {
+              return 'sym-result';
+            },
+          });
+        },
+      }),
+    }],
+  });
+
+  let capturedSvc;
+  let capturedExtCtx;
+  let asyncDisposeRan = false;
+  await control.mountExtensionUnit({
+    contract: {
+      schemaVersion: 1,
+      id: 'r8-ext',
+      kind: 'extension-plugin',
+      version: '3.0.0-alpha.0',
+      executionBoundary: 'out-of-process',
+      consumes: ['demo:fluent'],
+      writes: {
+        hooks: [],
+        intercepts: [],
+        isolateProvides: ['ext:one', 'ext:two'],
+      },
+    },
+    trust: { autoApproveTrusted: true },
+    serviceMethods: {
+      'demo:fluent': {
+        readOk: { policy: 'public', mode: 'read' },
+        fluentSelf: { policy: 'public', mode: 'read' },
+        leakCtx: { policy: 'public', mode: 'read' },
+        leakLogger: { policy: 'public', mode: 'read' },
+        closedMethod: { policy: 'closed', mode: 'admin' },
+      },
+    },
+    load: () => ({
+      name: 'r8-ext',
+      apply(ctx) {
+        capturedExtCtx = ctx;
+        capturedSvc = ctx.get('demo:fluent');
+        for (const symName of ['cordis.invoke', 'cordis.extend', 'cordis.filter', 'cordis.events', 'cordis.tracker']) {
+          const sym = Symbol.for(symName);
+          assert.equal(ctx[sym], undefined);
+          assert.equal(capturedSvc[sym], undefined);
+          assert.equal(sym in capturedSvc, false);
+        }
+
+        // Getter-TOCTOU on isolate(names): snapshotted once so mutating getter on 2nd pass cannot escalate.
+        let getterReads = 0;
+        const sneakyNames = [];
+        Object.defineProperty(sneakyNames, 0, {
+          enumerable: true,
+          get() {
+            getterReads += 1;
+            return getterReads === 1 ? 'ext:one' : 'host:forbidden';
+          },
+        });
+        const isoCtx = ctx.isolate(sneakyNames);
+        assert.equal(getterReads, 1);
+        isoCtx.provide('ext:one', { ok: true });
+        const isoTwo = ctx.isolate(['ext:two']);
+        assert.throws(() => isoTwo.provide('ext:two', { [Symbol.for('cordis.invoke')]: () => {} }), SlotError);
+        assert.throws(() => isoCtx.provide('host:forbidden', { ok: false }), SlotError);
+
+        // Fluent `return this` returns sanitized wrapper (still frozen & rule-checked).
+        const chained = capturedSvc.fluentSelf();
+        assert.equal(chained.readOk(), 'safe');
+        assert.throws(() => chained.closedMethod(), SlotError);
+        assert.throws(() => { chained.readOk = () => 'tampered'; }, TypeError);
+
+        // Returned Cordis internal objects / `.ctx` props are blocked fail-closed.
+        assert.throws(() => capturedSvc.leakCtx(), SlotError);
+        assert.throws(() => capturedSvc.leakLogger(), SlotError);
+
+        // Symbol property calls go through wrapMethodMember (#assertUnitActive + rules).
+        assert.throws(() => capturedSvc[customSym](), SlotError);
+
+        // Async effect disposer settles cleanly.
+        ctx.effect(() => async () => {
+          asyncDisposeRan = true;
+        });
+      },
+    }),
+  });
+
+  await control.unmountExtensionUnit('r8-ext');
+  assert.equal(asyncDisposeRan, true);
+  assert.throws(() => capturedExtCtx.get('demo:fluent'), SlotError);
+  assert.throws(() => capturedSvc.readOk(), SlotError);
+
+  // Concurrently calling control.stop() cancels & unregisters hung in-flight mountExtensionUnit cleanly.
+  const hungMount = control.mountExtensionUnit({
+    contract: {
+      schemaVersion: 1,
+      id: 'r8-hung-mount',
+      kind: 'extension-plugin',
+      version: '3.0.0-alpha.0',
+      executionBoundary: 'out-of-process',
+    },
+    load: () => ({
+      name: 'r8-hung-mount',
+      apply() {
+        return new Promise(() => {});
+      },
+    }),
+  }).catch(err => err);
+  await new Promise(resolve => setTimeout(resolve, 25));
+  await control.stop();
+  const hungOutcome = await Promise.race([
+    hungMount,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('hung mount did not abort on stop')), 3000)),
+  ]);
+  assert.ok(hungOutcome instanceof Error);
+
+  // Standalone Node subprocess check: hung dispose() / withDeadline keeps event loop alive until deadline (no code 13 premature exit).
+  const { spawnSync } = await import('node:child_process');
+  const script = `
+    import { pathToFileURL } from 'node:url';
+    import path from 'node:path';
+    const sharedMod = await import(pathToFileURL(path.join(process.cwd(), 'packages/shared/src/index.mjs')).href);
+    const kernelMod = await import(pathToFileURL(path.join(process.cwd(), 'packages/kernel/src/index.mjs')).href);
+    await sharedMod.withDeadline(() => new Promise(() => {}), 30, 'r8-watchdog').catch(() => 'timed-out');
+    const bytes = new TextEncoder().encode('sub-root');
+    const entryHash = await sharedMod.sha256Tagged(bytes);
+    const contract = sharedMod.validateContractDecl({ schemaVersion: 1, id: 'sub-root', kind: 'root-plugin', version: '3.0.0-alpha.0', executionBoundary: 'in-process-root' });
+    const rpm = await sharedMod.createFrozenRpm({ target: 'runtime', rootPlugins: [{ id: contract.id, version: contract.version, entryHash, provides: [] }] });
+    const { control } = await kernelMod.createLoomWardKernel({ rpm, roots: [{ id: contract.id, contract, bytes: async () => bytes, load: async () => ({ name: 'sub-root', apply() {} }) }] });
+    await control.mountExtensionUnit({
+      contract: { schemaVersion: 1, id: 'sub-hung', kind: 'extension-plugin', version: '3.0.0-alpha.0', executionBoundary: 'out-of-process' },
+      load: () => ({ name: 'sub-hung', apply(ctx) { ctx.effect(() => () => new Promise(() => {})); } }),
+    });
+    await control.stop();
+    console.log('CLEAN_EXIT_OK');
+  `;
+  const sub = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    timeout: 10000,
+  });
+  assert.equal(sub.status, 0, `Subprocess exited ${sub.status}: ${sub.stderr}`);
+  assert.match(sub.stdout, /CLEAN_EXIT_OK/);
 });

@@ -20,7 +20,6 @@ async function runBoundedStep(fn, stepTimeoutMs) {
       Promise.resolve().then(() => fn()),
       new Promise(resolve => {
         timer = setTimeout(resolve, stepTimeoutMs);
-        timer.unref?.();
       }),
     ]);
   } catch {
@@ -108,7 +107,6 @@ export async function withDeadline(timeoutMs, task, { rollbackStepTimeoutMs } = 
     timer = setTimeout(() => {
       void run.rollback().finally(() => reject(new BootDeadlineError(`Boot exceeded ${timeoutMs}ms deadline.`)));
     }, timeoutMs);
-    timer.unref?.();
   });
 
   const workPromise = (async () => {

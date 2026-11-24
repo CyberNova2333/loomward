@@ -146,13 +146,28 @@ function collectClosedTargets(slotRegistry) {
 function nodeTouchesForbiddenTarget(nodeStr, closedTargets) {
   if (typeof nodeStr !== 'string') return true;
   if (nodeStr === '*' || nodeStr.startsWith('impl.select:')) return true;
-  if (matchPermissionNode(nodeStr, 'impl.select:__probe__') >= 0) return true;
+  const colonIdx = nodeStr.indexOf(':');
+  const candidates = [nodeStr];
+  if (colonIdx !== -1) {
+    const res = nodeStr.slice(colonIdx + 1);
+    const hashIdx = res.indexOf('#');
+    if (hashIdx !== -1) {
+      const targetPart = nodeStr.slice(0, colonIdx + 1 + hashIdx);
+      candidates.push(targetPart, `${targetPart}#*`);
+    }
+  }
+  for (const cand of candidates) {
+    if (matchPermissionNode(cand, 'impl.select:__probe__') >= 0) return true;
+  }
   for (const closedName of closedTargets) {
     const probes = [
       `impl.register:${closedName}`,
       `impl.select:${closedName}`,
       `service.intercept:${closedName}`,
       `service.isolate-provide:${closedName}`,
+      `service.invoke.read:${closedName}`,
+      `service.invoke.write:${closedName}`,
+      `service.invoke.admin:${closedName}`,
       `service.invoke.read:${closedName}#__probe__`,
       `service.invoke.write:${closedName}#__probe__`,
       `service.invoke.admin:${closedName}#__probe__`,
@@ -161,7 +176,9 @@ function nodeTouchesForbiddenTarget(nodeStr, closedTargets) {
       `mechanism.hook.replace:${closedName}`,
     ];
     for (const probe of probes) {
-      if (matchPermissionNode(nodeStr, probe) >= 0) return true;
+      for (const cand of candidates) {
+        if (matchPermissionNode(cand, probe) >= 0) return true;
+      }
     }
   }
   return false;

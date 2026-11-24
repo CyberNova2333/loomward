@@ -1337,3 +1337,110 @@ rl.on('line', line => {
   assert.equal(refreshHub.getConfiguredToolScopes().has('mcp__slow_sf__slow_echo_v2'), true);
   await refreshHub.close();
 });
+
+test('Round 8 external-mcp hardening: rejects empty HTTP 200 JSON-RPC bodies and evicts connecting slot on sole-waiter abort', async t => {
+  const http = await import('node:http');
+  const stateDir = await makeTempState(t);
+  const workspace = await fs.mkdtemp(path.join(os.homedir(), '.ad-mcp-ws-'));
+  await fs.chmod(workspace, 0o700);
+  t.after(() => fs.rm(workspace, { recursive: true, force: true }));
+
+  let mode = 'empty_body';
+  let initCount = 0;
+  const r8HttpServer = http.createServer(async (req, res) => {
+    if (req.method === 'DELETE') { res.writeHead(204); res.end(); return; }
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const msg = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (msg.method === 'notifications/initialized') { res.writeHead(202); res.end(); return; }
+    if (mode === 'empty_body') {
+      if (msg.method === 'initialize') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          jsonrpc: '2.0',
+          id: msg.id,
+          result: { protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'empty-srv', version: '1' } },
+        }));
+        return;
+      }
+      // Return HTTP 200 with whitespace-only body instead of JSON-RPC payload.
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('   \n');
+      return;
+    }
+
+    if (msg.method === 'initialize') {
+      initCount += 1;
+      const attempt = initCount;
+      const delayMs = attempt === 1 ? 300 : 10;
+      setTimeout(() => {
+        if (res.writableEnded || res.destroyed) return;
+        res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': `r8-sess-${attempt}` });
+        res.end(JSON.stringify({
+          jsonrpc: '2.0',
+          id: msg.id,
+          result: { protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'evict-srv', version: '1' } },
+        }));
+      }, delayMs);
+      return;
+    }
+    if (msg.method === 'tools/list') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        jsonrpc: '2.0',
+        id: msg.id,
+        result: { tools: [{ name: 'evict_ping', description: 'ping', inputSchema: { type: 'object', properties: {} } }] },
+      }));
+      return;
+    }
+    if (msg.method === 'tools/call') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        jsonrpc: '2.0',
+        id: msg.id,
+        result: { content: [{ type: 'text', text: `init-${initCount}` }] },
+      }));
+    }
+  });
+  await new Promise(resolve => r8HttpServer.listen(0, '127.0.0.1', resolve));
+  const srvUrl = `http://127.0.0.1:${r8HttpServer.address().port}/mcp`;
+  t.after(() => new Promise(resolve => {
+    r8HttpServer.closeAllConnections?.();
+    r8HttpServer.close(resolve);
+  }));
+
+  const srvRec = upsertMcpServerSync(stateDir, {
+    id: 'r8_http_srv',
+    name: 'R8 Http',
+    transport: 'http',
+    url: srvUrl,
+    timeoutMs: 5000,
+  }, { workspaceRoots: [workspace] });
+
+  // 1. Empty HTTP 200 body on expectResponse request fails closed.
+  const emptyProbe = await probeMcpServer(srvRec, { stateDir });
+  assert.equal(emptyProbe.ok, false);
+  assert.match(emptyProbe.error || '', /empty response body|malformed|unexpected end|json/i);
+
+  // 2. Sole waiter aborting single-flight handshake evicts `connecting` immediately so caller 2 starts a fresh initialize.
+  mode = 'slow_init';
+  saveMcpProbeResultSync(stateDir, 'r8_http_srv', {
+    ok: true,
+    latencyMs: 5,
+    tools: [{ name: 'evict_ping', description: 'ping', inputSchema: { type: 'object', properties: {} } }],
+  }, { workspaceRoots: [workspace] });
+
+  const hub = createExternalMcpHub({ stateDir, workspaceRoots: [workspace], auditFile: path.join(stateDir, 'audit.jsonl') });
+  t.after(() => hub.close());
+
+  const c1 = new AbortController();
+  const p1 = hub.callTool('mcp__r8_http_srv__evict_ping', {}, { signal: c1.signal });
+  setTimeout(() => c1.abort(new Error('sole waiter cancelled')), 30);
+  await assert.rejects(() => p1, /cancelled/i);
+
+  // Immediately invoke caller 2 well before attempt 1's 300ms delay would finish; must trigger initCount === 2 and succeed!
+  const p2Res = await hub.callTool('mcp__r8_http_srv__evict_ping', {});
+  assert.notEqual(p2Res.isError, true);
+  assert.equal(initCount, 2);
+  assert.equal(p2Res.content[0].text, 'init-2');
+});

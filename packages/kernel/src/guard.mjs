@@ -46,6 +46,13 @@ const BLOCKED_CONTEXT_PROPS = new Set([
 
 const BLOCKED_SYMBOLS = new Set([ORIGINAL, CALLER, SHADOW, ISOLATE, TRACKER]);
 
+function isBlockedSymbol(prop) {
+  if (typeof prop !== 'symbol') return false;
+  if (BLOCKED_SYMBOLS.has(prop)) return true;
+  const key = Symbol.keyFor(prop);
+  return typeof key === 'string' && key.startsWith('cordis.');
+}
+
 function isCordisContextOrFiber(value) {
   if (!value || (typeof value !== 'object' && typeof value !== 'function')) return false;
   if (Context.is(value)) return true;
@@ -65,19 +72,31 @@ function hasCordisTracker(value) {
   }
 }
 
-function assertSafeServiceReturn(result, serviceName, memberName) {
-  if (isCordisContextOrFiber(result)) {
-    throw new SlotError(`Blocked unsafe Cordis context return from ${serviceName}#${memberName}.`);
+function hasCordisInternalRef(value) {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function')) return false;
+  if (isCordisContextOrFiber(value) || hasCordisTracker(value)) return true;
+  try {
+    if (value.ctx && Context.is(value.ctx)) return true;
+    if (value.service?.ctx && Context.is(value.service.ctx)) return true;
+    if (value.parent && Context.is(value.parent)) return true;
+    const fiber = typeof value.meta?.fiber?.deref === 'function' ? value.meta.fiber.deref() : undefined;
+    if (fiber && isCordisContextOrFiber(fiber)) return true;
+  } catch {
+    return true;
   }
-  if (result && typeof result.then === 'function') {
-    return Promise.resolve(result).then(resolved => {
-      if (isCordisContextOrFiber(resolved)) {
-        throw new SlotError(`Blocked unsafe async Cordis context return from ${serviceName}#${memberName}.`);
-      }
-      return resolved;
-    });
+  return false;
+}
+
+function isSameOrCordisShadow(candidate, rawTarget) {
+  if (candidate === rawTarget) return true;
+  if (!candidate || (typeof candidate !== 'object' && typeof candidate !== 'function')) return false;
+  try {
+    if (candidate[ORIGINAL] === rawTarget) return true;
+    if (Object.hasOwn(candidate, SHADOW) && Object.getPrototypeOf(candidate) === rawTarget) return true;
+  } catch {
+    return false;
   }
-  return result;
+  return false;
 }
 
 function isolateOf(ctx) {
@@ -328,7 +347,12 @@ export class KernelGuard {
         throw new SlotError(`Unit ${state.unitId} ctx.effect requires a function.`);
       }
       const dispose = rawCtx.effect(() => fn(), label);
-      return typeof dispose === 'function' ? () => { dispose(); } : undefined;
+      return typeof dispose === 'function'
+        ? () => {
+            const res = dispose();
+            return res && typeof res.then === 'function' ? Promise.resolve(res).then(() => undefined) : undefined;
+          }
+        : undefined;
     };
 
     methods.on = (event, listener) => {
@@ -340,7 +364,12 @@ export class KernelGuard {
         throw new SlotError(`Unit ${state.unitId} ctx.on requires a function.`);
       }
       const dispose = rawCtx.on('dispose', () => listener());
-      return typeof dispose === 'function' ? () => { dispose(); } : undefined;
+      return typeof dispose === 'function'
+        ? () => {
+            const res = dispose();
+            return res && typeof res.then === 'function' ? Promise.resolve(res).then(() => undefined) : undefined;
+          }
+        : undefined;
     };
 
     methods.intercept = (name, config) => {
@@ -376,7 +405,7 @@ export class KernelGuard {
 
     methods.isolate = names => {
       guard.#assertUnitActive(state, 'ctx.isolate');
-      const list = Array.isArray(names) ? names : [names];
+      const list = Array.isArray(names) ? Array.from(names) : [names];
       if (list.length === 0 || list.some(n => typeof n !== 'string' || !n)) {
         throw new SlotError(`Unit ${state.unitId} ctx.isolate requires a non-empty list of service names.`);
       }
@@ -397,8 +426,11 @@ export class KernelGuard {
       if (check !== undefined) {
         throw new SlotError(`Unit ${state.unitId} cannot register custom provide check callbacks on ${name}.`);
       }
-      if (isCordisContextOrFiber(value) || hasCordisTracker(value)) {
-        throw new SlotError(`Unit ${state.unitId} cannot provide a Cordis Context, Fiber, or tracker object on ${name}.`);
+      const hasBlockedSym = value && (typeof value === 'object' || typeof value === 'function')
+        ? Object.getOwnPropertySymbols(value).some(isBlockedSymbol)
+        : false;
+      if (hasCordisInternalRef(value) || hasBlockedSym) {
+        throw new SlotError(`Unit ${state.unitId} cannot provide a Cordis Context, Fiber, or internal symbol object on ${name}.`);
       }
       if (isolateOf(rawCtx)[name] === baseIsolates[name]) {
         throw new SlotError(`Unit ${state.unitId} cannot call provide outside its own isolate: ${name}.`);
@@ -577,11 +609,25 @@ export class KernelGuard {
     }
 
     let wrapped;
+    const sanitizeServiceReturn = (result, memberName) => {
+      const checkResolved = resolved => {
+        if (isSameOrCordisShadow(resolved, rawTarget)) return wrapped;
+        if (hasCordisInternalRef(resolved)) {
+          throw new SlotError(`Blocked unsafe Cordis context return from ${serviceName}#${memberName}.`);
+        }
+        return resolved;
+      };
+      if (result && typeof result.then === 'function') {
+        return Promise.resolve(result).then(checkResolved);
+      }
+      return checkResolved(result);
+    };
+
     const invokeCallable = (thisArg, args) => {
       const boundThis = thisArg === wrapped ? rawTarget : thisArg;
       if (!methodRules) {
         guard.#assertUnitActive(state, `service.invoke:${serviceName}#$`);
-        return assertSafeServiceReturn(Reflect.apply(rawTarget, boundThis, args), serviceName, '$');
+        return sanitizeServiceReturn(Reflect.apply(rawTarget, boundThis, args), '$');
       }
       const callRule = resolveMethodRule(methodRules, '$');
       return guard.#invokeGuardedMethod(
@@ -589,17 +635,41 @@ export class KernelGuard {
         serviceName,
         '$',
         callRule,
-        () => assertSafeServiceReturn(Reflect.apply(rawTarget, boundThis, args), serviceName, '$'),
+        () => sanitizeServiceReturn(Reflect.apply(rawTarget, boundThis, args), '$'),
       );
+    };
+
+    const wrapMethodMember = (memberName, rawFn) => {
+      if (!methodRules) {
+        return function activeCheckedMethod(...args) {
+          guard.#assertUnitActive(state, `service.invoke:${serviceName}#${memberName}`);
+          return sanitizeServiceReturn(Reflect.apply(rawFn, rawTarget, args), memberName);
+        };
+      }
+      const rule = typeof memberName === 'symbol'
+        ? resolveMethodRule(methodRules, String(memberName))
+        : resolveMethodRule(methodRules, memberName);
+      return function guardedMethod(...args) {
+        return guard.#invokeGuardedMethod(
+          state,
+          serviceName,
+          String(memberName),
+          rule,
+          () => sanitizeServiceReturn(Reflect.apply(rawFn, rawTarget, args), String(memberName)),
+        );
+      };
     };
 
     const readGuardedProp = prop => {
       if (prop === GUARD_WRAPPED) return true;
       if (typeof prop === 'symbol') {
-        if (BLOCKED_SYMBOLS.has(prop)) return undefined;
+        if (isBlockedSymbol(prop)) return undefined;
         guard.#assertUnitActive(state, `service.get:${serviceName}#${String(prop)}`);
         const symVal = Reflect.get(rawTarget, prop, rawTarget);
-        return isCordisContextOrFiber(symVal) ? undefined : symVal;
+        if (isSameOrCordisShadow(symVal, rawTarget)) return wrapped;
+        if (hasCordisInternalRef(symVal)) return undefined;
+        if (typeof symVal === 'function') return wrapMethodMember(prop, symVal);
+        return symVal;
       }
       if (prop === 'constructor' || prop === '__proto__' || prop === 'prototype') {
         return undefined;
@@ -611,30 +681,16 @@ export class KernelGuard {
         if (prop === 'bind') return (thisArg, ...boundArgs) => (...moreArgs) => invokeCallable(thisArg, [...boundArgs, ...moreArgs]);
       }
       const raw = Reflect.get(rawTarget, prop, rawTarget);
-      if (isCordisContextOrFiber(raw)) return undefined;
+      if (isSameOrCordisShadow(raw, rawTarget)) return wrapped;
+      if (hasCordisInternalRef(raw)) return undefined;
       if (typeof raw !== 'function') return raw;
-      if (!methodRules) {
-        return function activeCheckedMethod(...args) {
-          guard.#assertUnitActive(state, `service.invoke:${serviceName}#${String(prop)}`);
-          return assertSafeServiceReturn(Reflect.apply(raw, rawTarget, args), serviceName, String(prop));
-        };
-      }
-      const rule = resolveMethodRule(methodRules, prop);
-      return function guardedMethod(...args) {
-        return guard.#invokeGuardedMethod(
-          state,
-          serviceName,
-          prop,
-          rule,
-          () => assertSafeServiceReturn(Reflect.apply(raw, rawTarget, args), serviceName, String(prop)),
-        );
-      };
+      return wrapMethodMember(prop, raw);
     };
 
     const traps = {
       get: (_shadow, prop) => readGuardedProp(prop),
       has: (_shadow, prop) => {
-        if (typeof prop === 'symbol' && BLOCKED_SYMBOLS.has(prop)) return false;
+        if (isBlockedSymbol(prop)) return false;
         if (prop === 'constructor' || prop === '__proto__' || prop === 'prototype') return false;
         guard.#assertUnitActive(state, `service.has:${serviceName}`);
         return Reflect.has(rawTarget, prop);
@@ -642,13 +698,13 @@ export class KernelGuard {
       ownKeys: () => {
         guard.#assertUnitActive(state, `service.ownKeys:${serviceName}`);
         return Reflect.ownKeys(rawTarget).filter(k => {
-          if (typeof k === 'symbol' && BLOCKED_SYMBOLS.has(k)) return false;
+          if (isBlockedSymbol(k)) return false;
           if (k === 'constructor' || k === '__proto__' || k === 'prototype') return false;
           return true;
         });
       },
       getOwnPropertyDescriptor: (_shadow, prop) => {
-        if (typeof prop === 'symbol' && BLOCKED_SYMBOLS.has(prop)) return undefined;
+        if (isBlockedSymbol(prop)) return undefined;
         if (prop === 'constructor' || prop === '__proto__' || prop === 'prototype') return undefined;
         guard.#assertUnitActive(state, `service.desc:${serviceName}`);
         if (!Object.prototype.hasOwnProperty.call(rawTarget, prop)) return undefined;

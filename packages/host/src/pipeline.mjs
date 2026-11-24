@@ -190,7 +190,7 @@ export function createToolDispatchPipeline({
 
   async function handleControlRpc(authorized, { signal, requestId }) {
     const { body } = authorized;
-    if (body.method.startsWith('notifications/')) return undefined;
+    if (body.method.startsWith('notifications/') && !Object.hasOwn(body, 'id')) return undefined;
 
     if (body.method === 'tools/list') {
       const seen = new Set();

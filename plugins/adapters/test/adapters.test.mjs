@@ -631,3 +631,46 @@ test('Round 7 adapter network hardening: trailing-dot FQDN blockedOrigins and si
   );
   assert.ok(Date.now() - startedAt < 2000);
 });
+
+test('Round 8 adapter network hardening: blocks dot-only hosts, enforces allowLoopbackHttp=false & private/metadata IPs on literals, and forwards Headers/tuples', async t => {
+  const { fetchBounded } = await import('../src/network.mjs');
+  for (const badOrigin of ['https://.', 'https://..']) {
+    assert.throws(() => assertSafeIntegrationOrigin(badOrigin), /invalid|hostname/i);
+  }
+
+  let capturedHeaders = {};
+  const mockSrv = await listenServer((req, res) => {
+    capturedHeaders = req.headers;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  t.after(() => mockSrv.close());
+
+  // IPv4/IPv6-mapped loopback, private, and link-local metadata literals fail closed even when Node skips lookup.
+  for (const blockedUrl of [
+    `${mockSrv.origin}/test`,
+    'http://[::ffff:127.0.0.1]/test',
+    'https://10.0.0.1/test',
+    'https://169.254.169.254/latest',
+  ]) {
+    await assert.rejects(
+      () => fetchBounded(blockedUrl, { allowLoopbackHttp: false }),
+      err => err.code === 'UNSAFE_TARGET_URL',
+    );
+  }
+
+  // Headers instance and [k, v][] tuple headers both forward over pinned Node HTTP(S) transport.
+  const res1 = await fetchBounded(`${mockSrv.origin}/hdr1`, {
+    allowLoopbackHttp: true,
+    headers: new Headers({ 'x-from-headers': 'alpha-val' }),
+  });
+  assert.equal(res1.status, 200);
+  assert.equal(capturedHeaders['x-from-headers'], 'alpha-val');
+
+  const res2 = await fetchBounded(`${mockSrv.origin}/hdr2`, {
+    allowLoopbackHttp: true,
+    headers: [['x-from-tuple', 'beta-val']],
+  });
+  assert.equal(res2.status, 200);
+  assert.equal(capturedHeaders['x-from-tuple'], 'beta-val');
+});

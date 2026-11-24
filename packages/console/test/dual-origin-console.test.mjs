@@ -905,4 +905,41 @@ test('Round 7 console hardening: tab settings preserves snapshot race, startDual
   });
   assert.equal(cStatus.status, 200);
   assert.equal(cStatus.json().security.requirePasskey, true);
+
+  // Verify POST /api/mcp-servers/probe handles generic probe failures/timeouts cleanly without 500 and preserves HTTP 409 conflict.
+  const { upsertMcpServerSync } = await import('../../../local/mcp-registry.mjs');
+  upsertMcpServerSync(stateDir, {
+    id: 'r8_slow_probe',
+    name: 'Slow Probe',
+    transport: 'stdio',
+    command: process.execPath,
+    args: ['-e', 'setTimeout(() => process.exit(1), 400)'],
+    timeoutMs: 3000,
+  }, { workspaceRoots: [workspace] });
+
+  const probeHeaders = {
+    host: `localhost:${dual.trust.port}`,
+    origin: trustLocalhost,
+    cookie,
+    'x-loomward-csrf': csrf,
+    'x-loomward-tab-auth': rotatedTab,
+    'sec-fetch-site': 'same-origin',
+    'content-type': 'application/json',
+  };
+  const pSlow1 = httpCall(trustLocalhost, '/api/mcp-servers/probe', {
+    method: 'POST',
+    headers: probeHeaders,
+    body: JSON.stringify({ id: 'r8_slow_probe' }),
+  });
+  await new Promise(resolve => setTimeout(resolve, 40));
+  const pSlow2 = await httpCall(trustLocalhost, '/api/mcp-servers/probe', {
+    method: 'POST',
+    headers: probeHeaders,
+    body: JSON.stringify({ id: 'r8_slow_probe' }),
+  });
+  assert.equal(pSlow2.status, 409);
+  const probe1Res = await pSlow1;
+  assert.equal(probe1Res.status, 200);
+  const probe1Json = probe1Res.json();
+  assert.equal(probe1Json.probe?.ok ?? probe1Json.server?.lastProbe?.ok, false);
 });

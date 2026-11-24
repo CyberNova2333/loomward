@@ -156,7 +156,8 @@ def resolve_github(name, owners, toks, token_owners, use_gh=False):
         repo = name
     any_error = False; any_public = None
     for o in owners:
-        mapped = [k for k in toks if o in token_owners.get(k, [])]
+        o_cf = o.casefold()
+        mapped = [k for k in toks if any(str(x).casefold() == o_cf for x in token_owners.get(k, []))]
         order = mapped or list(toks)                     # 该 owner 有专属 PAT 时只问它: 它的 404 就是权威答案
         got = None
         for k in order:
@@ -183,8 +184,9 @@ def resolve_github(name, owners, toks, token_owners, use_gh=False):
 
 def resolve_cnb(name, groups, tok):
     if '/' in name:
-        o, repo = name.split('/', 1)
-        groups = [g for g in groups if g.split('/')[-1] == o or g == o]
+        o, _, repo = name.rpartition('/')
+        o_cf = o.casefold()
+        groups = [g for g in groups if g.split('/')[-1].casefold() == o_cf or g.casefold() == o_cf]
     else:
         repo = name
     any_error = False; any_public = None
@@ -219,7 +221,7 @@ def main(names):
     use_tokens = any(s.startswith('token') or s == 'token' for s in srcs)
     use_github = use_gh or use_tokens
     use_cnb = 'cnb' in srcs
-    toks = tokens(); ctok = cnb_token() if use_cnb else None
+    toks = tokens() if use_tokens else {}; ctok = cnb_token() if use_cnb else None
     neg = load(NEG); now = time.time(); out = {}
     for n in names:
         key = n.casefold()
@@ -227,10 +229,10 @@ def main(names):
         if isinstance(e, dict) and now - e.get('ts', 0) < NEG_TTL:
             out[n] = {'status': e['status'], 'owner': e.get('owner', ''), 'cached': True}; continue
         results = []
-        if use_github and owners:
-            if not use_gh and not toks:
+        if use_github:
+            if not owners or (use_tokens and not toks) or (not use_gh and not toks):
                 results.append({'status': 'error', 'owner': ''})
-            else:
+            if owners and (use_gh or (use_tokens and toks)):
                 results.append(resolve_github(n, owners, toks, token_owners, use_gh=use_gh))
         if use_cnb:
             if not ctok or not cache.get('cnb_groups'):
@@ -264,4 +266,5 @@ def main(names):
     print(json.dumps(out, ensure_ascii=False))
 
 
-main([a for a in sys.argv[1:] if a and not a.startswith('--')])
+if __name__ == '__main__':
+    main([a for a in sys.argv[1:] if a and not a.startswith('--')])

@@ -289,13 +289,14 @@ export class BridgeConnector {
         if (message.type === 'pong') { this.retries = 0; receivedPong = true; lastPong = Date.now(); this.status(true); return; }
         if (message.type === 'cancel' && typeof message.id === 'string') { this.inflight.get(message.id)?.controller.abort(); return; }
         if (message.type !== 'request') return;
+        const safeErrId = raw => (raw === null || (typeof raw === 'number' && Number.isFinite(raw)) || (typeof raw === 'string' && raw.length <= 256) ? raw : null);
         const send = body => {
           if (socket.readyState !== WebSocket.OPEN) return;
           let encoded = JSON.stringify({ type: 'response', id: message.id, body });
-          if (Buffer.byteLength(encoded) > 2 * 1024 * 1024) encoded = JSON.stringify({ type: 'response', id: message.id, body: { jsonrpc: '2.0', id: message.body?.id ?? null, error: { code: -32603, message: 'Tool result exceeds the bridge limit; request a smaller range' } } });
-          socket.send(encoded);
+          if (Buffer.byteLength(encoded) > 2 * 1024 * 1024) encoded = JSON.stringify({ type: 'response', id: message.id, body: { jsonrpc: '2.0', id: safeErrId(message.body?.id), error: { code: -32603, message: 'Tool result exceeds the bridge limit; request a smaller range' } } });
+          try { socket.send(encoded); } catch {}
         };
-        const errorReply = (text, data) => send({ jsonrpc: '2.0', id: message.body?.id ?? null, error: { code: -32001, message: text, ...(data ? { data } : {}) } });
+        const errorReply = (text, data) => send({ jsonrpc: '2.0', id: safeErrId(message.body?.id), error: { code: -32001, message: text, ...(data ? { data } : {}) } });
         let authorized;
         try {
           authorized = validateRequestEnvelope(message, Date.now(), {
@@ -349,8 +350,9 @@ export class BridgeConnector {
           else {
             // Keep stop admission independent of ordinary control traffic. Cross-lane
             // ID conflicts are still rejected while their bounded receipt survives.
-            prior = (stopping ? this.controlReceipts : this.stopReceipts).inspect(message);
-            if (prior.acquired) prior = (stopping ? this.stopReceipts : this.controlReceipts).claim(message);
+            const memReceipts = stopping ? this.stopReceipts : this.controlReceipts;
+            prior = memReceipts.inspect(message);
+            if (prior.acquired) prior = memReceipts.claim(message);
           }
           if (!prior.acquired) { errorReply('This request ID was already attempted or its control budget is exhausted.', { reason: prior.reason }); return; }
           controller.signal.throwIfAborted();

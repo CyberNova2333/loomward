@@ -526,3 +526,38 @@ test('R6-H1/R6-H6: sha256FileSync refuses symlinks and cloudflare API helper rej
   await assert.rejects(() => cloudflare('/../../outside'), /escaped \/client\/v4\//);
   await assert.rejects(() => cloudflare('zones'), /single "\/"/);
 });
+
+test('Round 8 host-safety hardening: sanitizedToolEnv strips NODE_USE_ENV_PROXY & ELECTRON_RUN_AS_NODE and binary trust checks all workspace roots', { skip: !posix }, async t => {
+  const { sanitizedToolEnv } = await import('../local/host-safety.mjs');
+  const cleanEnv = sanitizedToolEnv({
+    PATH: process.env.PATH,
+    NODE_OPTIONS: '--inspect',
+    NODE_USE_ENV_PROXY: '1',
+    ELECTRON_RUN_AS_NODE: '1',
+    HOME: process.env.HOME,
+  });
+  assert.equal(Object.hasOwn(cleanEnv, 'NODE_OPTIONS'), false);
+  assert.equal(Object.hasOwn(cleanEnv, 'NODE_USE_ENV_PROXY'), false);
+  assert.equal(Object.hasOwn(cleanEnv, 'ELECTRON_RUN_AS_NODE'), false);
+
+  const base = await homeFixture(t);
+  const ws1 = path.join(base, 'ws1');
+  const ws2 = path.join(base, 'ws2');
+  const state = path.join(base, 'state');
+  await fs.mkdir(ws1, { mode: 0o700 });
+  await fs.mkdir(ws2, { mode: 0o700 });
+  await fs.mkdir(state, { mode: 0o700 });
+  const binInWs2 = path.join(ws2, 'evil-tool');
+  await fs.writeFile(binInWs2, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  assert.throws(() => assertTrustedBinary(binInWs2, [ws1, ws2]), /workspace/i);
+
+  const nodeDirInWs2 = path.join(ws2, 'node-bin');
+  await fs.mkdir(nodeDirInWs2, { mode: 0o700 });
+  const fakeNode = path.join(nodeDirInWs2, 'node');
+  await fs.writeFile(fakeNode, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const sha = sha256FileSync(fakeNode);
+  assert.throws(
+    () => assertPinnedNode({ nodePath: fakeNode, nodeRoot: nodeDirInWs2, nodeSha256: sha, sourceRoot: state, roots: [ws1, ws2] }, state),
+    /workspace/i,
+  );
+});

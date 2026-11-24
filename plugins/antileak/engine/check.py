@@ -75,6 +75,9 @@ try:
         or (os.path.join(_ENGINE_DIR, 'resolve-private.py') if os.environ.get('LOOMWARD_ANTILEAK_POLICY') else POLICY.get('resolve_script', os.path.join(os.path.dirname(REFRESH), 'resolve-private.py')))
     )
     RESOLVE_BUDGET = int(POLICY.get('resolve_budget', 30))
+    RESOLVE_IGNORE = {str(x).casefold() for x in (POLICY.get('resolve_ignore') or [])} | {
+        'co-authored-by', 'signed-off-by', 'reviewed-by', 'acked-by', 'tested-by', 'reported-by', 'suggested-by', 'helped-by',
+        'pre-commit', 'pre-push', 'commit-msg', 'pre-merge-commit', 'post-commit', 'utf-8', 'x86-64', 'read-only', 'no-verify'}
 except Exception:
     if _pfd is not None:
         try:
@@ -88,9 +91,6 @@ NET = False                                               # 由 main 按 --net �
 ZERO = '0' * 40
 # xxx-xxx 裸名候选: 由 - 连接的 ≥2 段，段内字母数字(可含 .)，前后不是路径/单词字符(排除 --flag、a/b-c 路径段)
 RX_SLUG = re.compile(r'(?<![A-Za-z0-9_./\\-])([A-Za-z0-9.]+(?:-[A-Za-z0-9.]+)+)(?![A-Za-z0-9_/:-])')   # 后跟 ':' 的是 trailer 键/HTTP 头，不是仓名
-RESOLVE_IGNORE = {x.casefold() for x in POLICY.get('resolve_ignore', [])} | {
-    'co-authored-by', 'signed-off-by', 'reviewed-by', 'acked-by', 'tested-by', 'reported-by', 'suggested-by', 'helped-by',
-    'pre-commit', 'pre-push', 'commit-msg', 'pre-merge-commit', 'post-commit', 'utf-8', 'x86-64', 'read-only', 'no-verify'}
 
 PASS, VIOLATION, ERROR = 'pass', 'violation', 'error'
 CRED_PREFIX = re.compile(r'(?i)^(ghp|gho|ghs|ghu|ghr)_|^github_pat_')
@@ -110,12 +110,12 @@ def mask(s):
 RX_B64CHAR = re.compile(r'[A-Za-z0-9+/]')
 
 
-def in_b64_run(text, a, b, minlen=40):
-    """命中 [a,b) 是否整个落在一段 ≥minlen、纯 base64 字符组成、大小写与数字混杂的编码串里
-    (JSON 里内嵌的图片/音频等编码数据)。仅当命中子串自身全由 base64 字符构成，且不含 URL/路径特征时才豁免；
+def in_b64_run(text, a, b, minlen=48):
+    """命中 [a,b) 是否整个落在一段 ≥minlen、纯 base64 字符组成、大小写与数字混杂的高熵编码串里
+    (JSON 里内嵌的图片/音频等编码数据)。仅当命中子串自身全由 base64 字符构成，且不含 URL/域名/英文路径/CamelCase 标识符特征时才豁免；
     只用于 R2 型号/会话规则；R7 凭据规则不走这里(凭据本身就是这种形态)。"""
     matched = text[a:b]
-    if not matched or not re.fullmatch(r'[A-Za-z0-9+/]+', matched):
+    if not matched or len(matched) > 24 or not re.fullmatch(r'[A-Za-z0-9+/]+', matched):
         return False
     i, j = a, b
     while i > 0 and RX_B64CHAR.match(text[i - 1]):
@@ -127,14 +127,17 @@ def in_b64_run(text, a, b, minlen=40):
         return False
     if '//' in run or text[max(0, i - 3):i].endswith('://'):
         return False
-    if j < len(text) and text[j] == '.':
+    if (i > 0 and text[i - 1] == '.') or (j < len(text) and text[j] == '.'):
         return False
-    if '/' in run and (
-        len(run) < 48
-        or re.search(r'(?:^|/)(?:src|lib|app|pkg|packages|plugins|local|cloud|docs|tests?|chat|share|api|v\d+)/', run, re.I)
-    ):
+    if '/' in run and any(re.fullmatch(r'[a-z]{3,}|[A-Z][a-z]{2,}', seg) for seg in run.split('/') if seg):
         return False
-    return bool(re.search(r'[a-z]', run) and re.search(r'[A-Z]', run) and re.search(r'[0-9]', run))
+    digit_cnt = len(re.findall(r'[0-9]', run))
+    upper_cnt = len(re.findall(r'[A-Z]', run))
+    has_b64_sym = '+' in run or '/' in run
+    if digit_cnt < (3 if has_b64_sym else 4) or upper_cnt < 4 or not re.search(r'[a-z]', run):
+        return False
+    non_lower = sum(1 for ch in run if not ('a' <= ch <= 'z'))
+    return (non_lower / len(run)) >= 0.40
 
 
 def scan(text):
@@ -256,12 +259,16 @@ def private_check(text):
 def slug_candidates(text, priv, owners=()):
     out = set()
     owners_cf = {o.casefold() for o in owners}
-    for m in re.finditer(r'(?<![A-Za-z0-9._-])([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)', text):     # 已知 owner 下的 owner/repo 也即时查
+    for m in re.finditer(r'(?<![A-Za-z0-9._-])([A-Za-z0-9._-]+)/(?=([A-Za-z0-9._-]+))', text):     # 正向前瞻捕获 URL/多级路径中的末尾 owner/repo
+        owner_part = m.group(1)
         repo_part = m.group(2)
-        if repo_part in ('.', '..'):
+        if repo_part.endswith('.git') and len(repo_part) > 4:
+            repo_part = repo_part[:-4]
+        if owner_part in ('.', '..') or repo_part in ('', '.', '..'):
             continue
-        if m.group(1).casefold() in owners_cf and ck(m.group(0)) not in priv and 1 <= len(repo_part) <= 100:
-            out.add(m.group(0))
+        cand = f'{owner_part}/{repo_part}'
+        if owner_part.casefold() in owners_cf and ck(cand) not in priv and 1 <= len(repo_part) <= 100:
+            out.add(cand)
     for m in RX_SLUG.finditer(text):
         t = m.group(1)
         if not (6 <= len(t) <= 100) or t.casefold() in priv or t.casefold() in RESOLVE_IGNORE:

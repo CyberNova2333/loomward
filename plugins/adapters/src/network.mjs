@@ -128,6 +128,15 @@ function canonicalOriginKey(parsed) {
   return `${parsed.protocol.toLowerCase()}//${formattedHost}${port}`;
 }
 
+function assertValidHostname(rawHostname, label = 'integration') {
+  const rawBare = String(rawHostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  const bareHost = rawBare.replace(/\.+$/, '');
+  if (!bareHost || rawBare.includes('..')) {
+    throw new Error(`Invalid ${label} target hostname.`);
+  }
+  return bareHost;
+}
+
 function normalizeOriginList(blockedOrigins = []) {
   const set = new Set();
   if (!Array.isArray(blockedOrigins)) return set;
@@ -167,13 +176,14 @@ export function assertSafeIntegrationOrigin(
     throw new Error(`${label} origin must not include a path suffix; pass the bare origin.`);
   }
 
+  const bareHost = assertValidHostname(parsed.hostname, label);
   const blockedSet = normalizeOriginList(blockedOrigins);
   if (blockedSet.has(canonicalOriginKey(parsed))) {
     throw new Error(`${label} origin is in the blockedOrigins exclusion list.`);
   }
 
-  const loopback = isLoopbackHost(parsed.hostname);
-  const ipClass = classifyIpLiteral(parsed.hostname);
+  const loopback = isLoopbackHost(bareHost);
+  const ipClass = classifyIpLiteral(bareHost);
   if (ipClass === 'blocked') {
     throw new Error(`${label} origin targets a blocked link-local, multicast, or unspecified IP.`);
   }
@@ -221,30 +231,74 @@ export function assertSafeEndpointUrl(
   return parsed.toString();
 }
 
+function unsafeTargetUrlError(message) {
+  const err = new Error(message);
+  err.code = 'UNSAFE_TARGET_URL';
+  return err;
+}
+
+function validateResolvedRecords(records, { allowLoopbackHttp = false, allowPrivateNetwork = false } = {}) {
+  if (!Array.isArray(records) || records.length === 0) {
+    throw unsafeTargetUrlError('DNS resolution returned no addresses.');
+  }
+  const safe = [];
+  for (const rec of records) {
+    const addr = typeof rec?.address === 'string' ? rec.address.trim() : '';
+    const ver = net.isIP(addr.split('%')[0]);
+    if (!ver) {
+      throw unsafeTargetUrlError('DNS resolution returned an invalid non-IP address.');
+    }
+    const cls = classifyIpLiteral(addr);
+    if (cls === 'blocked' || cls === 'domain') {
+      throw unsafeTargetUrlError('Resolved DNS address targets a blocked link-local or metadata IP.');
+    }
+    if (cls === 'loopback' && !allowLoopbackHttp && !allowPrivateNetwork) {
+      throw unsafeTargetUrlError('Resolved DNS address targets a loopback IP.');
+    }
+    if (cls === 'private' && !allowPrivateNetwork) {
+      throw unsafeTargetUrlError('Resolved DNS address targets a private network IP.');
+    }
+    safe.push({ address: addr, family: rec.family || ver });
+  }
+  return safe;
+}
+
+function assertSafeTargetUrl(urlStr, { allowLoopbackHttp = false, allowPrivateNetwork = false } = {}) {
+  const parsed = new URL(urlStr);
+  const proto = parsed.protocol.toLowerCase();
+  if (proto !== 'https:' && proto !== 'http:') {
+    throw unsafeTargetUrlError('Upstream request only permits http:// or https:// protocols.');
+  }
+  if (parsed.username || parsed.password) {
+    throw unsafeTargetUrlError('Upstream request URL must not embed credentials.');
+  }
+  const bareHost = assertValidHostname(parsed.hostname, 'request');
+  const loopback = isLoopbackHost(bareHost);
+  const cls = classifyIpLiteral(bareHost);
+  if (proto === 'http:' && !(allowLoopbackHttp && (loopback || cls === 'loopback'))) {
+    throw unsafeTargetUrlError('Upstream plaintext http:// is permitted only for loopback targets with allowLoopbackHttp enabled.');
+  }
+  if (cls === 'blocked') {
+    throw unsafeTargetUrlError('Target IP address is blocked by network boundary policy.');
+  }
+  if (cls === 'loopback' && !allowLoopbackHttp && !allowPrivateNetwork) {
+    throw unsafeTargetUrlError('Target IP address is blocked by network boundary policy.');
+  }
+  if (cls === 'private' && !allowPrivateNetwork) {
+    throw unsafeTargetUrlError('Target IP address is blocked by network boundary policy.');
+  }
+  return { parsed, bareHost, isHttps: proto === 'https:' };
+}
+
 export async function assertSafeResolvedHostname(
   urlStr,
   { allowLoopbackHttp = false, allowPrivateNetwork = false, dnsLookup = dns.promises.lookup } = {},
 ) {
-  const parsed = new URL(urlStr);
-  const bare = parsed.hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '');
-  if (net.isIP(bare) || isLoopbackHost(bare)) return;
+  const { bareHost } = assertSafeTargetUrl(urlStr, { allowLoopbackHttp, allowPrivateNetwork });
+  if (net.isIP(bareHost) || isLoopbackHost(bareHost)) return;
   if (typeof dnsLookup !== 'function') return;
-  const records = await dnsLookup(bare, { all: true, verbatim: true });
-  if (!Array.isArray(records) || records.length === 0) {
-    throw new Error('DNS resolution returned no addresses.');
-  }
-  for (const rec of records) {
-    const cls = classifyIpLiteral(rec?.address);
-    if (cls === 'blocked') {
-      throw new Error('Resolved DNS address targets a blocked link-local or metadata IP.');
-    }
-    if (cls === 'loopback' && !allowLoopbackHttp && !allowPrivateNetwork) {
-      throw new Error('Resolved DNS address targets a loopback IP.');
-    }
-    if (cls === 'private' && !allowPrivateNetwork) {
-      throw new Error('Resolved DNS address targets a private network IP.');
-    }
-  }
+  const records = await dnsLookup(bareHost, { all: true, verbatim: true });
+  validateResolvedRecords(records, { allowLoopbackHttp, allowPrivateNetwork });
 }
 
 export async function readBoundedText(response, maxBytes = DEFAULT_MAX_RESPONSE_BYTES) {
@@ -318,27 +372,7 @@ function createPinnedSafeLookup({
     }
     Promise.resolve(dnsLookup(bare, { all: true, verbatim: true }))
       .then(records => {
-        if (!Array.isArray(records) || records.length === 0) {
-          cb(new Error('DNS resolution returned no addresses.'));
-          return;
-        }
-        const safe = [];
-        for (const rec of records) {
-          const cls = classifyIpLiteral(rec?.address);
-          if (cls === 'blocked') {
-            cb(new Error('Resolved DNS address targets a blocked link-local or metadata IP.'));
-            return;
-          }
-          if (cls === 'loopback' && !allowLoopbackHttp && !allowPrivateNetwork) {
-            cb(new Error('Resolved DNS address targets a loopback IP.'));
-            return;
-          }
-          if (cls === 'private' && !allowPrivateNetwork) {
-            cb(new Error('Resolved DNS address targets a private network IP.'));
-            return;
-          }
-          safe.push({ address: rec.address, family: rec.family || net.isIP(rec.address) || 4 });
-        }
+        const safe = validateResolvedRecords(records, { allowLoopbackHttp, allowPrivateNetwork });
         if (wantAll) cb(null, safe);
         else cb(null, safe[0].address, safe[0].family);
       })
@@ -359,17 +393,31 @@ function sendPinnedNodeRequest(
     dnsLookup = dns.promises.lookup,
   },
 ) {
-  const parsed = new URL(url);
-  const isHttps = parsed.protocol === 'https:';
+  const { parsed, bareHost, isHttps } = assertSafeTargetUrl(url, { allowLoopbackHttp, allowPrivateNetwork });
   const reqMod = isHttps ? https : http;
-  const bareHost = parsed.hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '');
   const payloadBuf = body === undefined || body === null
     ? null
     : (Buffer.isBuffer(body) || body instanceof Uint8Array ? Buffer.from(body) : Buffer.from(String(body), 'utf8'));
   const reqHeaders = {};
-  if (headers && typeof headers === 'object') {
-    for (const [k, v] of Object.entries(headers)) {
-      if (v !== undefined) reqHeaders[k] = String(v);
+  if (headers) {
+    if (Array.isArray(headers)) {
+      for (const pair of headers) {
+        if (Array.isArray(pair) && pair.length >= 2 && pair[1] !== undefined && pair[1] !== null) {
+          reqHeaders[String(pair[0])] = String(pair[1]);
+        }
+      }
+    } else if (typeof headers.entries === 'function') {
+      for (const [k, v] of headers.entries()) {
+        if (v !== undefined && v !== null) reqHeaders[String(k)] = String(v);
+      }
+    } else if (typeof headers.forEach === 'function') {
+      headers.forEach((v, k) => {
+        if (v !== undefined && v !== null) reqHeaders[String(k)] = String(v);
+      });
+    } else if (typeof headers === 'object') {
+      for (const [k, v] of Object.entries(headers)) {
+        if (v !== undefined && v !== null) reqHeaders[k] = String(v);
+      }
     }
   }
   if (payloadBuf !== null && !Object.keys(reqHeaders).some(k => k.toLowerCase() === 'content-length')) {
@@ -504,6 +552,7 @@ export async function fetchBounded(
   timer.unref?.();
   const startedAt = Date.now();
   try {
+    assertSafeTargetUrl(url, { allowLoopbackHttp, allowPrivateNetwork });
     if (fetchImpl === globalThis.fetch) {
       const effectiveDnsLookup = dnsLookup ?? dns.promises.lookup;
       const result = await sendPinnedNodeRequest(url, {

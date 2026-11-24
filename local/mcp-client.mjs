@@ -845,8 +845,12 @@ function createHttpMcpSession(serverConfig, { blockedOrigins = [] } = {}) {
               done(err);
               return;
             }
-            if (!expectResponse || !rawText.trim()) {
+            if (!expectResponse) {
               done(null, undefined);
+              return;
+            }
+            if (!rawText.trim()) {
+              done(new Error('External MCP HTTP server returned an empty response body.'));
               return;
             }
             let parsedBody;
@@ -1185,6 +1189,9 @@ export function createExternalMcpHub({ stateDir, workspaceRoots, auditFile, bloc
         cleanup();
         // Only cancel the shared handshake when NO other waiter still needs it.
         if (record.waiters.size === 0) {
+          if (connecting.get(record.serverId) === record) {
+            connecting.delete(record.serverId);
+          }
           record.controller.abort(new Error('External MCP request cancelled.'));
         }
         const err = new Error('External MCP request cancelled.');
@@ -1230,7 +1237,7 @@ export function createExternalMcpHub({ stateDir, workspaceRoots, auditFile, bloc
     }
 
     let record = connecting.get(serverConfig.id);
-    if (record && record.fingerprint !== fp) {
+    if (record && (record.fingerprint !== fp || record.controller.signal.aborted)) {
       record.controller.abort(new Error('External MCP server configuration superseded.'));
       connecting.delete(serverConfig.id);
       record = null;
@@ -1272,7 +1279,7 @@ export function createExternalMcpHub({ stateDir, workspaceRoots, auditFile, bloc
       })();
       // Prevent unhandledRejection when all callers aborted before connectPromise settles.
       connectPromise.catch(() => {});
-      selfRecord = { fingerprint: fp, controller, waiters, promise: connectPromise };
+      selfRecord = { serverId: serverConfig.id, fingerprint: fp, controller, waiters, promise: connectPromise };
       connecting.set(serverConfig.id, selfRecord);
       record = selfRecord;
     }

@@ -1377,6 +1377,9 @@ class DecisionService:
         archive_dir = self.config.decisions_dir / ".archived_rollback"
         archived_moves = []
         staged_files = [self.config.metadata_json_path, self.config.database_path]
+        db_backup_ready = False
+        orig_metadata_bytes = None
+        metadata_captured = False
 
         try:
             bak_conn = None
@@ -1384,13 +1387,17 @@ class DecisionService:
                 bak_conn = sqlite3.connect(str(db_backup))
                 with self.db.get_connection() as live_conn:
                     live_conn.backup(bak_conn)
+                db_backup_ready = True
             except Exception:
-                shutil.copy2(db_path, db_backup)
+                if db_path.exists():
+                    shutil.copy2(db_path, db_backup)
+                    db_backup_ready = True
             finally:
                 if bak_conn is not None:
                     bak_conn.close()
 
             orig_metadata_bytes = self.config.metadata_json_path.read_bytes() if self.config.metadata_json_path.exists() else None
+            metadata_captured = True
 
             # 1. 归档快照之外的多余文件
             if self.config.decisions_dir.exists():
@@ -1444,7 +1451,7 @@ class DecisionService:
         except Exception:
             # 全流程故障还原补偿 (U06, U07, R06, R12)
             # 1. 还原数据库 (优先通过 SQLite Backup API 还原, 兼顾 WAL 模式)
-            if db_backup.exists():
+            if db_backup_ready and db_backup.exists():
                 restored_via_backup_api = False
                 bak_conn = None
                 try:
@@ -1479,13 +1486,14 @@ class DecisionService:
                         pass
 
             # 4. 还原 metadata.json (R06)
-            if orig_metadata_bytes is not None:
-                self.config.metadata_json_path.write_bytes(orig_metadata_bytes)
-            elif self.config.metadata_json_path.exists():
-                try:
-                    self.config.metadata_json_path.unlink()
-                except OSError:
-                    pass
+            if metadata_captured:
+                if orig_metadata_bytes is not None:
+                    self.config.metadata_json_path.write_bytes(orig_metadata_bytes)
+                elif self.config.metadata_json_path.exists():
+                    try:
+                        self.config.metadata_json_path.unlink()
+                    except OSError:
+                        pass
             raise
         finally:
             if db_backup.exists():

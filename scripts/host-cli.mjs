@@ -91,17 +91,17 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
-function writePrivateJsonSync(filePath, data) {
+function writePrivateFileSync(filePath, content, { mode = 0o600, ext = '.tmp' } = {}) {
   const dir = path.dirname(filePath);
-  const temp = path.join(dir, `.tmp-${crypto.randomUUID()}.json`);
+  const temp = path.join(dir, `.tmp-${crypto.randomUUID()}${ext}`);
   let fd;
   try {
-    fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
-    fs.writeFileSync(fd, JSON.stringify(data, null, 2), 'utf8');
+    fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), mode);
+    fs.writeFileSync(fd, content, 'utf8');
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;
-    fs.chmodSync(temp, 0o600);
+    fs.chmodSync(temp, mode);
     fs.renameSync(temp, filePath);
   } catch (error) {
     if (fd !== undefined) {
@@ -112,25 +112,16 @@ function writePrivateJsonSync(filePath, data) {
   }
 }
 
+function writePrivateJsonSync(filePath, data) {
+  writePrivateFileSync(filePath, JSON.stringify(data, null, 2), { mode: 0o600, ext: '.json' });
+}
+
+function writePrivateTextFileSync(filePath, content, mode = 0o600) {
+  writePrivateFileSync(filePath, content, { mode, ext: '.tmp' });
+}
+
 function writeExecutableWrapperSync(filePath, content) {
-  const dir = path.dirname(filePath);
-  const temp = path.join(dir, `.tmp-${crypto.randomUUID()}.sh`);
-  let fd;
-  try {
-    fd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o700);
-    fs.writeFileSync(fd, content, 'utf8');
-    fs.fsyncSync(fd);
-    fs.closeSync(fd);
-    fd = undefined;
-    fs.chmodSync(temp, 0o700);
-    fs.renameSync(temp, filePath);
-  } catch (error) {
-    if (fd !== undefined) {
-      try { fs.closeSync(fd); } catch {}
-    }
-    fs.rmSync(temp, { force: true });
-    throw error;
-  }
+  writePrivateFileSync(filePath, content, { mode: 0o700, ext: '.sh' });
 }
 
 export function findDockerExecutable(explicitPath) {
@@ -155,33 +146,45 @@ export function findDockerExecutable(explicitPath) {
   throw new Error('Cannot locate a usable Docker CLI executable.');
 }
 
+function validateDockerContextName(context) {
+  if (typeof context !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(context)) {
+    throw new Error(`Invalid Docker context name: '${String(context)}'`);
+  }
+  return context;
+}
+
 function resolveDockerContext(dockerPath, explicitContext) {
-  if (explicitContext) return explicitContext;
+  if (explicitContext) return validateDockerContextName(explicitContext);
   try {
     const active = execFileSync(dockerPath, ['context', 'show'], {
       encoding: 'utf8',
       timeout: 10000,
+      env: sanitizedToolEnv(),
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
-    if (active) return active;
+    if (active) return validateDockerContextName(active);
   } catch { /* Fall back to platform default context. */ }
-  return defaultDockerContext();
+  return validateDockerContextName(defaultDockerContext());
 }
 
 function inspectDockerInstallation(dockerPath, context, image) {
-  const contextJson = execFileSync(dockerPath, ['--context', context, 'context', 'inspect', context], {
+  const validContext = validateDockerContextName(context);
+  const env = sanitizedToolEnv();
+  const contextJson = execFileSync(dockerPath, ['--context', validContext, 'context', 'inspect', validContext], {
     encoding: 'utf8',
     timeout: 15000,
+    env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const inspected = JSON.parse(contextJson)[0];
   const endpoint = inspected?.Endpoints?.docker?.Host || '';
   if (!endpoint.startsWith('unix:///')) {
-    throw new Error(`Docker context '${context}' must use a local unix:/// socket (got '${endpoint || 'empty'}').`);
+    throw new Error(`Docker context '${validContext}' must use a local unix:/// socket (got '${endpoint || 'empty'}').`);
   }
-  const imageId = execFileSync(dockerPath, ['--context', context, 'image', 'inspect', image, '--format', '{{.Id}}'], {
+  const imageId = execFileSync(dockerPath, ['--context', validContext, 'image', 'inspect', image, '--format', '{{.Id}}'], {
     encoding: 'utf8',
     timeout: 15000,
+    env,
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
   if (!/^sha256:[a-f0-9]{64}$/.test(imageId)) {
@@ -308,12 +311,12 @@ export async function installHardened({
   assertConnectorStopped(statePath);
   assertPrivateFile(path.join(statePath, SECRET_META_FILE));
 
+  clearNodeOverrides();
   const dockerPath = findDockerExecutable(docker);
   assertTrustedBinary(dockerPath, workspacePath);
-  const chosenContext = resolveDockerContext(dockerPath, context);
+  const chosenContext = validateDockerContextName(resolveDockerContext(dockerPath, context));
   const { imageId } = dockerInspector(dockerPath, chosenContext, image);
 
-  clearNodeOverrides();
   const nodeRuntime = await nodeRuntimeProvider({ stateDir: statePath, workspace: workspacePath, proxy });
 
   const pnpmCli = path.join(sourceRoot, 'node_modules', 'pnpm', 'bin', 'pnpm.mjs');
@@ -1112,15 +1115,17 @@ export function manageSystemdUserServices({
   const bridgeUnitPath = path.join(unitDir, 'agentdock-bridge.service');
   const webuiUnitPath = path.join(unitDir, 'agentdock-webui.service');
 
+  const sysEnv = sanitizedToolEnv();
   if (action === 'install' || action === 'enable') {
     fs.mkdirSync(unitDir, { recursive: true, mode: 0o755 });
     const { bridgeUnit, webuiUnit } = renderSystemdUnits({ stateDir: realState, host, port });
-    fs.writeFileSync(bridgeUnitPath, bridgeUnit, { mode: 0o644 });
-    fs.writeFileSync(webuiUnitPath, webuiUnit, { mode: 0o644 });
-    execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'inherit', timeout: 15000 });
+    writePrivateTextFileSync(bridgeUnitPath, bridgeUnit, 0o644);
+    writePrivateTextFileSync(webuiUnitPath, webuiUnit, 0o644);
+    execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'inherit', timeout: 15000, env: sysEnv });
     execFileSync('systemctl', ['--user', 'enable', '--now', 'agentdock-webui.service', 'agentdock-bridge.service'], {
       stdio: 'inherit',
       timeout: 30000,
+      env: sysEnv,
     });
     return {
       installed: true,
@@ -1133,7 +1138,7 @@ export function manageSystemdUserServices({
     const args = action === 'disable'
       ? ['--user', 'disable', '--now', 'agentdock-webui.service', 'agentdock-bridge.service']
       : ['--user', action, 'agentdock-webui.service', 'agentdock-bridge.service'];
-    execFileSync('systemctl', args, { stdio: 'inherit', timeout: 30000 });
+    execFileSync('systemctl', args, { stdio: 'inherit', timeout: 30000, env: sysEnv });
     return { action, ok: true };
   }
 
@@ -1141,7 +1146,12 @@ export function manageSystemdUserServices({
     const query = unit => {
       const read = verb => {
         try {
-          return execFileSync('systemctl', ['--user', verb, unit], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+          return execFileSync('systemctl', ['--user', verb, unit], {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: sysEnv,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          }).trim();
         } catch (err) {
           return String(err?.stdout || '').trim() || 'inactive';
         }

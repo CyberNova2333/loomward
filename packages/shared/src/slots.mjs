@@ -201,13 +201,14 @@ export class MechanismSlot {
     const immutableInput = isObjectInput && (self.#decl.allowReplace === false || Object.isFrozen(input))
       ? { ...input }
       : null;
+    const freezeHookView = val => (val && typeof val === 'object' ? Object.freeze({ ...val }) : val);
     let currentInput = isObjectInput ? { ...input } : input;
     let forcedApproval = Boolean(isObjectInput && currentInput.forceApproval === true);
     let alreadyBlocked = Boolean(isObjectInput && currentInput.blocked === true);
 
     if (!alreadyBlocked) {
       for (const item of [...self.#hooks.before]) {
-        const next = await item.handler(currentInput);
+        const next = await item.handler(freezeHookView(currentInput));
         if (next === undefined) continue;
         if (!next || typeof next !== 'object' || Array.isArray(next)) {
           // Non-object return cannot erase monotonic safety latches or structured invocation input.
@@ -242,13 +243,14 @@ export class MechanismSlot {
     let output;
     if (self.#decl.allowReplace !== false && self.#hooks.replace.length > 0) {
       const replacer = self.#hooks.replace[self.#hooks.replace.length - 1];
-      output = await replacer.handler(currentInput, baseAction);
+      output = await replacer.handler(freezeHookView(currentInput), baseAction);
     } else {
       output = await baseAction(currentInput);
     }
 
+    const frozenAfterInput = freezeHookView(currentInput);
     for (const item of [...self.#hooks.after]) {
-      const next = await item.handler(output, currentInput);
+      const next = await item.handler(output, frozenAfterInput);
       if (next === undefined) continue;
       if (next && typeof next === 'object' && !Array.isArray(next)) {
         const spread = { ...next };

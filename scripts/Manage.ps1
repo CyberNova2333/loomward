@@ -131,6 +131,8 @@ if($Action -eq 'Stop') {
   if($process){$null=$process.WaitForExit(20000)}
   if(OwnedProcess $processFile $runtimePaths.SupervisorSource){throw 'Supervisor is still running. Inspect its status.'}
   $child=OwnedProcess $childFile $runtimePaths.ConnectorSource
+  if($child){$null=$child.WaitForExit(20000)}
+  $child=OwnedProcess $childFile $runtimePaths.ConnectorSource
   if($child){throw 'Connector is still stopping. Inspect its status before forcing termination.'}
   if(Test-Path -LiteralPath $stopFile){Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue}
   'Stopped this connector and its supervisor.'
@@ -166,24 +168,31 @@ try {
   Clear-NodeOverrides
   $quickFailures=0
   $lastSpawnAt=[DateTime]::MinValue
+  $spawnExitAccounted=$true
   $nextRestartAt=[DateTime]::MinValue
   while(-not(Test-Path -LiteralPath $stopFile)) {
     $child=OwnedProcess $childFile $connector
-    if(-not $child -and [DateTime]::UtcNow -ge $nextRestartAt) {
-      if($lastSpawnAt -ne [DateTime]::MinValue) {
+    if(-not $child) {
+      if(-not $spawnExitAccounted -and $lastSpawnAt -ne [DateTime]::MinValue) {
         $elapsed=([DateTime]::UtcNow - $lastSpawnAt).TotalSeconds
         if($elapsed -lt 10){
           $quickFailures=[Math]::Min($quickFailures+1, 5)
           $backoff=[Math]::Min(30, [int][Math]::Pow(2, $quickFailures))
           $nextRestartAt=[DateTime]::UtcNow.AddSeconds($backoff)
-          Start-Sleep -Seconds 1
-          continue
+        } else {
+          $quickFailures=0
+          $nextRestartAt=[DateTime]::MinValue
         }
-        $quickFailures=0
+        $spawnExitAccounted=$true
+      }
+      if([DateTime]::UtcNow -lt $nextRestartAt) {
+        Start-Sleep -Seconds 1
+        continue
       }
       $null=Assert-PinnedNode $config $statePath
       $arguments='"'+$connector+'" "'+$statePath+'"'
       $lastSpawnAt=[DateTime]::UtcNow
+      $spawnExitAccounted=$false
       $child=Start-Process -FilePath $node -ArgumentList $arguments -WorkingDirectory $root -WindowStyle Hidden -PassThru
       SaveProcess $childFile $child $connector
     }

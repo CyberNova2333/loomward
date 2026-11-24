@@ -588,4 +588,96 @@ test('Round 7 ingress hardening: unexpected-response terminates socket to trigge
   );
   assert.equal(badEnvelopeReply.id, null);
   assert.ok(badEnvelopeReply.error);
+
+  // Round 8: notifications/* WITH an explicit id must receive JSON-RPC -32601 (never undefined).
+  const notifWithId = await daemon.localIngress.dispatchRpc(
+    { jsonrpc: '2.0', id: 'notif-with-id', method: 'notifications/initialized' },
+    { requestId: 'req_notif_with_id_1' },
+  );
+  assert.equal(notifWithId.id, 'notif-with-id');
+  assert.equal(notifWithId.error?.code, -32601);
+
+  const notifNoId = await daemon.localIngress.dispatchRpc(
+    { jsonrpc: '2.0', method: 'notifications/initialized' },
+    { requestId: 'req_notif_no_id_1' },
+  );
+  assert.equal(notifNoId, undefined);
+});
+
+test('Round 8 sandbox root-plugin applies effective workspaceRoots and allowOutbound=false onto runtime', async t => {
+  const { base, stateDir, workspace } = await makeTempState(t);
+  const wrongRoot = path.join(base, 'wrong-root');
+  await fs.mkdir(wrongRoot, { mode: 0o700 });
+  const { apply: applySandbox } = await import('../../sandbox/src/index.mjs');
+
+  let capturedToolProvider;
+  const fakeCtx = {
+    get(slot) {
+      if (slot === 'tool:provider@1') {
+        return {
+          register(name, impl) {
+            capturedToolProvider = { name, impl };
+          },
+        };
+      }
+      return undefined;
+    },
+    provide() {},
+    on() {},
+    effect(fn) {
+      const dispose = fn();
+      if (typeof dispose === 'function') t.after(dispose);
+    },
+  };
+
+  let seenMergedConfig = null;
+  await applySandbox(fakeCtx, {
+    stateDir,
+    workspaceRoots: [workspace],
+    allowOutbound: false,
+    sandboxConfig: {
+      roots: [wrongRoot],
+      allowExec: false,
+      sandbox: { enabled: true, allowOutbound: true },
+    },
+    createRuntime: async cfg => {
+      seenMergedConfig = cfg;
+      return {
+        async handleRpc(body) {
+          if (body.method === 'tools/call' && body.params?.name === 'computer_context') {
+            return {
+              jsonrpc: '2.0',
+              id: body.id,
+              result: {
+                content: [{
+                  type: 'text',
+                  text: JSON.stringify({
+                    roots: cfg.roots,
+                    sandbox_allow_outbound: cfg.sandbox.allowOutbound,
+                  }),
+                }],
+              },
+            };
+          }
+          return { jsonrpc: '2.0', id: body.id, result: { tools: [] } };
+        },
+        async close() {},
+      };
+    },
+  });
+
+  assert.ok(seenMergedConfig);
+  assert.deepEqual(seenMergedConfig.roots, [workspace]);
+  assert.equal(seenMergedConfig.sandbox.allowOutbound, false);
+  assert.ok(capturedToolProvider);
+  const ctxRes = await capturedToolProvider.impl.handleRpc({
+    jsonrpc: '2.0',
+    id: 'ctx-1',
+    method: 'tools/call',
+    params: { name: 'computer_context', arguments: {} },
+  });
+  const payload = JSON.parse(ctxRes.result.content[0].text);
+  assert.equal(payload.roots.includes(workspace), true);
+  assert.equal(payload.roots.includes(wrongRoot), false);
+  assert.equal(payload.sandbox_allow_outbound, false);
 });

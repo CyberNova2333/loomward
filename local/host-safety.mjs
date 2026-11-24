@@ -11,6 +11,8 @@ export const NODE_OVERRIDE_VARS = Object.freeze([
   'NODE_PATH',
   'NODE_TLS_REJECT_UNAUTHORIZED',
   'NODE_EXTRA_CA_CERTS',
+  'NODE_USE_ENV_PROXY',
+  'ELECTRON_RUN_AS_NODE',
   'LD_PRELOAD',
   'LD_LIBRARY_PATH',
   'DYLD_INSERT_LIBRARIES',
@@ -128,8 +130,10 @@ export function assertPrivateFile(filePath) {
 
 export function assertTrustedBinary(binaryPath, workspacePath) {
   const resolved = assertPlainLocalPath(binaryPath);
-  if (workspacePath) {
-    const work = path.resolve(workspacePath);
+  const roots = Array.isArray(workspacePath) ? workspacePath : workspacePath ? [workspacePath] : [];
+  for (const root of roots) {
+    if (!root) continue;
+    const work = path.resolve(root);
     if (beneath(resolved, work)) {
       throw new Error('Control executables must be outside the mounted workspace.');
     }
@@ -151,8 +155,8 @@ export function assertPinnedNode(config, stateDir) {
   if (!config.nodePath || !path.isAbsolute(config.nodePath)) {
     throw new Error('Pinned Node executable is missing.');
   }
-  const workspace = Array.isArray(config.roots) && config.roots[0] ? config.roots[0] : undefined;
-  const node = assertTrustedBinary(config.nodePath, workspace);
+  const workspaces = Array.isArray(config.roots) ? config.roots : undefined;
+  const node = assertTrustedBinary(config.nodePath, workspaces);
   if (!beneath(node, privateRoot) || node === privateRoot) {
     throw new Error('Node must be installed inside its private runtime directory.');
   }

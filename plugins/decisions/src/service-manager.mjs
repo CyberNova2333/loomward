@@ -191,7 +191,8 @@ export function createDecisionsServiceClient({
 
     if (!starting) {
       starting = (async () => {
-        const targetPort = port > 0 ? port : 0;
+        const parsedPort = Number(port);
+        const targetPort = Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort <= 65535 ? parsedPort : 0;
         if (closed) throw new Error('Decisions ledger plugin is closed.');
         const spawnToken = crypto.randomBytes(32).toString('base64url');
         const proc = spawn(
@@ -215,7 +216,16 @@ export function createDecisionsServiceClient({
           spawnErr = err;
           exited = true;
         });
-        proc.once('exit', () => { exited = true; });
+        proc.once('exit', () => {
+          exited = true;
+          if (child === proc) {
+            child = null;
+            if (spawnService) {
+              activeBaseUrl = null;
+              activeToken = null;
+            }
+          }
+        });
         proc.stdout?.on('data', chunk => {
           stdoutBuf += chunk.toString('utf8');
           if (stdoutBuf.length > 65536) stdoutBuf = stdoutBuf.slice(-16384);
@@ -387,7 +397,7 @@ export function createDecisionsServiceClient({
     exportContext,
     checkConsistency,
     recordDecision,
-    getBaseUrl: () => activeBaseUrl,
+    getBaseUrl: () => (spawnService && (!child || child.exitCode !== null || child.signalCode !== null) ? null : activeBaseUrl),
     isClosed: () => closed,
     close,
   });

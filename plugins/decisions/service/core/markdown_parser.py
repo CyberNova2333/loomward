@@ -215,7 +215,7 @@ class TopicMarkdownParser:
             open_len = 0
             round_nums = []
 
-            for line in content.splitlines():
+            for line in _split_lines_lf(content):
                 if open_char is not None:
                     if is_fence_close(line, open_char, open_len):
                         open_char = None
@@ -319,7 +319,7 @@ class TopicMarkdownParser:
         open_len = 0
         skip_header = True
 
-        for line in core_part.splitlines():
+        for line in _split_lines_lf(core_part):
             if open_char is not None:
                 # 在代码块内，完全保留所有行
                 core_lines.append(line)
@@ -350,7 +350,7 @@ class TopicMarkdownParser:
         # 4. 解析历史轮次（严密的代码块安全隔离与仅匹配真实轮次标题）
         rounds: List[Dict[str, Any]] = []
         if history_part.strip():
-            hist_lines = history_part.splitlines()
+            hist_lines = _split_lines_lf(history_part)
             current_round_title = None
             current_round_lines: List[str] = []
             open_char = None

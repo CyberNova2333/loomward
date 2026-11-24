@@ -131,6 +131,7 @@ test('JSON-RPC negotiation, malformed messages and disabled commands', async (t)
   const init = await runtime.handleRpc({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } });
   assert.equal(init.result.protocolVersion, '2025-03-26');
   assert.equal(await runtime.handleRpc({ jsonrpc: '2.0', method: 'notifications/initialized' }), null);
+  assert.equal((await runtime.handleRpc({ jsonrpc: '2.0', id: 'notif-1', method: 'notifications/initialized' })).error.code, -32601);
   assert.equal((await runtime.handleRpc([])).error.code, -32600);
   assert.equal((await runtime.handleRpc({ jsonrpc: '2.0', id: 2, method: 'missing' })).error.code, -32601);
   const list = await runtime.handleRpc({ jsonrpc: '2.0', id: 3, method: 'tools/list' });

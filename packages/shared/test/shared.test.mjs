@@ -412,3 +412,44 @@ test('MechanismSlot protects frozen toolName/body from before-hook shadowing and
   assert.equal(toneReads, 1);
   assert.equal(snap.summary[0].tone, 'ok');
 });
+
+test('Round 8 MechanismSlot immutability: hooks cannot mutate frozen inputs in-place or reset forceApproval via undefined return', async () => {
+  const trackedCaller = { effect: fn => fn() };
+  const ORIGINAL = Symbol.for('cordis.original');
+  const mech = new MechanismSlot({ name: 'r8-immut-test', immutableInput: true });
+  const proxy = Object.create(mech, {
+    ctx: { value: trackedCaller },
+    [ORIGINAL]: { value: mech },
+  });
+  const events = [];
+  proxy.hook('before', input => {
+    assert.equal(Object.isFrozen(input), true);
+    assert.throws(() => { input.toolName = 'computer_context'; }, TypeError);
+    assert.throws(() => { input.forceApproval = false; }, TypeError);
+    events.push(['before', input.toolName, input.forceApproval]);
+    return undefined;
+  }, { order: 0 });
+  proxy.hook('replace', (input, next) => {
+    assert.equal(Object.isFrozen(input), true);
+    assert.throws(() => { input.toolName = 'tampered'; }, TypeError);
+    events.push(['replace', input.toolName, input.forceApproval]);
+    return next(input);
+  }, { order: 0 });
+  proxy.hook('after', (result, input) => {
+    assert.equal(Object.isFrozen(input), true);
+    assert.throws(() => { input.toolName = 'tampered_after'; }, TypeError);
+    events.push(['after', input.toolName, input.forceApproval]);
+    return result;
+  }, { order: 0 });
+
+  const input = { toolName: 'exec_command', forceApproval: true };
+  const res = await mech.run(input, x => ({ ok: true, toolName: x.toolName, forceApproval: x.forceApproval }));
+  assert.equal(res.toolName, 'exec_command');
+  assert.equal(res.forceApproval, true);
+  assert.equal(input.toolName, 'exec_command');
+  assert.deepEqual(events, [
+    ['before', 'exec_command', true],
+    ['replace', 'exec_command', true],
+    ['after', 'exec_command', true],
+  ]);
+});

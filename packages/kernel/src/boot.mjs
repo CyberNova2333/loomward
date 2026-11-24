@@ -32,7 +32,6 @@ async function disposeFiberBounded(fiber, timeoutMs = DISPOSE_TIMEOUT_MS) {
       disposePromise,
       new Promise(resolve => {
         timer = setTimeout(resolve, timeoutMs);
-        timer.unref?.();
       }),
     ]);
   } finally {
@@ -116,7 +115,7 @@ export async function createLoomWardKernel({ rpm, roots = [], expectedTarget = n
     const kernelCapability = Symbol('loomward.kernel.capability');
     const mountedRoots = [];
     const mountedUnits = new Map();
-    const inFlightMounts = new Set();
+    const inFlightMounts = new Map();
     const report = [];
     let stopped = false;
 
@@ -254,7 +253,17 @@ export async function createLoomWardKernel({ rpm, roots = [], expectedTarget = n
         throw err;
       }
 
-      inFlightMounts.add(contract.id);
+      let fiber;
+      let rejectOnStop;
+      const stopRace = new Promise((_, reject) => {
+        rejectOnStop = () => reject(
+          new StartupRejectedError(REJECT_CODES.GUARD_INDETERMINATE, contract.id, 'Kernel stopped during extension mount.'),
+        );
+      });
+      inFlightMounts.set(contract.id, {
+        abort: rejectOnStop,
+        getFiber: () => fiber,
+      });
       const state = createGuardedUnitState({
         contract,
         grant: evaluation.grant,
@@ -264,9 +273,10 @@ export async function createLoomWardKernel({ rpm, roots = [], expectedTarget = n
       });
       guard.registerUnit(state);
       const unitCtx = guard.createUnitContext(rootCtx, rootCtx, state);
-      let fiber;
       try {
-        const mod = typeof load === 'function' ? await load() : load;
+        const loadPromise = Promise.resolve().then(() => (typeof load === 'function' ? load() : load));
+        loadPromise.catch(() => {});
+        const mod = await Promise.race([loadPromise, stopRace]);
         if (stopped) {
           throw new StartupRejectedError(REJECT_CODES.GUARD_INDETERMINATE, contract.id, 'Kernel stopped during extension mount.');
         }
@@ -292,7 +302,8 @@ export async function createLoomWardKernel({ rpm, roots = [], expectedTarget = n
             return applyFn(facade, cfg);
           },
         }, config);
-        await fiber;
+        if (fiber && typeof fiber.catch === 'function') fiber.catch(() => {});
+        await Promise.race([fiber, stopRace]);
         if (stopped) {
           throw new StartupRejectedError(REJECT_CODES.GUARD_INDETERMINATE, contract.id, 'Kernel stopped during extension mount.');
         }
@@ -364,6 +375,11 @@ export async function createLoomWardKernel({ rpm, roots = [], expectedTarget = n
       stop: async () => {
         if (stopped) return;
         stopped = true;
+        for (const [unitId, entry] of [...inFlightMounts.entries()]) {
+          guard.unregisterUnit(unitId);
+          entry.abort();
+        }
+        inFlightMounts.clear();
         for (const unitId of [...mountedUnits.keys()].reverse()) {
           await unmountExtensionUnit(unitId).catch(() => {});
         }

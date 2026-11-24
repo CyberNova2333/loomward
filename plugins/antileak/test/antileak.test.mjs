@@ -237,3 +237,65 @@ test('Round 7 antileak hardening: closes R2 base64 URL/path bypasses, fails non-
   assert.notEqual(commitRes.status, 0);
   assert.match(commitRes.stdout, /violation/);
 });
+
+test('Round 8 antileak hardening: catches multi-segment/.git URL slugs, tightens in_b64_run, and enforces fail-closed resolver checks', async t => {
+  const { spawnSync } = await import('node:child_process');
+  const { cachePath } = await makeTempState(t);
+  const nowSec = Math.floor(Date.now() / 1000);
+  await fs.writeFile(cachePath, JSON.stringify({
+    status: 'ok',
+    generated_at: nowSec,
+    expires_at: nowSec + 3600,
+    sources: ['seed'],
+    private: ['OrgAlpha/secret-internal-repo', 'myorg/brand-new-secret', 'myteam/suborg/brand-new-secret'],
+    patterns: [],
+  }), { mode: 0o600 });
+  const runner = createAntileakEngineRunner({ cachePath });
+
+  // Multi-segment CNB URLs & .git suffixes trigger private-repo leak blocks; relative ./ ../ paths do not crash/misfire.
+  for (const payload of [
+    'Clone https://github.com/myorg/brand-new-secret.git right now',
+    'Mirror at https://cnb.cool/myteam/suborg/brand-new-secret/issues/1',
+  ]) {
+    const v = await runner.inspectText(payload);
+    assert.equal(v.decision, 'block', `Expected R3 block for ${payload}`);
+  }
+  const cleanRel = await runner.inspectText('Inspect ./local/path and ../other/file without leaking');
+  assert.equal(cleanRel.decision, 'allow');
+
+  // Tightened in_b64_run blocks domains, lowercase filesystem paths, and CamelCase English identifiers while keeping real >=48 char high-entropy base64 data.
+  for (const bypassPayload of [
+    'See https://claude.ai/chat/A1b2C3d4E5f6G7h8I9j0K1l2M3n4 for notes',
+    '/home/user/workspaces/ClaudeSonnet45/AbCdEfGhIj123456',
+    'MyCustomLongIdentifierNameForTestingClaudeSonnet45IntegrationHandler',
+  ]) {
+    const v = await runner.inspectText(bypassPayload);
+    assert.equal(v.decision, 'block', `Expected bypass block for ${bypassPayload}`);
+    assert.equal(v.ruleId, 'ANTILEAK-R1-R7');
+  }
+  const realB64 = await runner.inspectText(
+    'data:image/png;base64,A1B2C3D4E5F6G7H8I9J0K1L2M3N4ClaudeOpusZ9Y8X7W6V5U4T3S2R1Q0+/==',
+  );
+  assert.equal(realB64.decision, 'allow');
+
+  // resolve-private.py: case-insensitive CNB group matching + fail-closed when requested source creds are absent.
+  const resolvePy = path.join(REPO_ROOT, 'plugins/antileak/engine/resolve-private.py');
+  const resolveCheck = spawnSync('python3', [
+    '-c',
+    `import contextlib, importlib.util, io, json, os, sys
+from unittest import mock
+spec = importlib.util.spec_from_file_location('rp', ${JSON.stringify(resolvePy)})
+rp = importlib.util.module_from_spec(spec); spec.loader.exec_module(rp)
+with mock.patch.object(rp, 'cnb_api', return_value='private'):
+    assert rp.resolve_cnb('secret-repo', ['MyTeam/SubOrg'], 'tok')['status'] == 'private'
+    assert rp.resolve_cnb('myteam/suborg/secret-repo', ['MyTeam/SubOrg'], 'tok')['status'] == 'private'
+buf = io.StringIO()
+with mock.patch.object(rp, 'load', return_value={'owners': [], 'groups': [], 'sources': ['gh', 'token1'], 'ttl': 60}), mock.patch.object(rp, 'tokens', return_value={}), contextlib.redirect_stdout(buf):
+    rp.main(['sample-repo'])
+out = json.loads(buf.getvalue())
+assert out['sample-repo']['status'] == 'error', out
+print('RESOLVE_PRIVATE_OK')`,
+  ], { encoding: 'utf8' });
+  assert.equal(resolveCheck.status, 0, resolveCheck.stderr);
+  assert.match(resolveCheck.stdout, /RESOLVE_PRIVATE_OK/);
+});

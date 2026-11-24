@@ -777,10 +777,14 @@ export async function createTrustOriginServer({
           broker.pruneOtherTrustSessions(session.sid);
         }
         appendSanitizedConnectorLog(stateDir, 'webui_auth', { outcome: `session_policy_${targetMode}` });
-        const snap = await refreshSnapshot({ force: true, broadcast: targetMode !== 'tab' });
-        if (targetMode === 'tab') {
-          session.tabToken = rotatedTabToken;
-          dropStreamsForSid(null);
+        let snap = null;
+        try {
+          snap = await refreshSnapshot({ force: true, broadcast: targetMode !== 'tab' });
+        } finally {
+          if (targetMode === 'tab') {
+            session.tabToken = rotatedTabToken;
+            dropStreamsForSid(null);
+          }
         }
         return sendJson(res, 200, {
           ok: true,
@@ -1056,7 +1060,13 @@ export async function createTrustOriginServer({
         const target = reg.servers.find(s => s.id === parsed.body?.id);
         if (!target) return sendJson(res, 404, { error: 'MCP server not found.' });
         const fp = serverConfigFingerprint(target);
-        const probe = await runBoundedProbe(target, res, blockedOrigins, 30000);
+        let probe;
+        try {
+          probe = await runBoundedProbe(target, res, blockedOrigins, 30000);
+        } catch (err) {
+          if (Number.isInteger(err?.status)) throw err;
+          probe = { ok: false, latencyMs: 0, error: redactSecretsFromText(err?.message || 'Probe failed.', target) };
+        }
         let updated = target;
         let deletedDuringProbe = false;
         try {

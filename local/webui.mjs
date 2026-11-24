@@ -2162,6 +2162,9 @@ export async function startWebUiServer({
           rotatedTabToken = crypto.randomBytes(32).toString('base64url');
           session.authVersion = updated.authVersion;
           session.sessionPersistence = 'tab';
+          for (const otherSid of [...sessions.keys()]) {
+            if (otherSid !== session.sid) sessions.delete(otherSid);
+          }
         } else {
           for (const s of sessions.values()) {
             s.authVersion = updated.authVersion;
@@ -2169,14 +2172,15 @@ export async function startWebUiServer({
           }
         }
         appendSanitizedConnectorLog(resolvedState, 'webui_auth', { outcome: `session_policy_${targetMode}` });
-        const snap = await refreshAndBroadcast({ force: true, broadcast: targetMode !== 'tab' });
-        if (targetMode === 'tab') {
-          session.tabToken = rotatedTabToken;
-          for (const otherSid of [...sessions.keys()]) {
-            if (otherSid !== session.sid) sessions.delete(otherSid);
+        let snap = null;
+        try {
+          snap = await refreshAndBroadcast({ force: true, broadcast: targetMode !== 'tab' });
+        } finally {
+          if (targetMode === 'tab') {
+            session.tabToken = rotatedTabToken;
+            for (const client of sseClients.keys()) client.end();
+            sseClients.clear();
           }
-          for (const client of sseClients.keys()) client.end();
-          sseClients.clear();
         }
         return sendJson(res, 200, {
           ok: true,
@@ -2561,7 +2565,13 @@ export async function startWebUiServer({
         const target = reg.servers.find(s => s.id === body?.id);
         if (!target) return sendJson(res, 404, { error: 'MCP server not found.' });
         const fp = serverConfigFingerprint(target);
-        const probe = await runBoundedProbe(target, res, blockedOrigins, 30000);
+        let probe;
+        try {
+          probe = await runBoundedProbe(target, res, blockedOrigins, 30000);
+        } catch (err) {
+          if (Number.isInteger(err?.status)) throw err;
+          probe = { ok: false, latencyMs: 0, error: redactSecretsFromText(err?.message || 'Probe failed.', target) };
+        }
         let updated = target;
         let deletedDuringProbe = false;
         try {
