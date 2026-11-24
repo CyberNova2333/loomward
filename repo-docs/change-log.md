@@ -342,3 +342,16 @@ Synced through 85b97da（含四轮终审代码审查修复工作树改动）
 - 验证范围与边界：本机（Linux x86_64）运行 `pnpm run check`、`pnpm run layering`、`pnpm run test:ci`（178 项测试：162 通过、0 失败、16 按平台/Docker 跳过）、Python 字节码检查、`validate_repo_docs.py`、`pnpm --dir docs-site run docs:build`、`repo_maintenance_guard.py pre-commit` 与 `sync_assets_licenses.py --check --dry-run`。
 
 Synced through aeffb89（含五轮全库代码审查修复工作树改动）
+
+## 2026-11-24（六轮代码审查）：Trust 票据 DOM 零回显、控制通道多字节 UTF-8 与工具链/脚本边界加固
+
+- 触发：用户要求再次「进行一次代码审查」；覆盖此前尚未逐行复核的 `local/node-toolchains.mjs`、`packages/console/web/*`、`packages/console/src/{html,control-channel}.mjs`、`packages/host/src/daemon.mjs`、`local/webui.mjs` 及 `scripts/{cloudflare-api.mjs,State-Safety.ps1,Manage.ps1}`，修复 `6 High` 真实问题；触发 `repo-docs` Sync gate（决策为 `foreground patch`）。
+- 控制台前端与双源隔离（`R6-H2`、`R6-H3`、[packages/console/web/trust/main.mjs](../packages/console/web/trust/main.mjs)、[packages/console/web/console/main.mjs](../packages/console/web/console/main.mjs)、[packages/console/web/shared/client.mjs](../packages/console/web/shared/client.mjs)）：
+  - 修复 `window.open(url, '_blank', 'noopener')` 按 HTML 规范恒返回 `null` 导致每次点击「打开观测控制台」都将一次性 `#ticket` 凭据回显到 Trust Origin DOM 通知栏的泄露缺陷；改为 `noopener,noreferrer` 且不再回显原始票据 URL，并重新打包 [packages/console/dist](../packages/console/dist/trust.js)。
+  - 补充客户端 `isSafeNavigationUrl()` 协议校验、WebAuthn `::1` 回环重定向、SSE `status` 重绘保留审批复核弹窗滚动位置及 `\r\n\r\n`/服务端断流即时更新离线状态。
+- 控制通道、工具链与运维脚本边界（`R6-H1`、`R6-H4`–`R6-H6`、[local/host-safety.mjs](../local/host-safety.mjs)、[local/node-toolchains.mjs](../local/node-toolchains.mjs)、[packages/console/src/control-channel.mjs](../packages/console/src/control-channel.mjs)、[packages/console/src/html.mjs](../packages/console/src/html.mjs)、[local/webui.mjs](../local/webui.mjs)、[packages/host/src/daemon.mjs](../packages/host/src/daemon.mjs)、[scripts/cloudflare-api.mjs](../scripts/cloudflare-api.mjs)、[scripts/State-Safety.ps1](../scripts/State-Safety.ps1)、[scripts/Manage.ps1](../scripts/Manage.ps1)）：
+  - `sha256FileSync()` 与 `node-toolchains.mjs` 清单读取改用 `O_RDONLY | O_NOFOLLOW` + `fstat`，Node 下载强制 `128 MiB` 上限与流完整性检查；`daemon.mjs` 读取 `rpm.json` 与 `local/webui.mjs` 读取 `secrets.meta.json`/`connector-status.json` 改用无 TOCTOU 有界句柄读，`defaultGatewayProbe` 拒绝内嵌凭据并强制 `TLSv1.2`。
+  - `control-channel.mjs` 全面改用 `StringDecoder('utf8')` 防跨帧中文乱码、校核目录属主 UID 并为 `connectControlSocket` 挂载默认错误监听；`html.mjs` 限制静态资源白名单；`cloudflare-api.mjs` 禁止重定向与 `/client/v4/` 路径逃逸；Windows `State-Safety.ps1` 补齐 `NODE_USE_ENV_PROXY`/`ELECTRON_RUN_AS_NODE` 清理，`Manage.ps1` 为 `/healthz` 响应增加 `64 KiB` 读取上限。
+- 验证范围与边界：本机（Linux x86_64）运行 `pnpm run build:console`、`pnpm run check`、`pnpm run layering`、`pnpm run test:ci`（180 项测试：164 通过、0 失败、16 按平台/Docker 跳过）、`validate_repo_docs.py`、`pnpm --dir docs-site run docs:build`、`repo_maintenance_guard.py pre-commit` 与 `sync_assets_licenses.py --check --dry-run`。
+
+Synced through c525fcd（含六轮代码审查修复工作树改动）

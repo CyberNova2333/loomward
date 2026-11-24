@@ -5,6 +5,7 @@ import {
   createOriginClient,
   el,
   initThemeToggle,
+  isSafeNavigationUrl,
   readMeta,
 } from '../shared/client.mjs';
 
@@ -150,7 +151,7 @@ function renderTopbar() {
               text: state.sseStatus === 'connected' ? '实时通道在线' : '连接中',
             })
           : null,
-        state.trustOrigin
+        isSafeNavigationUrl(state.trustOrigin)
           ? el('a', {
               class: 'lw-btn lw-btn-trust',
               href: state.trustOrigin,
@@ -182,10 +183,11 @@ function renderLockedGate() {
       ]),
       el('span', { class: 'lw-pill lw-pill-warn', text: '双源隔离保护' }),
     ]),
-    state.trustOrigin
+    isSafeNavigationUrl(state.trustOrigin)
       ? el('a', {
           class: 'lw-btn lw-btn-trust',
           href: state.trustOrigin,
+          rel: 'noopener noreferrer',
           text: `前往 Trust Origin (${state.trustOrigin}) 解锁`,
         })
       : el('p', { class: 'lw-muted', text: '未配置 Trust Origin 地址。' }),
@@ -203,7 +205,7 @@ function renderOverview() {
     pending > 0
       ? el('div', { class: 'lw-banner lw-banner-warn lw-row lw-between' }, [
           el('span', { text: `当前有 ${pending} 条待人工复核审批的工具请求，请前往独立 Trust Origin 复核参数。` }),
-          state.trustOrigin
+          isSafeNavigationUrl(state.trustOrigin)
             ? el('a', { class: 'lw-btn lw-btn-trust', href: state.trustOrigin, target: '_blank', rel: 'noopener noreferrer', text: '去 Trust Origin 审批' })
             : null,
         ])
@@ -394,8 +396,11 @@ function renderDeclarativePanels() {
       ]));
     }
 
-    if (panel.links?.length) {
-      cardChildren.push(el('div', { class: 'lw-row' }, panel.links.map(link => el('a', {
+    const safeLinks = Array.isArray(panel.links)
+      ? panel.links.filter(link => link && isSafeNavigationUrl(link.href, { allowRelative: true }))
+      : [];
+    if (safeLinks.length) {
+      cardChildren.push(el('div', { class: 'lw-row' }, safeLinks.map(link => el('a', {
         class: 'lw-btn',
         href: link.href,
         target: '_blank',

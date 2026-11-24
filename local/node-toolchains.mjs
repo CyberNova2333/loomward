@@ -64,10 +64,14 @@ export function getDistribution(platform = process.platform, arch = process.arch
   return entry;
 }
 
+const MAX_NODE_ARCHIVE_BYTES = 128 * 1024 * 1024;
+const MAX_MANIFEST_BYTES = 65536;
+
 function downloadFileNoRedirect(url, destination, proxy) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(destination, { flags: 'wx', mode: 0o600 });
     let finished = false;
+    let receivedBytes = 0;
     const cleanup = err => {
       if (finished) return;
       finished = true;
@@ -86,10 +90,25 @@ function downloadFileNoRedirect(url, destination, proxy) {
         cleanup(new Error(`Official Node download failed with HTTP ${res.statusCode}.`));
         return;
       }
+      const declared = res.headers['content-length'];
+      if (typeof declared === 'string' && /^\d+$/.test(declared) && Number(declared) > MAX_NODE_ARCHIVE_BYTES) {
+        res.destroy();
+        cleanup(new Error('Official Node archive exceeded maximum allowed size.'));
+        return;
+      }
+      res.on('data', chunk => {
+        receivedBytes += chunk.length;
+        if (receivedBytes > MAX_NODE_ARCHIVE_BYTES) {
+          res.destroy();
+          cleanup(new Error('Official Node archive exceeded maximum allowed size.'));
+        }
+      });
       res.on('error', cleanup);
+      res.on('aborted', () => cleanup(new Error('Official Node download was aborted before completion.')));
       res.pipe(file);
       file.on('finish', () => file.close(err => {
         if (err) cleanup(err);
+        else if (!res.complete) cleanup(new Error('Official Node download stream ended prematurely.'));
         else if (!finished) { finished = true; resolve(); }
       }));
     });
@@ -180,7 +199,25 @@ export async function ensurePinnedNodeRuntime({ stateDir, workspace, proxy } = {
   }
 
   assertPrivateFile(manifestFile);
-  const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+  let manifest;
+  const manifestFd = fs.openSync(manifestFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    const mst = fs.fstatSync(manifestFd);
+    if (!mst.isFile() || mst.nlink !== 1 || mst.size > MAX_MANIFEST_BYTES) {
+      throw new Error('Private Node installation manifest is invalid or oversized.');
+    }
+    if (process.platform !== 'win32') {
+      if (typeof process.getuid === 'function' && mst.uid !== process.getuid()) {
+        throw new Error('Private Node installation manifest has an untrusted owner.');
+      }
+      if ((mst.mode & 0o077) !== 0) {
+        throw new Error('Private Node installation manifest permissions must be 0600.');
+      }
+    }
+    manifest = JSON.parse(fs.readFileSync(manifestFd, 'utf8'));
+  } finally {
+    fs.closeSync(manifestFd);
+  }
   if (manifest.version !== PINNED_NODE_VERSION || manifest.archiveSha256 !== distribution.sha256) {
     throw new Error('Private Node installation manifest mismatch.');
   }

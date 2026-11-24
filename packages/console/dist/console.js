@@ -1,5 +1,5 @@
 (() => {
-  // packages/console/web/shared/client.mjs
+  // web/shared/client.mjs
   function readMeta(name) {
     return document.querySelector(`meta[name="${name}"]`)?.getAttribute("content") || "";
   }
@@ -19,6 +19,20 @@
       node.append(typeof child === "string" ? document.createTextNode(child) : child);
     }
     return node;
+  }
+  function isSafeNavigationUrl(raw, { allowRelative = false } = {}) {
+    if (typeof raw !== "string") return false;
+    const trimmed = raw.trim();
+    if (!trimmed || /[\x00-\x1f\x7f]/.test(trimmed)) return false;
+    if (allowRelative && trimmed.startsWith("/") && !trimmed.startsWith("//") && !trimmed.startsWith("/\\")) {
+      return true;
+    }
+    try {
+      const parsed = new URL(trimmed);
+      return parsed.protocol === "https:" || parsed.protocol === "http:";
+    } catch {
+      return false;
+    }
   }
   function clearNode(node) {
     while (node.firstChild) node.removeChild(node.firstChild);
@@ -132,15 +146,18 @@
               const { done, value } = await reader.read();
               if (done) break;
               buffer += decoder.decode(value, { stream: true });
-              let idx;
-              while ((idx = buffer.indexOf("\n\n")) !== -1) {
-                const block = buffer.slice(0, idx);
-                buffer = buffer.slice(idx + 2);
+              let sep;
+              while ((sep = /\r?\n\r?\n/.exec(buffer)) !== null) {
+                const block = buffer.slice(0, sep.index);
+                buffer = buffer.slice(sep.index + sep[0].length);
                 let eventName = "message";
                 const dataLines = [];
-                for (const line of block.split("\n")) {
+                for (const line of block.split(/\r?\n/)) {
                   if (line.startsWith("event:")) eventName = line.slice(6).trim();
-                  else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+                  else if (line.startsWith("data:")) {
+                    const rest = line.slice(5);
+                    dataLines.push(rest.startsWith(" ") ? rest.slice(1) : rest);
+                  }
                 }
                 if (dataLines.length) {
                   try {
@@ -150,6 +167,7 @@
                 }
               }
             }
+            if (!closed) onStatus?.("disconnected");
           }
         } catch {
           if (!closed) onStatus?.("disconnected");
@@ -175,7 +193,7 @@
     };
   }
 
-  // packages/console/web/console/main.mjs
+  // web/console/main.mjs
   var client = createOriginClient({ storageKey: "loomward_console_tab_token" });
   var theme = initThemeToggle();
   var root = document.getElementById("app");
@@ -309,7 +327,7 @@
             class: `lw-pill ${state.sseStatus === "connected" ? "lw-pill-ok" : "lw-pill-warn"}`,
             text: state.sseStatus === "connected" ? "\u5B9E\u65F6\u901A\u9053\u5728\u7EBF" : "\u8FDE\u63A5\u4E2D"
           }) : null,
-          state.trustOrigin ? el("a", {
+          isSafeNavigationUrl(state.trustOrigin) ? el("a", {
             class: "lw-btn lw-btn-trust",
             href: state.trustOrigin,
             target: "_blank",
@@ -339,9 +357,10 @@
         ]),
         el("span", { class: "lw-pill lw-pill-warn", text: "\u53CC\u6E90\u9694\u79BB\u4FDD\u62A4" })
       ]),
-      state.trustOrigin ? el("a", {
+      isSafeNavigationUrl(state.trustOrigin) ? el("a", {
         class: "lw-btn lw-btn-trust",
         href: state.trustOrigin,
+        rel: "noopener noreferrer",
         text: `\u524D\u5F80 Trust Origin (${state.trustOrigin}) \u89E3\u9501`
       }) : el("p", { class: "lw-muted", text: "\u672A\u914D\u7F6E Trust Origin \u5730\u5740\u3002" })
     ]);
@@ -355,7 +374,7 @@
     return el("div", { class: "lw-stack-md" }, [
       pending > 0 ? el("div", { class: "lw-banner lw-banner-warn lw-row lw-between" }, [
         el("span", { text: `\u5F53\u524D\u6709 ${pending} \u6761\u5F85\u4EBA\u5DE5\u590D\u6838\u5BA1\u6279\u7684\u5DE5\u5177\u8BF7\u6C42\uFF0C\u8BF7\u524D\u5F80\u72EC\u7ACB Trust Origin \u590D\u6838\u53C2\u6570\u3002` }),
-        state.trustOrigin ? el("a", { class: "lw-btn lw-btn-trust", href: state.trustOrigin, target: "_blank", rel: "noopener noreferrer", text: "\u53BB Trust Origin \u5BA1\u6279" }) : null
+        isSafeNavigationUrl(state.trustOrigin) ? el("a", { class: "lw-btn lw-btn-trust", href: state.trustOrigin, target: "_blank", rel: "noopener noreferrer", text: "\u53BB Trust Origin \u5BA1\u6279" }) : null
       ]) : null,
       el("div", { class: "lw-grid" }, [
         el("div", { class: "lw-kpi" }, [
@@ -531,8 +550,9 @@
           ])
         ]));
       }
-      if (panel.links?.length) {
-        cardChildren.push(el("div", { class: "lw-row" }, panel.links.map((link) => el("a", {
+      const safeLinks = Array.isArray(panel.links) ? panel.links.filter((link) => link && isSafeNavigationUrl(link.href, { allowRelative: true })) : [];
+      if (safeLinks.length) {
+        cardChildren.push(el("div", { class: "lw-row" }, safeLinks.map((link) => el("a", {
           class: "lw-btn",
           href: link.href,
           target: "_blank",

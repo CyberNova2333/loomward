@@ -23,6 +23,21 @@ export function el(tag, attrs = {}, children = []) {
   return node;
 }
 
+export function isSafeNavigationUrl(raw, { allowRelative = false } = {}) {
+  if (typeof raw !== 'string') return false;
+  const trimmed = raw.trim();
+  if (!trimmed || /[\x00-\x1f\x7f]/.test(trimmed)) return false;
+  if (allowRelative && trimmed.startsWith('/') && !trimmed.startsWith('//') && !trimmed.startsWith('/\\')) {
+    return true;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
 export function clearNode(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
@@ -152,21 +167,25 @@ export function createOriginClient({ storageKey }) {
             const { done, value } = await reader.read();
             if (done) break;
             buffer += decoder.decode(value, { stream: true });
-            let idx;
-            while ((idx = buffer.indexOf('\n\n')) !== -1) {
-              const block = buffer.slice(0, idx);
-              buffer = buffer.slice(idx + 2);
+            let sep;
+            while ((sep = /\r?\n\r?\n/.exec(buffer)) !== null) {
+              const block = buffer.slice(0, sep.index);
+              buffer = buffer.slice(sep.index + sep[0].length);
               let eventName = 'message';
               const dataLines = [];
-              for (const line of block.split('\n')) {
+              for (const line of block.split(/\r?\n/)) {
                 if (line.startsWith('event:')) eventName = line.slice(6).trim();
-                else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+                else if (line.startsWith('data:')) {
+                  const rest = line.slice(5);
+                  dataLines.push(rest.startsWith(' ') ? rest.slice(1) : rest);
+                }
               }
               if (dataLines.length) {
                 try { onEvent?.(eventName, JSON.parse(dataLines.join('\n'))); } catch {}
               }
             }
           }
+          if (!closed) onStatus?.('disconnected');
         }
       } catch {
         if (!closed) onStatus?.('disconnected');

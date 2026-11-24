@@ -1,5 +1,5 @@
 (() => {
-  // packages/console/web/shared/client.mjs
+  // web/shared/client.mjs
   function readMeta(name) {
     return document.querySelector(`meta[name="${name}"]`)?.getAttribute("content") || "";
   }
@@ -19,6 +19,20 @@
       node.append(typeof child === "string" ? document.createTextNode(child) : child);
     }
     return node;
+  }
+  function isSafeNavigationUrl(raw, { allowRelative = false } = {}) {
+    if (typeof raw !== "string") return false;
+    const trimmed = raw.trim();
+    if (!trimmed || /[\x00-\x1f\x7f]/.test(trimmed)) return false;
+    if (allowRelative && trimmed.startsWith("/") && !trimmed.startsWith("//") && !trimmed.startsWith("/\\")) {
+      return true;
+    }
+    try {
+      const parsed = new URL(trimmed);
+      return parsed.protocol === "https:" || parsed.protocol === "http:";
+    } catch {
+      return false;
+    }
   }
   function clearNode(node) {
     while (node.firstChild) node.removeChild(node.firstChild);
@@ -145,15 +159,18 @@
               const { done, value } = await reader.read();
               if (done) break;
               buffer += decoder.decode(value, { stream: true });
-              let idx;
-              while ((idx = buffer.indexOf("\n\n")) !== -1) {
-                const block = buffer.slice(0, idx);
-                buffer = buffer.slice(idx + 2);
+              let sep;
+              while ((sep = /\r?\n\r?\n/.exec(buffer)) !== null) {
+                const block = buffer.slice(0, sep.index);
+                buffer = buffer.slice(sep.index + sep[0].length);
                 let eventName = "message";
                 const dataLines = [];
-                for (const line of block.split("\n")) {
+                for (const line of block.split(/\r?\n/)) {
                   if (line.startsWith("event:")) eventName = line.slice(6).trim();
-                  else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+                  else if (line.startsWith("data:")) {
+                    const rest = line.slice(5);
+                    dataLines.push(rest.startsWith(" ") ? rest.slice(1) : rest);
+                  }
                 }
                 if (dataLines.length) {
                   try {
@@ -163,6 +180,7 @@
                 }
               }
             }
+            if (!closed) onStatus?.("disconnected");
           }
         } catch {
           if (!closed) onStatus?.("disconnected");
@@ -188,7 +206,7 @@
     };
   }
 
-  // packages/console/web/trust/main.mjs
+  // web/trust/main.mjs
   var client = createOriginClient({ storageKey: "loomward_trust_tab_token" });
   var theme = initThemeToggle();
   var root = document.getElementById("app");
@@ -308,7 +326,7 @@
     }, 1e3);
   }
   function ensureWebAuthnLocalhostOrigin() {
-    if (window.location.hostname === "127.0.0.1") {
+    if (window.location.hostname === "127.0.0.1" || window.location.hostname === "[::1]" || window.location.hostname === "::1") {
       const target = `http://localhost:${window.location.port}${window.location.pathname}${window.location.search}`;
       window.location.replace(target);
       throw new Error(`WebAuthn PassKey \u9700\u901A\u8FC7 localhost \u57DF\u540D\u8BBF\u95EE\uFF0C\u6B63\u5728\u8DF3\u8F6C\u81F3 ${target}`);
@@ -382,13 +400,9 @@
   async function handleOpenConsole() {
     await runMutation(async () => {
       const issued = await client.api("/api/trust/issue-console-ticket", { method: "POST", body: {} });
-      if (issued.handoffUrl) {
-        const win = window.open(issued.handoffUrl, "_blank", "noopener");
-        if (win) {
-          setNotice("\u5DF2\u7B7E\u53D1\u4E00\u6B21\u6027 60 \u79D2\u53EA\u8BFB\u89C2\u6D4B\u7968\u636E\u5E76\u6253\u5F00 Console Origin\u3002");
-        } else {
-          setNotice(`\u5DF2\u7B7E\u53D1\u4E00\u6B21\u6027 60 \u79D2\u53EA\u8BFB\u89C2\u6D4B\u7968\u636E\uFF08\u82E5\u6D4F\u89C8\u5668\u62E6\u622A\u5F39\u7A97\uFF0C\u8BF7\u624B\u52A8\u8BBF\u95EE\uFF1A${issued.handoffUrl}\uFF09\u3002`);
-        }
+      if (isSafeNavigationUrl(issued.handoffUrl)) {
+        window.open(issued.handoffUrl, "_blank", "noopener,noreferrer");
+        setNotice("\u5DF2\u7B7E\u53D1\u4E00\u6B21\u6027 60 \u79D2\u53EA\u8BFB\u89C2\u6D4B\u7968\u636E\u5E76\u5C1D\u8BD5\u5728\u65B0\u6807\u7B7E\u9875\u6253\u5F00 Console Origin\uFF08\u82E5\u88AB\u6D4F\u89C8\u5668\u62E6\u622A\u5F39\u7A97\uFF0C\u8BF7\u653E\u884C\u540E\u91CD\u8BD5\uFF09\u3002");
       }
     });
   }
@@ -719,6 +733,9 @@
     ]);
   }
   function render() {
+    const prevPre = root.querySelector(".lw-modal .lw-pre");
+    const prevScrollTop = prevPre ? prevPre.scrollTop : 0;
+    const prevScrollLeft = prevPre ? prevPre.scrollLeft : 0;
     clearNode(root);
     const children = [renderTopbar()];
     const main = el("main", { class: "lw-shell" });
@@ -735,6 +752,13 @@
     const modal = renderReviewModal();
     if (modal) children.push(modal);
     root.append(...children);
+    if (modal && (prevScrollTop > 0 || prevScrollLeft > 0)) {
+      const nextPre = root.querySelector(".lw-modal .lw-pre");
+      if (nextPre) {
+        nextPre.scrollTop = prevScrollTop;
+        nextPre.scrollLeft = prevScrollLeft;
+      }
+    }
   }
   void refreshAuthState().catch((err) => setError(err?.message || "\u65E0\u6CD5\u8FDE\u63A5 Trust Origin\u3002"));
 })();

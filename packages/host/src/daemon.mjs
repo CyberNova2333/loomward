@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // This file is part of LoomWard (织盾) and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
 import fs from 'node:fs/promises';
+import { constants } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -10,12 +11,29 @@ import {
   verifyWorkspaceRpm,
 } from '@loomward/kernel';
 
+const MAX_RPM_FILE_BYTES = 2 * 1024 * 1024;
+
 async function loadOrBuildFrozenRpm(resolvedRoot, explicitRpm) {
   if (explicitRpm) return explicitRpm;
   const frozenFile = path.join(resolvedRoot, 'rpm.json');
+  let handle;
   try {
-    const raw = await fs.readFile(frozenFile, 'utf8');
-    const parsed = JSON.parse(raw);
+    handle = await fs.open(frozenFile, constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0));
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_RPM_FILE_BYTES) {
+      throw new Error('Frozen RPM manifest must be a regular single-link file within the size limit.');
+    }
+    const buf = Buffer.allocUnsafe(MAX_RPM_FILE_BYTES + 1);
+    let total = 0;
+    while (total < buf.length) {
+      const { bytesRead } = await handle.read(buf, total, buf.length - total, total);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    if (total > MAX_RPM_FILE_BYTES) {
+      throw new Error('Frozen RPM manifest exceeds the maximum allowed size.');
+    }
+    const parsed = JSON.parse(buf.subarray(0, total).toString('utf8'));
     await verifyWorkspaceRpm(resolvedRoot, parsed);
     return parsed;
   } catch (error) {
@@ -23,6 +41,8 @@ async function loadOrBuildFrozenRpm(resolvedRoot, explicitRpm) {
       return (await buildWorkspaceRpm(resolvedRoot)).rpm;
     }
     throw error;
+  } finally {
+    if (handle) await handle.close().catch(() => {});
   }
 }
 

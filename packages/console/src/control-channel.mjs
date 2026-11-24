@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { sanitizeAuditMetadata } from '@loomward/shared';
 
 const MAX_LINE_BYTES = 256 * 1024;
@@ -78,8 +79,13 @@ export function createControlChannel({ socketPath = null } = {}) {
     if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
       throw new Error('Control socket directory must be an ordinary non-linked directory.');
     }
-    if (process.platform !== 'win32' && (dirStat.mode & 0o077) !== 0) {
-      throw new Error('Control socket directory must not be group or world accessible (0700 required).');
+    if (process.platform !== 'win32') {
+      if ((dirStat.mode & 0o077) !== 0) {
+        throw new Error('Control socket directory must not be group or world accessible (0700 required).');
+      }
+      if (typeof process.getuid === 'function' && dirStat.uid !== process.getuid()) {
+        throw new Error('Control socket directory must be owned by the current user.');
+      }
     }
     const existing = fs.lstatSync(resolved, { throwIfNoEntry: false });
     if (existing) {
@@ -95,9 +101,10 @@ export function createControlChannel({ socketPath = null } = {}) {
         return;
       }
       socketClients.add(sock);
+      const decoder = new StringDecoder('utf8');
       let buf = '';
       sock.on('data', chunk => {
-        buf += chunk.toString('utf8');
+        buf += decoder.write(chunk);
         if (Buffer.byteLength(buf, 'utf8') > MAX_LINE_BYTES) {
           sock.destroy();
           return;
@@ -165,7 +172,7 @@ export function createControlChannel({ socketPath = null } = {}) {
   });
 }
 
-export function connectControlSocket(socketPath, { onEvent = () => {} } = {}) {
+export function connectControlSocket(socketPath, { onEvent = () => {}, onError = () => {} } = {}) {
   const resolved = path.resolve(socketPath);
   const st = fs.lstatSync(resolved);
   if (st.isSymbolicLink() || !st.isSocket()) {
@@ -180,9 +187,13 @@ export function connectControlSocket(socketPath, { onEvent = () => {} } = {}) {
     }
   }
   const client = net.createConnection(resolved);
+  client.on('error', err => {
+    try { onError(err); } catch {}
+  });
+  const decoder = new StringDecoder('utf8');
   let buf = '';
   client.on('data', chunk => {
-    buf += chunk.toString('utf8');
+    buf += decoder.write(chunk);
     if (Buffer.byteLength(buf, 'utf8') > MAX_LINE_BYTES) {
       client.destroy();
       return;

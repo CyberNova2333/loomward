@@ -512,3 +512,17 @@ esac
   assert.equal(afterStop.connectorAlive, false);
   assert.equal(fsSync.existsSync(path.join(stateDir, 'supervisor.sock')), false);
 });
+
+test('R6-H1/R6-H6: sha256FileSync refuses symlinks and cloudflare API helper rejects escaping paths', { skip: !posix }, async t => {
+  const base = await homeFixture(t);
+  const realFile = path.join(base, 'target.bin');
+  const linkFile = path.join(base, 'link.bin');
+  await fs.writeFile(realFile, 'integrity-target', { mode: 0o600 });
+  await fs.symlink(realFile, linkFile);
+  assert.throws(() => sha256FileSync(linkFile));
+
+  const { cloudflare } = await import('../scripts/cloudflare-api.mjs');
+  await assert.rejects(() => cloudflare('//evil.example/steal'), /single "\/"/);
+  await assert.rejects(() => cloudflare('/../../outside'), /escaped \/client\/v4\//);
+  await assert.rejects(() => cloudflare('zones'), /single "\/"/);
+});

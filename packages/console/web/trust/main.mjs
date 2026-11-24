@@ -7,6 +7,7 @@ import {
   createOriginClient,
   el,
   initThemeToggle,
+  isSafeNavigationUrl,
   readMeta,
 } from '../shared/client.mjs';
 
@@ -136,7 +137,7 @@ function startLiveStream() {
 }
 
 function ensureWebAuthnLocalhostOrigin() {
-  if (window.location.hostname === '127.0.0.1') {
+  if (window.location.hostname === '127.0.0.1' || window.location.hostname === '[::1]' || window.location.hostname === '::1') {
     const target = `http://localhost:${window.location.port}${window.location.pathname}${window.location.search}`;
     window.location.replace(target);
     throw new Error(`WebAuthn PassKey 需通过 localhost 域名访问，正在跳转至 ${target}`);
@@ -213,13 +214,11 @@ async function handlePasskeyEnroll(setupToken, label) {
 async function handleOpenConsole() {
   await runMutation(async () => {
     const issued = await client.api('/api/trust/issue-console-ticket', { method: 'POST', body: {} });
-    if (issued.handoffUrl) {
-      const win = window.open(issued.handoffUrl, '_blank', 'noopener');
-      if (win) {
-        setNotice('已签发一次性 60 秒只读观测票据并打开 Console Origin。');
-      } else {
-        setNotice(`已签发一次性 60 秒只读观测票据（若浏览器拦截弹窗，请手动访问：${issued.handoffUrl}）。`);
-      }
+    if (isSafeNavigationUrl(issued.handoffUrl)) {
+      // Per WHATWG HTML spec, window.open(..., 'noopener,noreferrer') always returns null even on success;
+      // never echo the single-use #ticket secret back into the DOM status banner.
+      window.open(issued.handoffUrl, '_blank', 'noopener,noreferrer');
+      setNotice('已签发一次性 60 秒只读观测票据并尝试在新标签页打开 Console Origin（若被浏览器拦截弹窗，请放行后重试）。');
     }
   });
 }
@@ -572,6 +571,9 @@ function renderReviewModal() {
 }
 
 function render() {
+  const prevPre = root.querySelector('.lw-modal .lw-pre');
+  const prevScrollTop = prevPre ? prevPre.scrollTop : 0;
+  const prevScrollLeft = prevPre ? prevPre.scrollLeft : 0;
   clearNode(root);
   const children = [renderTopbar()];
   const main = el('main', { class: 'lw-shell' });
@@ -589,6 +591,13 @@ function render() {
   const modal = renderReviewModal();
   if (modal) children.push(modal);
   root.append(...children);
+  if (modal && (prevScrollTop > 0 || prevScrollLeft > 0)) {
+    const nextPre = root.querySelector('.lw-modal .lw-pre');
+    if (nextPre) {
+      nextPre.scrollTop = prevScrollTop;
+      nextPre.scrollLeft = prevScrollLeft;
+    }
+  }
 }
 
 void refreshAuthState().catch(err => setError(err?.message || '无法连接 Trust Origin。'));

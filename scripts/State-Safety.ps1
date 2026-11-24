@@ -115,7 +115,7 @@ function Assert-PinnedNode($Config,[string]$StateDir) {
 }
 
 function Clear-NodeOverrides {
-  foreach($name in @('NODE_OPTIONS','NODE_PATH','NODE_TLS_REJECT_UNAUTHORIZED','NODE_EXTRA_CA_CERTS')) {
+  foreach($name in @('NODE_OPTIONS','NODE_PATH','NODE_TLS_REJECT_UNAUTHORIZED','NODE_EXTRA_CA_CERTS','NODE_USE_ENV_PROXY','ELECTRON_RUN_AS_NODE')) {
     [Environment]::SetEnvironmentVariable($name,$null,'Process')
   }
 }

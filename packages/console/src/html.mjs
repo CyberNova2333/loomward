@@ -13,9 +13,13 @@ function escapeHtmlAttr(value) {
     .replaceAll('>', '&gt;');
 }
 
+const ALLOWED_ASSETS = new Set(['trust.css', 'trust.js', 'console.css', 'console.js']);
 const assetCache = new Map();
 
 export function loadBuiltAsset(fileName) {
+  if (!ALLOWED_ASSETS.has(fileName)) {
+    throw new Error(`Unknown console asset: ${String(fileName)}`);
+  }
   if (assetCache.has(fileName)) return assetCache.get(fileName);
   const fullPath = path.join(DIST_DIR, fileName);
   const content = fs.readFileSync(fullPath, 'utf8');

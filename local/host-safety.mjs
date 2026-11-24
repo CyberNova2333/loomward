@@ -29,8 +29,10 @@ export function sanitizedToolEnv(base = process.env) {
 }
 
 export function sha256FileSync(filePath) {
-  const fd = fs.openSync(filePath, 'r');
+  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
   try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new Error('Expected a regular file for integrity hashing.');
     const hash = crypto.createHash('sha256');
     const buffer = Buffer.allocUnsafe(65536);
     while (true) {

@@ -777,3 +777,21 @@ test('control-channel refuses to overwrite an existing regular file at socketPat
   await assert.rejects(() => channel.startSocketServer(), /non-socket/i);
   assert.equal(await fs.readFile(sentinel, 'utf8'), 'do-not-delete');
 });
+
+test('R6-H2/R6-H4: built console assets enforce allowlist, safe URL filtering, and never echo handoff tickets into Trust DOM', async () => {
+  const { loadBuiltAsset } = await import('../src/html.mjs');
+  const { isSafeNavigationUrl } = await import('../web/shared/client.mjs');
+
+  assert.throws(() => loadBuiltAsset('../package.json'), /Unknown console asset/);
+  const trustJs = loadBuiltAsset('trust.js');
+  assert.equal(trustJs.includes('请手动访问：${issued.handoffUrl}'), false);
+  assert.match(trustJs, /noopener,noreferrer/);
+
+  assert.equal(isSafeNavigationUrl('https://example.test/ok'), true);
+  assert.equal(isSafeNavigationUrl('http://localhost:18797/#ticket=abc'), true);
+  assert.equal(isSafeNavigationUrl('javascript:alert(1)'), false);
+  assert.equal(isSafeNavigationUrl('data:text/html,<script>alert(1)</script>'), false);
+  assert.equal(isSafeNavigationUrl('//evil.example/path', { allowRelative: true }), false);
+  assert.equal(isSafeNavigationUrl('/\\evil.example/path', { allowRelative: true }), false);
+  assert.equal(isSafeNavigationUrl('/panels/overview', { allowRelative: true }), true);
+});

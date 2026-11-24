@@ -1,4 +1,4 @@
-/* packages/console/web/shared/theme.css */
+/* web/shared/theme.css */
 *,
 *::before,
 *::after {
@@ -428,7 +428,7 @@ body {
   margin: 0 0 6px;
 }
 
-/* packages/console/web/trust/trust.css */
+/* web/trust/trust.css */
 .lw-trust-shield {
   display: inline-flex;
   align-items: center;

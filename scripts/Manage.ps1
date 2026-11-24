@@ -43,19 +43,32 @@ function ProbePublicHealth([string]$Origin){
   $req.Method='GET'
   $req.Timeout=15000
   $req.AllowAutoRedirect=$false
+  $readBounded={
+    param($stream)
+    $reader=[IO.StreamReader]::new($stream,[Text.Encoding]::UTF8)
+    try {
+      $buf=New-Object char[] 65537
+      $total=0
+      while($total -lt $buf.Length){
+        $n=$reader.Read($buf,$total,$buf.Length-$total)
+        if($n -le 0){break}
+        $total+=$n
+      }
+      if($total -gt 65536){throw 'Health response exceeded limit.'}
+      return [string]::new($buf,0,$total)
+    } finally { $reader.Dispose() }
+  }
   try {
     $resp=$req.GetResponse()
     try {
-      $reader=[IO.StreamReader]::new($resp.GetResponseStream(),[Text.Encoding]::UTF8)
-      $text=$reader.ReadToEnd()
+      $text=& $readBounded $resp.GetResponseStream()
       return [pscustomobject]@{status=[int]$resp.StatusCode;body=($text|ConvertFrom-Json)}
     } finally { $resp.Close() }
   } catch [System.Net.WebException] {
     $resp=$_.Exception.Response
     if($resp -is [System.Net.HttpWebResponse]){
       try {
-        $reader=[IO.StreamReader]::new($resp.GetResponseStream(),[Text.Encoding]::UTF8)
-        $text=$reader.ReadToEnd()
+        $text=& $readBounded $resp.GetResponseStream()
         try { return [pscustomobject]@{status=[int]$resp.StatusCode;body=($text|ConvertFrom-Json)} }
         catch { return [pscustomobject]@{status=[int]$resp.StatusCode;error='Invalid health response.'} }
       } finally { $resp.Close() }

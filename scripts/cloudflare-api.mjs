@@ -2,8 +2,22 @@
 // This file is part of AgentDock Bridge and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
 // Use Wrangler's existing OAuth login locally. Never print its token or HTTP headers.
 import fs from 'node:fs/promises';
+import { constants } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+
+const MAX_WRANGLER_CONFIG_BYTES = 256 * 1024;
+
+async function readLocalConfigFile(file) {
+  const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > MAX_WRANGLER_CONFIG_BYTES) throw new Error('Invalid config file.');
+    return await handle.readFile('utf8');
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
 
 async function resolveCloudflareToken() {
   if (process.env.CLOUDFLARE_API_TOKEN) return process.env.CLOUDFLARE_API_TOKEN.trim();
@@ -21,7 +35,7 @@ async function resolveCloudflareToken() {
       ];
   for (const file of candidates) {
     try {
-      const text = await fs.readFile(file, 'utf8');
+      const text = await readLocalConfigFile(file);
       const token = text.match(/^oauth_token\s*=\s*"([^"]+)"/m)?.[1];
       if (token) return token;
     } catch {}
@@ -30,11 +44,22 @@ async function resolveCloudflareToken() {
 }
 
 export async function cloudflare(pathname, options = {}) {
+  if (typeof pathname !== 'string' || !pathname.startsWith('/') || pathname.startsWith('//')) {
+    throw new Error('Cloudflare API resource path must begin with a single "/".');
+  }
+  const targetUrl = new URL(`/client/v4${pathname}`, 'https://api.cloudflare.com');
+  if (targetUrl.origin !== 'https://api.cloudflare.com' || !targetUrl.pathname.startsWith('/client/v4/')) {
+    throw new Error('Cloudflare API resource path escaped /client/v4/.');
+  }
   const token = await resolveCloudflareToken();
-  const response = await fetch(`https://api.cloudflare.com/client/v4${pathname}`, {
+  const mergedHeaders = new Headers(options.headers || {});
+  if (!mergedHeaders.has('content-type')) mergedHeaders.set('content-type', 'application/json');
+  mergedHeaders.set('authorization', `Bearer ${token}`);
+  const response = await fetch(targetUrl, {
     ...options,
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...options.headers },
-    signal: AbortSignal.timeout(30000),
+    headers: mergedHeaders,
+    redirect: 'error',
+    signal: options.signal ?? AbortSignal.timeout(30000),
   });
   const data = await response.json();
   if (!response.ok || !data.success) throw new Error(`Cloudflare ${response.status}: ${JSON.stringify(data.errors)}`);

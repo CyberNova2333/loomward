@@ -642,6 +642,7 @@ async function defaultGatewayProbe(origin) {
   } catch {
     return { reachable: false, status: null, latencyMs: null };
   }
+  if (parsed.username || parsed.password) return { reachable: false, status: null, latencyMs: null };
   const mod = parsed.protocol === 'https:' ? https : parsed.protocol === 'http:' ? http : null;
   if (!mod) return { reachable: false, status: null, latencyMs: null };
   if (parsed.protocol === 'http:' && !['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)) {
@@ -649,7 +650,7 @@ async function defaultGatewayProbe(origin) {
   }
   const startedAt = Date.now();
   return new Promise(resolve => {
-    const req = mod.get(parsed, { timeout: 2500 }, res => {
+    const req = mod.get(parsed, { timeout: 2500, ...(parsed.protocol === 'https:' ? { minVersion: 'TLSv1.2' } : {}) }, res => {
       res.resume();
       resolve({
         reachable: res.statusCode >= 200 && res.statusCode < 500,
@@ -730,10 +731,29 @@ async function defaultSystemdProbe() {
   };
 }
 
+function readBoundedJsonNoFollowSync(filePath, maxBytes = 65536) {
+  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size > maxBytes) throw new Error('Invalid metadata file.');
+    const buf = Buffer.allocUnsafe(maxBytes + 1);
+    let total = 0;
+    while (total < buf.length) {
+      const n = fs.readSync(fd, buf, total, buf.length - total, total);
+      if (!n) break;
+      total += n;
+    }
+    if (total > maxBytes) throw new Error('Metadata file too large.');
+    return JSON.parse(buf.subarray(0, total).toString('utf8'));
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function readSecretBackendLabel(stateDir) {
   if (process.platform === 'win32') return 'dpapi';
   try {
-    const meta = JSON.parse(fs.readFileSync(path.join(stateDir, SECRET_META_FILE), 'utf8'));
+    const meta = readBoundedJsonNoFollowSync(path.join(stateDir, SECRET_META_FILE));
     return typeof meta?.backend === 'string' ? meta.backend : 'unknown';
   } catch {
     return 'unknown';
@@ -796,7 +816,7 @@ export async function collectStatusSnapshot({
   const connProc = isProcessAliveCrossPlatform(path.join(stateDir, 'connector-process.json'), connectorSource);
   let connectorStatus = null;
   try {
-    connectorStatus = JSON.parse(fs.readFileSync(path.join(stateDir, 'connector-status.json'), 'utf8'));
+    connectorStatus = readBoundedJsonNoFollowSync(path.join(stateDir, 'connector-status.json'));
   } catch {}
 
   const [gateway, docker, systemd] = await Promise.all([
