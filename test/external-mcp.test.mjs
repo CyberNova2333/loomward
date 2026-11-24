@@ -1444,3 +1444,72 @@ test('Round 8 external-mcp hardening: rejects empty HTTP 200 JSON-RPC bodies and
   assert.equal(initCount, 2);
   assert.equal(p2Res.content[0].text, 'init-2');
 });
+
+test('Round 9 external-mcp: synchronous session construction failure does not poison connecting cache', async t => {
+  const stateDir = await makeTempState(t);
+  const workspace = await fs.mkdtemp(path.join(os.homedir(), '.ad-mcp-r9-ws-'));
+  await fs.chmod(workspace, 0o700);
+  const scriptDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ad-mcp-r9-scripts-'));
+  const realScriptDir = await fs.realpath(scriptDir);
+  t.after(async () => {
+    await fs.rm(workspace, { recursive: true, force: true });
+    await fs.rm(scriptDir, { recursive: true, force: true });
+  });
+
+  const cwdScript = path.join(realScriptDir, 'cwd-echo-mcp.mjs');
+  await fs.writeFile(cwdScript, `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', line => {
+  if (!line.trim()) return;
+  let msg; try { msg = JSON.parse(line); } catch { return; }
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: { protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'cwd-echo', version: '1' } },
+    }) + '\\n');
+  } else if (msg.method === 'tools/list') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: { tools: [{ name: 'pwd', description: 'Return process cwd', inputSchema: { type: 'object', properties: {} } }] },
+    }) + '\\n');
+  } else if (msg.method === 'tools/call') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: { content: [{ type: 'text', text: process.cwd() }] },
+    }) + '\\n');
+  }
+});
+`, { mode: 0o700 });
+
+  const missingCwd = path.join(realScriptDir, 'delayed-cwd');
+  upsertMcpServerSync(stateDir, {
+    id: 'delayed_cwd_srv',
+    name: 'Delayed Cwd Server',
+    transport: 'stdio',
+    command: process.execPath,
+    args: [cwdScript],
+    cwd: missingCwd,
+  }, { workspaceRoots: [workspace] });
+  saveMcpProbeResultSync(stateDir, 'delayed_cwd_srv', {
+    ok: true,
+    latencyMs: 5,
+    tools: [{ name: 'pwd', description: 'Return process cwd', inputSchema: { type: 'object', properties: {} } }],
+  }, { workspaceRoots: [workspace] });
+
+  const hub = createExternalMcpHub({ stateDir, workspaceRoots: [workspace], auditFile: path.join(stateDir, 'audit.jsonl') });
+  t.after(() => hub.close());
+
+  const firstRes = await hub.callTool('mcp__delayed_cwd_srv__pwd', {});
+  assert.equal(firstRes.isError, true);
+  assert.match(firstRes.content[0].text, /Failed to connect.*transport error/);
+
+  await fs.mkdir(missingCwd, { mode: 0o700 });
+
+  const secondRes = await hub.callTool('mcp__delayed_cwd_srv__pwd', {});
+  assert.notEqual(secondRes.isError, true);
+  assert.equal(secondRes.content[0].text, missingCwd);
+});

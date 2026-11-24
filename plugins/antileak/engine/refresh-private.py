@@ -343,6 +343,9 @@ if _cnb_tok:
         if gp in seen_paths:
             continue
         seen_paths.add(gp)
+        for seg in gp.split('/'):
+            if seg:
+                owners.add(seg)
         kind, subs = cnb_pages('/user/groups/%s' % gp, _cnb_tok)
         if kind == 'error':
             fail('CNB 枚举子组织 %s 失败' % gp)

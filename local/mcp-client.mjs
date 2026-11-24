@@ -1246,12 +1246,14 @@ export function createExternalMcpHub({ stateDir, workspaceRoots, auditFile, bloc
     if (!record) {
       const controller = new AbortController();
       const waiters = new Set();
-      let selfRecord = null;
+      const selfRecord = { serverId: serverConfig.id, fingerprint: fp, controller, waiters, promise: null };
+      connecting.set(serverConfig.id, selfRecord);
       const connectPromise = (async () => {
-        const session = serverConfig.transport === 'stdio'
-          ? createStdioMcpSession(serverConfig, { stateDir: resolvedState })
-          : createHttpMcpSession(serverConfig, { blockedOrigins });
+        let session = null;
         try {
+          session = serverConfig.transport === 'stdio'
+            ? createStdioMcpSession(serverConfig, { stateDir: resolvedState })
+            : createHttpMcpSession(serverConfig, { blockedOrigins });
           const info = await initializeAndList(session, {
             timeoutMs: serverConfig.timeoutMs || 30000,
             signal: controller.signal,
@@ -1269,7 +1271,7 @@ export function createExternalMcpHub({ stateDir, workspaceRoots, auditFile, bloc
           liveToolsByServer.set(serverConfig.id, info.tools);
           return entry;
         } catch (err) {
-          await session.close().catch(() => {});
+          if (session) await session.close().catch(() => {});
           throw err;
         } finally {
           if (connecting.get(serverConfig.id) === selfRecord) {
@@ -1279,8 +1281,7 @@ export function createExternalMcpHub({ stateDir, workspaceRoots, auditFile, bloc
       })();
       // Prevent unhandledRejection when all callers aborted before connectPromise settles.
       connectPromise.catch(() => {});
-      selfRecord = { serverId: serverConfig.id, fingerprint: fp, controller, waiters, promise: connectPromise };
-      connecting.set(serverConfig.id, selfRecord);
+      selfRecord.promise = connectPromise;
       record = selfRecord;
     }
 

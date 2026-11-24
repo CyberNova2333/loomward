@@ -227,6 +227,59 @@ export async function createTrustOriginServer({
     }
   }
 
+  async function runAndPersistBoundedProbe(
+    target,
+    res,
+    { roots, blockedOrigins, maxWallMs = 30000, conflictMode = 'rethrow' } = {},
+  ) {
+    const fp = serverConfigFingerprint(target);
+    let probe;
+    try {
+      probe = await runBoundedProbe(target, res, blockedOrigins, maxWallMs);
+    } catch (err) {
+      if (Number.isInteger(err?.status)) {
+        if ((err.status === 409 || err.status === 429) && conflictMode !== 'rethrow') {
+          const fallback = conflictMode === 'record' ? 'Probe skipped.' : 'Probe unavailable.';
+          return {
+            probe: {
+              ok: false,
+              latencyMs: 0,
+              error: redactSecretsFromText(err?.message || fallback, target),
+            },
+            server: target,
+            deletedDuringProbe: false,
+            status: err.status,
+          };
+        }
+        throw err;
+      }
+      probe = {
+        ok: false,
+        latencyMs: 0,
+        error: redactSecretsFromText(err?.message || 'Probe failed.', target),
+      };
+    }
+    let updated = target;
+    let deletedDuringProbe = false;
+    try {
+      updated = saveMcpProbeResultSync(stateDir, target.id, probe, {
+        workspaceRoots: roots,
+        requirePrivateState,
+        blockedOrigins,
+        expectedFingerprint: fp,
+      });
+    } catch (err) {
+      if (err?.code === 'NOT_FOUND') deletedDuringProbe = true;
+      else throw err;
+    }
+    return {
+      probe,
+      server: updated,
+      deletedDuringProbe,
+      status: null,
+    };
+  }
+
   function sendStreamFrame(client, req, authRecord, frame) {
     if (client.writableEnded) {
       sseClients.delete(client);
@@ -972,23 +1025,12 @@ export async function createTrustOriginServer({
         let probe = null;
         let deletedDuringProbe = false;
         if (body?.probe === true) {
-          const fp = serverConfigFingerprint(saved);
-          try {
-            probe = await runBoundedProbe(saved, res, blockedOrigins, 30000);
-            try {
-              saved = saveMcpProbeResultSync(stateDir, saved.id, probe, {
-                workspaceRoots: roots,
-                requirePrivateState,
-                blockedOrigins,
-                expectedFingerprint: fp,
-              });
-            } catch (err) {
-              if (err?.code === 'NOT_FOUND') deletedDuringProbe = true;
-              else throw err;
-            }
-          } catch (err) {
-            probe = { ok: false, latencyMs: 0, error: redactSecretsFromText(err?.message || 'Probe failed.', saved) };
-          }
+          ({ probe, server: saved, deletedDuringProbe } = await runAndPersistBoundedProbe(saved, res, {
+            roots,
+            blockedOrigins,
+            maxWallMs: 30000,
+            conflictMode: 'return',
+          }));
           appendSanitizedConnectorLog(stateDir, 'mcp_server_probed', {
             serverId: saved.id,
             outcome: probe.ok ? `ok_${probe.tools?.length || 0}` : 'failed',
@@ -1003,10 +1045,11 @@ export async function createTrustOriginServer({
         if (!verifyAuthMutation(req, session)) return sendJson(res, 403, { error: 'CSRF or cross-origin validation failed.' });
         const parsed = await readAuthenticatedJson(req, res, session);
         if (!parsed) return;
+        const { body } = parsed;
         const roots = loadCurrentWorkspaceRoots();
         const blockedOrigins = getBlockedOrigins();
         let parsedList;
-        try { parsedList = parseStandardMcpJson(parsed.body?.json ?? parsed.body?.config); }
+        try { parsedList = parseStandardMcpJson(body?.json ?? body?.config); }
         catch (err) { return sendJson(res, 400, { error: err?.message || 'Invalid standard MCP JSON payload.' }); }
         let savedEntries;
         try {
@@ -1021,9 +1064,58 @@ export async function createTrustOriginServer({
         }
         const importedIds = savedEntries.map(s => s.id);
         appendSanitizedConnectorLog(stateDir, 'mcp_server_imported', { outcome: `count=${importedIds.length}` });
+        const probes = {};
+        if (body?.probe === true) {
+          const enabledTargets = savedEntries.filter(s => s.enabled);
+          const toProbe = enabledTargets.slice(0, 8);
+          for (const skipped of enabledTargets.slice(8)) {
+            probes[skipped.id] = { ok: false, toolCount: 0, error: 'Skipped automatic probe (batch limit 8); probe individually.' };
+          }
+          const deadline = Date.now() + 45000;
+          let cursor = 0;
+          const worker = async () => {
+            while (cursor < toProbe.length) {
+              if (res.closed && !res.writableEnded) break;
+              const srv = toProbe[cursor++];
+              let left = deadline - Date.now();
+              if (left < 1500) {
+                probes[srv.id] = { ok: false, toolCount: 0, error: 'Batch probe time budget exceeded; probe individually.' };
+                continue;
+              }
+              const slotDeadline = Math.min(deadline - 1500, Date.now() + 3000);
+              while (
+                activeProbes.size >= 3 &&
+                Date.now() < slotDeadline &&
+                !(res.closed && !res.writableEnded) &&
+                !shutdownController.signal.aborted
+              ) {
+                await new Promise(r => setTimeout(r, 250));
+              }
+              if (res.closed && !res.writableEnded) break;
+              left = deadline - Date.now();
+              if (left < 1500) {
+                probes[srv.id] = { ok: false, toolCount: 0, error: 'Batch probe time budget exceeded; probe individually.' };
+                continue;
+              }
+              const { probe, status } = await runAndPersistBoundedProbe(srv, res, {
+                roots,
+                blockedOrigins,
+                maxWallMs: Math.min(left, 20000),
+                conflictMode: 'record',
+              });
+              probes[srv.id] = {
+                ok: probe.ok,
+                toolCount: probe.tools?.length || 0,
+                ...(status ? { status } : {}),
+                error: probe.error || null,
+              };
+            }
+          };
+          await Promise.all(Array.from({ length: Math.min(2, toProbe.length) }, worker));
+        }
         controlChannel?.publish({ type: 'mcp.imported', count: importedIds.length });
         const snap = await refreshSnapshot({ force: true });
-        return sendJson(res, 200, { ok: true, importedIds, probes: {}, snapshot: snap });
+        return sendJson(res, 200, { ok: true, importedIds, probes, snapshot: snap });
       }
 
       if (req.method === 'POST' && reqUrl.pathname === '/api/mcp-servers/toggle') {
@@ -1059,27 +1151,12 @@ export async function createTrustOriginServer({
         if (reg.error) return sendJson(res, 400, { error: reg.error });
         const target = reg.servers.find(s => s.id === parsed.body?.id);
         if (!target) return sendJson(res, 404, { error: 'MCP server not found.' });
-        const fp = serverConfigFingerprint(target);
-        let probe;
-        try {
-          probe = await runBoundedProbe(target, res, blockedOrigins, 30000);
-        } catch (err) {
-          if (Number.isInteger(err?.status)) throw err;
-          probe = { ok: false, latencyMs: 0, error: redactSecretsFromText(err?.message || 'Probe failed.', target) };
-        }
-        let updated = target;
-        let deletedDuringProbe = false;
-        try {
-          updated = saveMcpProbeResultSync(stateDir, target.id, probe, {
-            workspaceRoots: roots,
-            requirePrivateState,
-            blockedOrigins,
-            expectedFingerprint: fp,
-          });
-        } catch (err) {
-          if (err?.code === 'NOT_FOUND') deletedDuringProbe = true;
-          else throw err;
-        }
+        const { probe, server: updated, deletedDuringProbe } = await runAndPersistBoundedProbe(target, res, {
+          roots,
+          blockedOrigins,
+          maxWallMs: 30000,
+          conflictMode: 'rethrow',
+        });
         appendSanitizedConnectorLog(stateDir, 'mcp_server_probed', {
           serverId: target.id,
           outcome: probe.ok ? `ok_${probe.tools?.length || 0}` : 'failed',

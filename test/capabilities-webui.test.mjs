@@ -18,6 +18,7 @@ import {
   filterToolsByCapabilities,
 } from '../local/capabilities.mjs';
 import { BridgeConnector } from '../local/connector.mjs';
+import { mcpServersFilePath, readMcpServersSync } from '../local/mcp-registry.mjs';
 import { digest as policyDigest } from '../local/request-policy.mjs';
 import { resolveTestSandbox } from './docker-fixture.mjs';
 import { createSandboxRuntime } from '../local/sandbox.mjs';
@@ -2223,4 +2224,279 @@ test('WebUI Round 2 regressions: H1 CSRF re-mint, H2 concurrent burst lockout, H
   const statuses = await Promise.all(burstPromises);
   assert.equal(statuses.filter(s => s === 401).length, 5, `Expected 5 failures before lockout, got ${JSON.stringify(statuses)}`);
   assert.equal(statuses.filter(s => s === 429).length, 3, `Expected 3 rate-limited responses, got ${JSON.stringify(statuses)}`);
+});
+
+test('WebUI /api/mcp-servers/save and /import redact thrown probe errors, persist failures, preserve 409 state, and propagate persistence errors', async t => {
+  const stateDir = await makeTempState(t);
+  const workspace = await fs.mkdtemp(path.join(os.homedir(), '.ad-mcp-probe-ws-'));
+  t.after(() => fs.rm(workspace, { recursive: true, force: true }));
+
+  await fs.writeFile(path.join(stateDir, 'config.json'), JSON.stringify({
+    origin: 'http://127.0.0.1:8797',
+    roots: [workspace],
+    defaultCwd: workspace,
+    allowExec: true,
+    requireLocalApproval: true,
+    sandbox: { enabled: true, allowOutbound: false, image: `sha256:${'a'.repeat(64)}`, context: 'default' },
+  }), { mode: 0o600 });
+
+  setStrongPasswordSync(stateDir, {
+    password: 'WebUiProbe!Strong#2026Aa',
+    allowBypassTicket: true,
+    workspaceRoots: [workspace],
+    passkeyDetector: () => ({ supported: false, reason: 'none' }),
+  });
+
+  let proberMode = 'ok';
+  let holdStartedResolve;
+  let holdReleaseResolve;
+  const resetHold = () => {
+    const started = new Promise(resolve => { holdStartedResolve = resolve; });
+    const release = new Promise(resolve => { holdReleaseResolve = resolve; });
+    return { started, release };
+  };
+  let hold = resetHold();
+  let multiHoldCount = 0;
+  let multiHoldAllStartedResolve;
+  let multiHoldAllStarted = new Promise(resolve => { multiHoldAllStartedResolve = resolve; });
+  let multiHoldReleaseResolve;
+  let multiHoldRelease = new Promise(resolve => { multiHoldReleaseResolve = resolve; });
+  let savedBackupForCorrupt = null;
+
+  const webui = await startWebUiServer({
+    stateDir,
+    runtimeRoot: path.resolve(import.meta.dirname, '..'),
+    host: '127.0.0.1',
+    port: 0,
+    passkeyDetector: () => ({ supported: false, reason: 'none' }),
+    gatewayProbe: async () => ({ reachable: false, status: null, latencyMs: null }),
+    dockerProbe: async () => ({ dockerOk: true, runningContainers: [] }),
+    systemdProbe: async () => ({ supported: false, installed: false, enabled: false, active: false, linger: false }),
+    serviceController: async () => {},
+    mcpProber: async srv => {
+      if (proberMode === 'hold_all_3' && srv.id.startsWith('wb_hold_')) {
+        multiHoldCount += 1;
+        if (multiHoldCount === 3) multiHoldAllStartedResolve();
+        await multiHoldRelease;
+        return { ok: true, latencyMs: 5, tools: [] };
+      }
+      if (proberMode === 'hold_on_busy' && srv.id === 'wb_busy') {
+        holdStartedResolve();
+        await hold.release;
+        return { ok: true, latencyMs: 5, tools: [{ name: 'busy_tool', inputSchema: { type: 'object', properties: {} } }] };
+      }
+      if (proberMode === 'corrupt_registry') {
+        const file = mcpServersFilePath(stateDir);
+        savedBackupForCorrupt = await fs.readFile(file, 'utf8');
+        await fs.writeFile(file, '{corrupted-before-saveProbeResult', { mode: 0o600 });
+        return { ok: true, latencyMs: 3, tools: [] };
+      }
+      if (srv.id === 'wb_save_throw' || srv.id === 'wb_imp_throw') {
+        const secret = srv.env?.API_TOKEN || srv.headers?.Authorization || 'Bearer WEBUI_FALLBACK_SECRET_99';
+        throw new Error(`External MCP connection failed with ${secret}`);
+      }
+      return {
+        ok: true,
+        latencyMs: 6,
+        tools: [{ name: `${srv.id}_tool`, inputSchema: { type: 'object', properties: {} } }],
+      };
+    },
+  });
+  t.after(() => webui.close());
+
+  const authState = await httpCall(webui.url, '/api/auth/state', { headers: { 'sec-fetch-site': 'same-origin' } });
+  let cookie = mergeCookieHeader('', authState.headers['set-cookie']);
+  let csrf = authState.json().csrfToken;
+  const loginRes = await httpCall(webui.url, '/api/auth/login/password', {
+    method: 'POST',
+    headers: { origin: webui.url, cookie, 'x-agentdock-csrf': csrf, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
+    body: JSON.stringify({ password: 'WebUiProbe!Strong#2026Aa' }),
+  });
+  assert.equal(loginRes.status, 200);
+  csrf = loginRes.json().csrfToken;
+  const tabToken = loginRes.json().tabToken;
+  cookie = mergeCookieHeader(cookie, loginRes.headers['set-cookie']);
+
+  const authedHeaders = {
+    origin: webui.url,
+    cookie,
+    'x-agentdock-csrf': csrf,
+    'x-agentdock-tab-auth': tabToken,
+    'sec-fetch-site': 'same-origin',
+    'content-type': 'application/json',
+  };
+
+  // 1. /save (probe: true) when mcpProber throws: redacts secret AND persists lastProbeOk: false on disk
+  const saveThrowRes = await httpCall(webui.url, '/api/mcp-servers/save', {
+    method: 'POST',
+    headers: authedHeaders,
+    body: JSON.stringify({
+      id: 'wb_save_throw',
+      name: 'WebUI Save Throw',
+      transport: 'stdio',
+      command: process.execPath,
+      args: ['-v'],
+      env: { API_TOKEN: 'WEBUI_SAVE_SECRET_1357' },
+      probe: true,
+    }),
+  });
+  assert.equal(saveThrowRes.status, 200);
+  assert.equal(saveThrowRes.text.includes('WEBUI_SAVE_SECRET_1357'), false);
+  assert.equal(saveThrowRes.json().probe.ok, false);
+  assert.match(saveThrowRes.json().probe.error, /\[REDACTED\]/);
+  assert.equal(saveThrowRes.json().server.lastProbeOk, false);
+  const diskSaveThrow = readMcpServersSync(stateDir, { workspaceRoots: [workspace] }).servers.find(s => s.id === 'wb_save_throw');
+  assert.equal(diskSaveThrow.lastProbeOk, false);
+  assert.match(diskSaveThrow.lastProbeError, /\[REDACTED\]/);
+  assert.equal(diskSaveThrow.lastProbeError.includes('WEBUI_SAVE_SECRET_1357'), false);
+
+  // 2. Seed wb_busy to lastProbeOk: true, then verify 409 conflict in /save and /import does NOT overwrite lastProbeOk
+  const seedBusy = await httpCall(webui.url, '/api/mcp-servers/save', {
+    method: 'POST',
+    headers: authedHeaders,
+    body: JSON.stringify({
+      id: 'wb_busy',
+      name: 'WebUI Busy',
+      transport: 'stdio',
+      command: process.execPath,
+      args: ['-v'],
+      probe: true,
+    }),
+  });
+  assert.equal(seedBusy.status, 200);
+  assert.equal(seedBusy.json().server.lastProbeOk, true);
+
+  hold = resetHold();
+  proberMode = 'hold_on_busy';
+  const inFlightProbe = httpCall(webui.url, '/api/mcp-servers/probe', {
+    method: 'POST',
+    headers: authedHeaders,
+    body: JSON.stringify({ id: 'wb_busy' }),
+  });
+  await hold.started;
+
+  // 2a. Concurrent /save preserves 200 + M4 UX while skipping saveMcpProbeResultSync
+  const saveDuringConflict = await httpCall(webui.url, '/api/mcp-servers/save', {
+    method: 'POST',
+    headers: authedHeaders,
+    body: JSON.stringify({
+      id: 'wb_busy',
+      name: 'WebUI Busy Renamed',
+      transport: 'stdio',
+      command: process.execPath,
+      args: ['-v'],
+      probe: true,
+    }),
+  });
+  assert.equal(saveDuringConflict.status, 200);
+  assert.equal(saveDuringConflict.json().ok, true);
+  assert.equal(saveDuringConflict.json().server.name, 'WebUI Busy Renamed');
+  assert.equal(saveDuringConflict.json().probe.ok, false);
+  assert.match(saveDuringConflict.json().probe.error, /already in progress/);
+  assert.equal(readMcpServersSync(stateDir, { workspaceRoots: [workspace] }).servers.find(s => s.id === 'wb_busy').lastProbeOk, true);
+
+  // 2b. Concurrent /import with wb_busy (409), wb_imp_throw (secret redaction + persist), and wb_imp_ok (success)
+  const importRes = await httpCall(webui.url, '/api/mcp-servers/import', {
+    method: 'POST',
+    headers: authedHeaders,
+    body: JSON.stringify({
+      probe: true,
+      json: JSON.stringify({
+        mcpServers: {
+          wb_busy: { name: 'WebUI Busy Renamed', command: process.execPath, args: ['-v'] },
+          wb_imp_throw: { command: process.execPath, args: ['-v'], env: { API_TOKEN: 'WEBUI_IMP_SECRET_2468' } },
+          wb_imp_ok: { command: process.execPath, args: ['-v'] },
+        },
+      }),
+    }),
+  });
+  assert.equal(importRes.status, 200);
+  assert.equal(importRes.text.includes('WEBUI_IMP_SECRET_2468'), false);
+  const importJson = importRes.json();
+  assert.equal(importJson.probes.wb_busy.ok, false);
+  assert.equal(importJson.probes.wb_busy.status, 409);
+  assert.match(importJson.probes.wb_busy.error, /already in progress/);
+  assert.equal(importJson.probes.wb_imp_throw.ok, false);
+  assert.match(importJson.probes.wb_imp_throw.error, /\[REDACTED\]/);
+  assert.equal(importJson.probes.wb_imp_ok.ok, true);
+  assert.equal(importJson.probes.wb_imp_ok.toolCount, 1);
+
+  const diskAfterImport = readMcpServersSync(stateDir, { workspaceRoots: [workspace] }).servers;
+  assert.equal(diskAfterImport.find(s => s.id === 'wb_busy').lastProbeOk, true);
+  assert.equal(diskAfterImport.find(s => s.id === 'wb_imp_throw').lastProbeOk, false);
+  assert.match(diskAfterImport.find(s => s.id === 'wb_imp_throw').lastProbeError, /\[REDACTED\]/);
+  assert.equal(diskAfterImport.find(s => s.id === 'wb_imp_ok').lastProbeOk, true);
+
+  holdReleaseResolve();
+  await inFlightProbe;
+  proberMode = 'ok';
+
+  // 2c. 429 concurrency limit (>= 3 active probes) on /save preserves 200 + M4 UX and does NOT overwrite lastProbeOk: true
+  for (const id of ['wb_hold_1', 'wb_hold_2', 'wb_hold_3']) {
+    const seeded = await httpCall(webui.url, '/api/mcp-servers/save', {
+      method: 'POST',
+      headers: authedHeaders,
+      body: JSON.stringify({ id, name: id, transport: 'stdio', command: process.execPath, args: ['-v'] }),
+    });
+    assert.equal(seeded.status, 200);
+  }
+  proberMode = 'hold_all_3';
+  const threeProbes = ['wb_hold_1', 'wb_hold_2', 'wb_hold_3'].map(id => httpCall(webui.url, '/api/mcp-servers/probe', {
+    method: 'POST',
+    headers: authedHeaders,
+    body: JSON.stringify({ id }),
+  }));
+  await multiHoldAllStarted;
+  const saveOn429 = await httpCall(webui.url, '/api/mcp-servers/save', {
+    method: 'POST',
+    headers: authedHeaders,
+    body: JSON.stringify({
+      id: 'wb_imp_ok',
+      name: 'WebUI Imp Ok 429',
+      transport: 'stdio',
+      command: process.execPath,
+      args: ['-v'],
+      probe: true,
+    }),
+  });
+  assert.equal(saveOn429.status, 200);
+  assert.equal(saveOn429.json().ok, true);
+  assert.equal(saveOn429.json().probe.ok, false);
+  assert.match(saveOn429.json().probe.error, /Too many concurrent/);
+  assert.equal(readMcpServersSync(stateDir, { workspaceRoots: [workspace] }).servers.find(s => s.id === 'wb_imp_ok').lastProbeOk, true);
+  multiHoldReleaseResolve();
+  await Promise.all(threeProbes);
+  proberMode = 'ok';
+
+  // 3. Non-NOT_FOUND persistence errors from saveMcpProbeResultSync propagate as HTTP 500 on both /save and /import
+  proberMode = 'corrupt_registry';
+  const saveWriteErr = await httpCall(webui.url, '/api/mcp-servers/save', {
+    method: 'POST',
+    headers: authedHeaders,
+    body: JSON.stringify({
+      id: 'wb_imp_ok',
+      name: 'WebUI Imp Ok',
+      transport: 'stdio',
+      command: process.execPath,
+      args: ['-v'],
+      probe: true,
+    }),
+  });
+  assert.equal(saveWriteErr.status, 500);
+  await fs.writeFile(mcpServersFilePath(stateDir), savedBackupForCorrupt, { mode: 0o600 });
+
+  const importWriteErr = await httpCall(webui.url, '/api/mcp-servers/import', {
+    method: 'POST',
+    headers: authedHeaders,
+    body: JSON.stringify({
+      probe: true,
+      json: JSON.stringify({
+        mcpServers: {
+          wb_imp_ok: { command: process.execPath, args: ['-v'] },
+        },
+      }),
+    }),
+  });
+  assert.equal(importWriteErr.status, 500);
+  await fs.writeFile(mcpServersFilePath(stateDir), savedBackupForCorrupt, { mode: 0o600 });
 });

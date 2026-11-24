@@ -872,3 +872,85 @@ test('Round 8 kernel hardening: blocks all cordis.* symbols, wraps fluent/symbol
   assert.equal(sub.status, 0, `Subprocess exited ${sub.status}: ${sub.stderr}`);
   assert.match(sub.stdout, /CLEAN_EXIT_OK/);
 });
+
+test('Round 9 kernel hardening: Symbol-keyed methods work cleanly without serviceMethods rules and stay guarded', async () => {
+  const customSym = Symbol('customSymMethod');
+  const leakSym = Symbol('leakSymMethod');
+  const fluentSym = Symbol('fluentSymMethod');
+  const sourceBytes = new TextEncoder().encode('r9-root-sym-v1');
+  const entryHash = await sha256Tagged(sourceBytes);
+  const contract = validateContractDecl({
+    schemaVersion: 1,
+    id: 'r9-root',
+    kind: 'root-plugin',
+    version: '3.0.0-alpha.0',
+    executionBoundary: 'in-process-root',
+    provides: ['demo:sym'],
+  });
+  const rpm = await createFrozenRpm({
+    target: 'runtime',
+    rootPlugins: [
+      { id: contract.id, version: contract.version, entryHash, provides: [...contract.provides] },
+    ],
+  });
+  let rootCtxRef;
+  const { control } = await createLoomWardKernel({
+    rpm,
+    roots: [{
+      id: contract.id,
+      contract,
+      bytes: async () => sourceBytes,
+      load: async () => ({
+        name: 'r9-root',
+        apply(ctx) {
+          rootCtxRef = ctx;
+          ctx.provide('demo:sym', {
+            [customSym]() {
+              return 'sym-ok';
+            },
+            [Symbol.iterator]() {
+              return ['x', 'y'].values();
+            },
+            [leakSym]() {
+              return { ctx: rootCtxRef };
+            },
+            [fluentSym]() {
+              return this;
+            },
+          });
+        },
+      }),
+    }],
+  });
+
+  let capturedSvc;
+  await control.mountExtensionUnit({
+    contract: {
+      schemaVersion: 1,
+      id: 'r9-ext-no-rules',
+      kind: 'extension-plugin',
+      version: '3.0.0-alpha.0',
+      executionBoundary: 'out-of-process',
+      consumes: ['demo:sym'],
+    },
+    trust: { autoApproveTrusted: true },
+    load: () => ({
+      name: 'r9-ext-no-rules',
+      apply(ctx) {
+        capturedSvc = ctx.get('demo:sym');
+      },
+    }),
+  });
+
+  assert.equal(capturedSvc[customSym](), 'sym-ok');
+  assert.deepEqual([...capturedSvc], ['x', 'y']);
+  const chained = capturedSvc[fluentSym]();
+  assert.equal(chained[customSym](), 'sym-ok');
+  assert.equal(chained[Symbol.for('cordis.original')], undefined);
+  assert.throws(() => capturedSvc[leakSym](), SlotError);
+
+  await control.unmountExtensionUnit('r9-ext-no-rules');
+  assert.throws(() => capturedSvc[customSym](), SlotError);
+
+  await control.stop();
+});

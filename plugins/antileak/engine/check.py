@@ -262,7 +262,7 @@ def slug_candidates(text, priv, owners=()):
     for m in re.finditer(r'(?<![A-Za-z0-9._-])([A-Za-z0-9._-]+)/(?=([A-Za-z0-9._-]+))', text):     # 正向前瞻捕获 URL/多级路径中的末尾 owner/repo
         owner_part = m.group(1)
         repo_part = m.group(2)
-        if repo_part.endswith('.git') and len(repo_part) > 4:
+        if repo_part.casefold().endswith('.git') and len(repo_part) > 4:
             repo_part = repo_part[:-4]
         if owner_part in ('.', '..') or repo_part in ('', '.', '..'):
             continue
@@ -271,6 +271,8 @@ def slug_candidates(text, priv, owners=()):
             out.add(cand)
     for m in RX_SLUG.finditer(text):
         t = m.group(1)
+        if t.casefold().endswith('.git') and len(t) > 4:
+            t = t[:-4]
         if not (6 <= len(t) <= 100) or t.casefold() in priv or t.casefold() in RESOLVE_IGNORE:
             continue
         if not any(re.search(r'[A-Za-z]{2}', part) for part in t.split('-')):
@@ -282,7 +284,14 @@ def slug_candidates(text, priv, owners=()):
 def resolve_unknown(text, d, priv):
     """缓存里没有的 xxx-xxx 裸名 -> resolve-private.py 单名查询(负缓存 24h)。
     候选超过 resolve_budget 时不逐个查，改为整体 refresh 一次(O(owners) 个请求)再按新名单比。"""
-    cands = sorted(slug_candidates(text, priv, d.get('owners', []) if isinstance(d, dict) else ()))
+    owners = []
+    if isinstance(d, dict):
+        owners.extend(str(o) for o in (d.get('owners') or []) if o)
+        for gp in (d.get('cnb_groups') or []):
+            for seg in str(gp).split('/'):
+                if seg:
+                    owners.append(seg)
+    cands = sorted(slug_candidates(text, priv, owners))
     if not cands:
         return PASS, []
     if len(cands) > RESOLVE_BUDGET:

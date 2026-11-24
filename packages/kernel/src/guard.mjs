@@ -640,22 +640,22 @@ export class KernelGuard {
     };
 
     const wrapMethodMember = (memberName, rawFn) => {
+      // Coerce Symbol property keys once so audit/error formatting never throws TypeError.
+      const memberLabel = String(memberName);
       if (!methodRules) {
         return function activeCheckedMethod(...args) {
-          guard.#assertUnitActive(state, `service.invoke:${serviceName}#${memberName}`);
-          return sanitizeServiceReturn(Reflect.apply(rawFn, rawTarget, args), memberName);
+          guard.#assertUnitActive(state, `service.invoke:${serviceName}#${memberLabel}`);
+          return sanitizeServiceReturn(Reflect.apply(rawFn, rawTarget, args), memberLabel);
         };
       }
-      const rule = typeof memberName === 'symbol'
-        ? resolveMethodRule(methodRules, String(memberName))
-        : resolveMethodRule(methodRules, memberName);
+      const rule = resolveMethodRule(methodRules, memberLabel);
       return function guardedMethod(...args) {
         return guard.#invokeGuardedMethod(
           state,
           serviceName,
-          String(memberName),
+          memberLabel,
           rule,
-          () => sanitizeServiceReturn(Reflect.apply(rawFn, rawTarget, args), String(memberName)),
+          () => sanitizeServiceReturn(Reflect.apply(rawFn, rawTarget, args), memberLabel),
         );
       };
     };

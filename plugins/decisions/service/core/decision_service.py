@@ -21,7 +21,12 @@ from core.config import Config
 from core.db import DatabaseManager, VersionConflictError
 from core.markdown_parser import TopicMarkdownParser, _read_regular_markdown_bytes
 from core.git_engine import GitEngine, GitCommitResult
-from core.recovery import RecoveryManager
+from core.recovery import (
+    RecoveryManager,
+    _read_regular_json_bytes,
+    _resolve_metadata_json_path,
+    reconstruct_rounds_from_discussion,
+)
 from core.contracts import (validate_portable_id, canonical_impl_state, decision_axes,
                             WORKFLOW_STATES, DECISION_OUTCOMES, LEGACY_PROGRESS_OUTCOMES)
 from core.locking import serialized
@@ -96,6 +101,20 @@ class DecisionService:
                 if i == max_retries - 1:
                     raise
                 time.sleep(delay)
+
+    def _atomic_write_bytes(self, target: Path, data: bytes) -> None:
+        """通过同目录临时文件 + 原子替换写入目标路径，避免经符号链接写入目标外文件"""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temp_file.write_bytes(data)
+            self._atomic_replace(temp_file, target)
+        finally:
+            if temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except OSError:
+                    pass
 
     def validate_topic_id(self, topic_id: str) -> str:
         """安全校验 topic_id，彻底防止目录遍历与非法字符"""
@@ -807,58 +826,7 @@ class DecisionService:
             except Exception:
                 discussion = []
 
-        rounds_map: Dict[int, Dict[str, Any]] = {}
-        unmatched_items: List[Dict[str, Any]] = []
-
-        for d in discussion:
-            k = d.get("key", "")
-            v = d.get("val", "")
-            m = re.search(r'第\s*(\d+)\s*轮', k)
-            if m:
-                r_num = int(m.group(1))
-                if r_num not in rounds_map:
-                    rounds_map[r_num] = {
-                        "title": f"第 {r_num} 轮定案与要求",
-                        "user_opinion": "",
-                        "agent_reply": "",
-                        "commit_message": ""
-                    }
-                if "用户" in k:
-                    rounds_map[r_num]["user_opinion"] = v
-                elif "答复" in k or "落实" in k:
-                    rounds_map[r_num]["agent_reply"] = v
-                elif "变更" in k:
-                    rounds_map[r_num]["commit_message"] = v
-                else:
-                    if rounds_map[r_num]["user_opinion"]:
-                        rounds_map[r_num]["user_opinion"] += "\n" + v
-                    else:
-                        rounds_map[r_num]["user_opinion"] = v
-            else:
-                unmatched_items.append({"title": k or "历史讨论", "content": v})
-
-        result = []
-        for r_num in sorted(rounds_map.keys()):
-            r_info = rounds_map[r_num]
-            content_parts = []
-            if r_info["commit_message"]:
-                content_parts.append(f"- **变更说明**：{r_info['commit_message']}")
-            if r_info["user_opinion"]:
-                content_parts.append(f"- **💡 用户意见（最新原话）**：\n\n{r_info['user_opinion']}\n")
-            if r_info["agent_reply"]:
-                content_parts.append(f"- **🤖 团队答复（落实说明）**：\n\n{r_info['agent_reply']}\n")
-            result.append({
-                "title": r_info["title"],
-                "content": "\n".join(content_parts).strip(),
-                "user_opinion": r_info["user_opinion"],
-                "agent_reply": r_info["agent_reply"],
-                "commit_message": r_info["commit_message"]
-            })
-
-        for item in unmatched_items:
-            result.append(item)
-
-        return result
+        return reconstruct_rounds_from_discussion(discussion)
 
     def _validate_document(self, md_text, topic_id, core_content, expected_rounds, expected_meta: Optional[Dict[str, Any]] = None):
         parsed_result = self.parser.parse_markdown_text(md_text, topic_id)
@@ -1371,15 +1339,20 @@ class DecisionService:
                 if raw_bytes is not None:
                     live_backups[p.name] = raw_bytes
 
+        meta_path = _resolve_metadata_json_path(self.config)
+        try:
+            orig_metadata_bytes = _read_regular_json_bytes(meta_path)
+        except ValueError as exc:
+            raise TopicValidationError(f"元数据文件非法或为符号链接，已取消回滚: {exc}") from exc
+
         # 备份数据库文件与当前 live 文件，以实现真正的原子性故障回滚 (U06, U07, R06, R12)
         db_path = self.config.database_path
         db_backup = db_path.with_suffix(f".bak.{uuid.uuid4().hex[:8]}")
         archive_dir = self.config.decisions_dir / ".archived_rollback"
         archived_moves = []
-        staged_files = [self.config.metadata_json_path, self.config.database_path]
+        staged_files = [meta_path, self.config.database_path]
         db_backup_ready = False
-        orig_metadata_bytes = None
-        metadata_captured = False
+        metadata_captured = True
 
         try:
             bak_conn = None
@@ -1395,9 +1368,6 @@ class DecisionService:
             finally:
                 if bak_conn is not None:
                     bak_conn.close()
-
-            orig_metadata_bytes = self.config.metadata_json_path.read_bytes() if self.config.metadata_json_path.exists() else None
-            metadata_captured = True
 
             # 1. 归档快照之外的多余文件
             if self.config.decisions_dir.exists():
@@ -1488,10 +1458,10 @@ class DecisionService:
             # 4. 还原 metadata.json (R06)
             if metadata_captured:
                 if orig_metadata_bytes is not None:
-                    self.config.metadata_json_path.write_bytes(orig_metadata_bytes)
-                elif self.config.metadata_json_path.exists():
+                    self._atomic_write_bytes(meta_path, orig_metadata_bytes)
+                elif meta_path.exists() and not meta_path.is_symlink():
                     try:
-                        self.config.metadata_json_path.unlink()
+                        meta_path.unlink()
                     except OSError:
                         pass
             raise
@@ -1529,7 +1499,7 @@ class DecisionService:
         impl_note = f"{verifier}: {test_summary}".strip() if test_summary else verifier
         new_impl_state = "verified" if mark_verified else "implemented"
         md_file = self.config.decisions_dir / f"{topic_id}.md"
-        meta_file = self.config.metadata_json_path
+        meta_file = _resolve_metadata_json_path(self.config)
 
         with self.db.get_connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1552,8 +1522,16 @@ class DecisionService:
             db_digest = self.recovery._compute_digest(row, row.get("content", ""), self._reconstruct_rounds_from_topic(row))
             if disk_digest != db_digest:
                 raise TopicValidationError("Markdown 与索引不一致，请检查并重建索引后再核验")
-            original_md = md_file.read_bytes()
-            original_meta = meta_file.read_bytes() if meta_file.exists() else None
+            try:
+                original_md = _read_regular_markdown_bytes(md_file)
+            except ValueError as exc:
+                raise TopicValidationError(f"权威 Markdown 非法或为符号链接，已拒绝核验: {exc}") from exc
+            if original_md is None:
+                raise TopicValidationError("权威 Markdown 缺失，请恢复文件后再核验")
+            try:
+                original_meta = _read_regular_json_bytes(meta_file)
+            except ValueError as exc:
+                raise TopicValidationError(f"元数据文件非法或为符号链接，已拒绝核验: {exc}") from exc
             new_version = current_ver + 1
             data = dict(row, implementation_state=new_impl_state, impl_status=new_impl_state,
                         impl_commit=impl_commit, impl_verifier=impl_note)
@@ -1593,26 +1571,35 @@ class DecisionService:
                 }
                 self.db.record_idempotency(request_id, topic_id, req_hash, response, conn=conn)
                 self.recovery.sync_metadata_json(conn=conn)
-                written_meta = meta_file.read_bytes()
+                try:
+                    written_meta = _read_regular_json_bytes(meta_file)
+                except ValueError as exc:
+                    raise TopicValidationError(f"元数据文件非法或为符号链接: {exc}") from exc
                 conn.commit()
                 return response
             except Exception:
                 # Keep the write lock while compensating; never rewind a newer row
                 # or overwrite a file subsequently changed by an external writer.
-                if written_md and md_file.exists() and md_file.read_bytes() == updated_md:
-                    temp_file.write_bytes(original_md)
-                    self._atomic_replace(temp_file, md_file)
-                if written_meta is not None and meta_file.exists() and meta_file.read_bytes() == written_meta:
+                current_md = None
+                if written_md:
+                    try:
+                        current_md = _read_regular_markdown_bytes(md_file)
+                    except (ValueError, OSError):
+                        current_md = None
+                if written_md and current_md == updated_md:
+                    self._atomic_write_bytes(md_file, original_md)
+                current_meta = None
+                if written_meta is not None:
+                    try:
+                        current_meta = _read_regular_json_bytes(meta_file)
+                    except (ValueError, OSError):
+                        current_meta = None
+                if written_meta is not None and current_meta == written_meta:
                     if original_meta is None:
-                        meta_file.unlink()
+                        if meta_file.exists() and not meta_file.is_symlink():
+                            meta_file.unlink()
                     else:
-                        meta_temp = meta_file.with_name(f".{meta_file.name}.{uuid.uuid4().hex}.tmp")
-                        try:
-                            meta_temp.write_bytes(original_meta)
-                            self._atomic_replace(meta_temp, meta_file)
-                        finally:
-                            if meta_temp.exists():
-                                meta_temp.unlink()
+                        self._atomic_write_bytes(meta_file, original_meta)
                 conn.rollback()
                 raise
             finally:

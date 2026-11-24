@@ -299,3 +299,152 @@ print('RESOLVE_PRIVATE_OK')`,
   assert.equal(resolveCheck.status, 0, resolveCheck.stderr);
   assert.match(resolveCheck.stdout, /RESOLVE_PRIVATE_OK/);
 });
+
+test('Round 9 antileak hardening: populates CNB group segments in owners for empty groups and strips .git from bare RX_SLUG candidates', async t => {
+  const { spawnSync } = await import('node:child_process');
+  const { stateDir, cachePath } = await makeTempState(t);
+  const policyPath = path.join(stateDir, 'policy.json');
+  const basePolicy = JSON.parse(await fs.readFile(path.join(REPO_ROOT, 'plugins/antileak/engine/policy.json'), 'utf8'));
+  await fs.writeFile(policyPath, JSON.stringify({ ...basePolicy, private_cache: cachePath }, null, 2), { mode: 0o600 });
+
+  const refreshPy = path.join(REPO_ROOT, 'plugins/antileak/engine/refresh-private.py');
+  const checkPy = path.join(REPO_ROOT, 'plugins/antileak/engine/check.py');
+
+  // 1. refresh-private.py records all non-empty segments of gp.split('/') in owners even for groups with 0 non-public repos.
+  const cleanEnv = { ...process.env };
+  for (const k of Object.keys(cleanEnv)) {
+    if (k === 'GH_TOKEN' || /^GH_TOKEN_\d+$/.test(k) || k.startsWith('GUARD_SEED_') || k.startsWith('LOOMWARD_ANTILEAK_')) {
+      delete cleanEnv[k];
+    }
+  }
+  const refreshRun = spawnSync('python3', [
+    '-c',
+    `import io, json, runpy, subprocess
+from types import SimpleNamespace
+from unittest import mock
+
+responses = {
+    '/user/groups?': [{'path': 'TopOrg'}, {'path': 'TeamA/SubGroupB'}],
+    '/user/groups/TopOrg?': [{'path': 'TopOrg/EmptyChild'}],
+    '/TopOrg/-/repos?': [{'name': 'public-tool', 'path': 'TopOrg/public-tool', 'visibility_level': 'Public'}],
+    '/user/groups/TeamA/SubGroupB?': [],
+    '/TeamA/SubGroupB/-/repos?': [{'name': 'secret-core', 'path': 'TeamA/SubGroupB/secret-core', 'visibility_level': 'Private'}],
+    '/user/groups/TopOrg/EmptyChild?': [],
+    '/TopOrg/EmptyChild/-/repos?': [],
+}
+
+def fake_urlopen(req, timeout=15):
+    url = req.full_url
+    for prefix, payload in responses.items():
+        if prefix in url:
+            return io.BytesIO(json.dumps(payload).encode('utf-8'))
+    raise AssertionError(f'Unexpected URL: {url}')
+
+with mock.patch('urllib.request.urlopen', side_effect=fake_urlopen), mock.patch('subprocess.run', return_value=SimpleNamespace(returncode=1, stdout='', stderr='')):
+    runpy.run_path(${JSON.stringify(refreshPy)}, run_name='__main__')
+`,
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...cleanEnv,
+      LOOMWARD_ANTILEAK_POLICY: policyPath,
+      LOOMWARD_ANTILEAK_CACHE: cachePath,
+      LOOMWARD_ANTILEAK_SEED: path.join(stateDir, 'nonexistent-seed.json'),
+      CNB_TOKEN: 'synthetic-cnb-tok',
+    },
+  });
+  assert.equal(refreshRun.status, 0, refreshRun.stderr);
+  const refreshedCache = JSON.parse(await fs.readFile(cachePath, 'utf8'));
+  assert.deepEqual(refreshedCache.cnb_groups, ['TeamA/SubGroupB', 'TopOrg', 'TopOrg/EmptyChild']);
+  for (const seg of ['TopOrg', 'EmptyChild', 'TeamA', 'SubGroupB']) {
+    assert.ok(refreshedCache.owners.includes(seg), `Expected owners to include ${seg}`);
+  }
+
+  // 2. check.py slug_candidates strips trailing .git (case-insensitive, len > 4) in RX_SLUG loop before length/cache checks.
+  const slugUnit = spawnSync('python3', [
+    '-c',
+    `import importlib.util
+spec = importlib.util.spec_from_file_location('chk', ${JSON.stringify(checkPy)})
+chk = importlib.util.module_from_spec(spec); spec.loader.exec_module(chk)
+
+cands = chk.slug_candidates(
+    'clone new-secret-repo.git and PUSH OTHER-SECRET.GIT and a-b.git and 2026-09-04.git and utf-8.git',
+    {'known-secret'},
+    (),
+)
+assert cands == {'new-secret-repo', 'OTHER-SECRET'}, cands
+
+cached_only = chk.slug_candidates('clone known-secret.git', {'known-secret'}, ())
+assert cached_only == set(), cached_only
+print('CHECK_SLUG_STRIP_OK')
+`,
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...cleanEnv,
+      LOOMWARD_ANTILEAK_POLICY: policyPath,
+      LOOMWARD_ANTILEAK_CACHE: cachePath,
+    },
+  });
+  assert.equal(slugUnit.status, 0, slugUnit.stderr);
+  assert.match(slugUnit.stdout, /CHECK_SLUG_STRIP_OK/);
+
+  // 3. check.py --net merges cnb_groups segments into owners even when owners is empty, and passes .git-stripped bare slugs to resolve-private.
+  const nowSec = Math.floor(Date.now() / 1000);
+  await fs.writeFile(cachePath, JSON.stringify({
+    status: 'fresh',
+    generated_at: nowSec,
+    expires_at: nowSec + 3600,
+    sources: ['cnb'],
+    owners: [],
+    cnb_groups: ['ParentGroup/EmptySub'],
+    private: ['ParentGroup/seed-secret', 'seed-secret'],
+    patterns: [],
+  }), { mode: 0o600 });
+
+  const mockResolvePath = path.join(stateDir, 'mock-resolve.py');
+  const seenArgsPath = path.join(stateDir, 'seen-args.json');
+  await fs.writeFile(mockResolvePath, `#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+with open(${JSON.stringify(seenArgsPath)}, 'w', encoding='utf-8') as f:
+    json.dump(args, f)
+out = {}
+for a in args:
+    if a in ('EmptySub/brand-new-secret', 'bare-secret-repo'):
+        out[a] = {'status': 'private', 'owner': 'ParentGroup/EmptySub'}
+    else:
+        out[a] = {'status': 'absent', 'owner': ''}
+print(json.dumps(out))
+`, { mode: 0o700 });
+
+  const cnbGroupNetRes = spawnSync('python3', [checkPy, 'content', '--net'], {
+    input: 'Mirror https://cnb.cool/ParentGroup/EmptySub/brand-new-secret/issues/1',
+    encoding: 'utf8',
+    env: {
+      ...cleanEnv,
+      LOOMWARD_ANTILEAK_POLICY: policyPath,
+      LOOMWARD_ANTILEAK_CACHE: cachePath,
+      LOOMWARD_ANTILEAK_RESOLVE: mockResolvePath,
+    },
+  });
+  assert.notEqual(cnbGroupNetRes.status, 0);
+  assert.match(cnbGroupNetRes.stdout, /violation/);
+  const cnbArgs = JSON.parse(await fs.readFile(seenArgsPath, 'utf8'));
+  assert.ok(cnbArgs.includes('EmptySub/brand-new-secret'), `Expected EmptySub/brand-new-secret in ${JSON.stringify(cnbArgs)}`);
+
+  const bareGitNetRes = spawnSync('python3', [checkPy, 'content', '--net'], {
+    input: 'git clone bare-secret-repo.git',
+    encoding: 'utf8',
+    env: {
+      ...cleanEnv,
+      LOOMWARD_ANTILEAK_POLICY: policyPath,
+      LOOMWARD_ANTILEAK_CACHE: cachePath,
+      LOOMWARD_ANTILEAK_RESOLVE: mockResolvePath,
+    },
+  });
+  assert.notEqual(bareGitNetRes.status, 0);
+  assert.match(bareGitNetRes.stdout, /violation/);
+  const bareArgs = JSON.parse(await fs.readFile(seenArgsPath, 'utf8'));
+  assert.deepEqual(bareArgs, ['bare-secret-repo']);
+});

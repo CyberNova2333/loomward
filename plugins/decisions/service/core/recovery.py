@@ -9,6 +9,8 @@ Agent Decisions Dashboard - Recovery & Consistency Engine
 
 import re
 import os
+import stat
+import errno
 import json
 import hashlib
 from pathlib import Path
@@ -19,6 +21,134 @@ from core.markdown_parser import TopicMarkdownParser
 from core.contracts import validate_portable_id
 from core.locking import serialized
 from collections import Counter
+
+MAX_METADATA_JSON_BYTES = 10 * 1024 * 1024
+_ROUND_KEY_RE = re.compile(r'第\s*(\d+)\s*轮|\bRound\s*(\d+)\b', re.IGNORECASE)
+
+
+def _read_regular_json_bytes(file_path: Path, max_bytes: int = MAX_METADATA_JSON_BYTES) -> Optional[bytes]:
+    """安全读取普通 JSON 文件字节：拒绝符号链接、非普通文件及超大文件。"""
+    if file_path.is_symlink():
+        raise ValueError(f"拒绝读取符号链接 JSON 文件: {file_path.name}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(str(file_path), flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == getattr(errno, "ELOOP", None):
+            raise ValueError(f"拒绝读取符号链接 JSON 文件: {file_path.name}") from exc
+        if exc.errno == getattr(errno, "EISDIR", None):
+            raise ValueError(f"仅允许读取普通 JSON 文件: {file_path.name}") from exc
+        raise
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"仅允许读取普通 JSON 文件: {file_path.name}")
+        if st.st_size > max_bytes:
+            raise ValueError(f"JSON 文件超过大小上限 ({max_bytes} 字节): {file_path.name}")
+    except Exception:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as handle:
+        raw = handle.read(max_bytes + 1)
+        if len(raw) > max_bytes:
+            raise ValueError(f"JSON 文件超过大小上限 ({max_bytes} 字节): {file_path.name}")
+        return raw
+
+
+def _resolve_metadata_json_path(config: Config) -> Path:
+    """获取保留末级符号链接特征的 metadata.json 路径，避免被 Config.resolve() 提前解引用。"""
+    if (
+        isinstance(config, Config)
+        and "metadata_json_path" not in getattr(config, "__dict__", {})
+        and isinstance(getattr(config, "_data", None), dict)
+    ):
+        raw_val = config._data.get("metadata_json_path", "decisions/metadata.json")
+        raw_path = Path(raw_val)
+        candidate = raw_path if raw_path.is_absolute() else (config.base_dir / raw_path)
+        if candidate.is_symlink():
+            return candidate
+        return candidate.parent.resolve() / candidate.name
+    return config.metadata_json_path
+
+
+def _assign_discussion_field(target: Dict[str, Any], key: str, val: str) -> None:
+    stripped = key.strip()
+    if stripped.endswith("用户意见"):
+        target["user_opinion"] = val
+    elif stripped.endswith(("落实答复", "团队答复")):
+        target["agent_reply"] = val
+    elif stripped.endswith("变更说明"):
+        target["commit_message"] = val
+    elif "用户" in stripped:
+        target["user_opinion"] = val
+    elif "答复" in stripped or "落实" in stripped:
+        target["agent_reply"] = val
+    elif "变更" in stripped:
+        target["commit_message"] = val
+    else:
+        if target["user_opinion"]:
+            target["user_opinion"] += "\n" + val
+        else:
+            target["user_opinion"] = val
+
+
+def reconstruct_rounds_from_discussion(discussion: Any) -> List[Dict[str, Any]]:
+    """从讨论记录列表无损重构轮次，兼容中英文轮次标题并隔离未匹配项。"""
+    if not isinstance(discussion, list) or not discussion:
+        return []
+
+    rounds_map: Dict[int, Dict[str, Any]] = {}
+    unmatched_items: List[Dict[str, Any]] = []
+
+    for d in discussion:
+        if not isinstance(d, dict):
+            continue
+        k = str(d.get("key") or "")
+        v = str(d.get("val") or "")
+        m = _ROUND_KEY_RE.search(k)
+        if m:
+            r_num = int(m.group(1) or m.group(2))
+            if r_num not in rounds_map:
+                rounds_map[r_num] = {
+                    "title": f"第 {r_num} 轮定案与要求",
+                    "user_opinion": "",
+                    "agent_reply": "",
+                    "commit_message": "",
+                }
+            _assign_discussion_field(rounds_map[r_num], k, v)
+        else:
+            item = {
+                "title": k or "历史讨论",
+                "content": v,
+                "user_opinion": "",
+                "agent_reply": "",
+                "commit_message": "",
+            }
+            _assign_discussion_field(item, k, v)
+            unmatched_items.append(item)
+
+    result: List[Dict[str, Any]] = []
+    for r_num in sorted(rounds_map.keys()):
+        r_info = rounds_map[r_num]
+        content_parts = []
+        if r_info["commit_message"]:
+            content_parts.append(f"- **变更说明**：{r_info['commit_message']}")
+        if r_info["user_opinion"]:
+            content_parts.append(f"- **💡 用户意见（最新原话）**：\n\n{r_info['user_opinion']}\n")
+        if r_info["agent_reply"]:
+            content_parts.append(f"- **🤖 团队答复（落实说明）**：\n\n{r_info['agent_reply']}\n")
+        result.append({
+            "title": r_info["title"],
+            "content": "\n".join(content_parts).strip(),
+            "user_opinion": r_info["user_opinion"],
+            "agent_reply": r_info["agent_reply"],
+            "commit_message": r_info["commit_message"],
+        })
+
+    result.extend(unmatched_items)
+    return result
 
 
 class RecoveryManager:
@@ -122,24 +252,7 @@ class RecoveryManager:
                         except Exception:
                             db_discussion = []
 
-                    db_rounds_reconstructed = []
-                    if db_discussion:
-                        rounds_map: Dict[int, Dict[str, Any]] = {}
-                        for d in db_discussion:
-                            k = d.get("key", "")
-                            v = d.get("val", "")
-                            m = re.search(r'第\s*(\d+)\s*轮', k)
-                            if m:
-                                r_num = int(m.group(1))
-                                if r_num not in rounds_map:
-                                    rounds_map[r_num] = {"title": f"第 {r_num} 轮", "user_opinion": "", "agent_reply": "", "commit_message": ""}
-                                if "用户" in k: rounds_map[r_num]["user_opinion"] = v
-                                elif "答复" in k or "落实" in k: rounds_map[r_num]["agent_reply"] = v
-                                elif "变更" in k: rounds_map[r_num]["commit_message"] = v
-                            else:
-                                rounds_map[len(rounds_map) + 1] = {"title": k, "user_opinion": v, "agent_reply": "", "commit_message": ""}
-                        for r_num in sorted(rounds_map.keys()):
-                            db_rounds_reconstructed.append(rounds_map[r_num])
+                    db_rounds_reconstructed = reconstruct_rounds_from_discussion(db_discussion)
 
                     disk_digest = self._compute_digest(parsed, parsed.get("core_content", ""), parsed.get("rounds", []))
                     
@@ -183,15 +296,33 @@ class RecoveryManager:
         # 3. 检查 metadata.json 同步状态与字段一致性 (R04, F10)
         meta_synced = True
         meta_count = 0
-        if self.config.metadata_json_path.exists():
+        meta_error: Optional[str] = None
+        raw_meta: Optional[bytes] = None
+        meta_path = _resolve_metadata_json_path(self.config)
+        try:
+            raw_meta = _read_regular_json_bytes(meta_path)
+        except Exception as exc:
+            meta_synced = False
+            meta_error = str(exc)
+
+        if meta_error is not None:
+            meta_synced = False
+        elif raw_meta is not None:
             try:
-                meta_data = json.loads(self.config.metadata_json_path.read_text(encoding="utf-8"))
+                meta_data = json.loads(raw_meta.decode("utf-8"))
+                if not isinstance(meta_data, dict):
+                    raise ValueError("metadata.json 根节点必须为对象")
                 meta_topics = meta_data.get("topics", [])
+                if not isinstance(meta_topics, list):
+                    raise ValueError("metadata.json topics 必须为数组")
                 meta_count = len(meta_topics)
                 if meta_count != len(db_topics):
                     meta_synced = False
                 else:
                     for mt in meta_topics:
+                        if not isinstance(mt, dict):
+                            meta_synced = False
+                            break
                         mid = mt.get("id")
                         if mid not in db_topics:
                             meta_synced = False
@@ -218,8 +349,9 @@ class RecoveryManager:
                                 break
                         if not meta_synced:
                             break
-            except Exception:
+            except Exception as exc:
                 meta_synced = False
+                meta_error = str(exc)
         else:
             meta_synced = (len(db_topics) == 0)
 
@@ -230,7 +362,7 @@ class RecoveryManager:
             meta_synced
         )
 
-        return {
+        report: Dict[str, Any] = {
             "consistent": is_consistent,
             "total_disk_markdown": len(disk_files),
             "total_db_topics": len(db_topics),
@@ -240,6 +372,9 @@ class RecoveryManager:
             "missing_markdown": missing_markdown,
             "desynced_topics": desynced_topics
         }
+        if meta_error is not None:
+            report["metadata_json_error"] = meta_error
+        return report
 
     @serialized
     def rebuild_index_from_markdown(self) -> Dict[str, Any]:
@@ -419,7 +554,8 @@ class RecoveryManager:
                 "updated_at": r["updated_at"]
             })
 
-        self.config.metadata_json_path.parent.mkdir(parents=True, exist_ok=True)
+        target = _resolve_metadata_json_path(self.config)
+        target.parent.mkdir(parents=True, exist_ok=True)
         import datetime
         import uuid
         meta_content = json.dumps({
@@ -427,7 +563,6 @@ class RecoveryManager:
             "total_topics": len(meta_list),
             "topics": meta_list
         }, ensure_ascii=False, indent=2)
-        target = self.config.metadata_json_path
         temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
         try:
             temp.write_text(meta_content, encoding="utf-8")

@@ -426,3 +426,196 @@ print('DECISIONS_PY_R8_OK')
   await mgr.close();
   assert.equal(mgr.getBaseUrl(), null);
 });
+
+test('Round 9 decisions hardening: reconstructs Round N/unmatched safely and rejects symlink/irregular metadata.json', async t => {
+  const { execFileSync } = await import('node:child_process');
+  const { stateDir, configPath } = await makeTempFixture(t);
+  const ledgerRoot = path.dirname(configPath);
+  const decisionsDir = path.join(ledgerRoot, 'decisions');
+  const metaPath = path.join(decisionsDir, 'metadata.json');
+
+  const mdRoundEn = [
+    '---',
+    'schema_version: "2.0"',
+    'id: "adr-r9-rounds"',
+    'title: "English Round Heading Test"',
+    'version: 1',
+    'section: "Architecture"',
+    'object: "Kernel"',
+    'function: "Governance"',
+    'priority: "高"',
+    'workflow_state: "decided"',
+    'decision_status: "已同意"',
+    'sources: ""',
+    'decision_outcome: "accepted"',
+    'rejection_reason: ""',
+    'superseded_by: ""',
+    'implementation_state: "in_progress"',
+    'impl_commit: ""',
+    'impl_verifier: ""',
+    '---',
+    '',
+    '# English Round Heading Test',
+    '',
+    '## 核心论述与现实依据',
+    '',
+    'Keep round headings consistent.',
+    '',
+    '## 历史讨论与决策记录',
+    '',
+    '### Round 1: Initial Architecture',
+    '- **Change summary**：Init',
+    '- **User opinion**：Use microkernel',
+    '- **Team reply**：Adopted',
+    '',
+    '### round 2 - Follow-up decisions',
+    '- **User opinion**：Keep isolated',
+    '- **Team reply**：Verified',
+    '',
+  ].join('\n');
+  await fs.writeFile(path.join(decisionsDir, 'adr-r9-rounds.md'), mdRoundEn, { mode: 0o600 });
+
+  const pySuite = `
+import json, os, sys
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, ${JSON.stringify(path.join(REPO_ROOT, 'plugins/decisions/service'))})
+from core.config import load_config
+from core.decision_service import DecisionService, TopicValidationError
+from core.recovery import RecoveryManager, _read_regular_json_bytes, reconstruct_rounds_from_discussion
+
+cfg = load_config(Path(${JSON.stringify(configPath)}))
+svc = DecisionService(cfg)
+rec = RecoveryManager(cfg, svc.db)
+
+# 1. Round N markdown rebuild + check_consistency + record_verification + restore_single_topic
+rebuilt = rec.rebuild_index_from_markdown()
+assert rebuilt['status'] == 'success', rebuilt
+report = rec.check_consistency()
+assert report['consistent'] is True, report
+assert report['desynced_topics'] == [], report
+
+verified = svc.record_verification('adr-r9-rounds', 'deadbeef', 'Tester', 'round-n ok', expected_version=1)
+assert verified['status'] == 'success', verified
+assert rec.check_consistency()['consistent'] is True
+
+# 2. Shared reconstruct_rounds_from_discussion prevents unmatched entries from colliding with integer rounds
+mixed = [
+    {'key': '第 2 轮用户意见', 'val': 'u2'},
+    {'key': '前置备注', 'val': 'preamble'},
+    {'key': '团队答复补充', 'val': 'extra-reply'},
+    {'key': '第 1 轮用户意见', 'val': 'u1'},
+    {'key': 'Round 3 用户意见', 'val': 'u3'},
+    {'key': 'Round 3 落实答复', 'val': 'a3'},
+]
+reconstructed = reconstruct_rounds_from_discussion(mixed)
+assert len(reconstructed) == 5, reconstructed
+assert reconstructed[0]['user_opinion'] == 'u1'
+assert reconstructed[1]['user_opinion'] == 'u2'
+assert reconstructed[2]['user_opinion'] == 'u3' and reconstructed[2]['agent_reply'] == 'a3'
+assert reconstructed[3]['title'] == '前置备注' and reconstructed[3]['user_opinion'] == 'preamble'
+assert reconstructed[3]['agent_reply'] == '' and reconstructed[3]['commit_message'] == ''
+assert reconstructed[4]['title'] == '团队答复补充' and reconstructed[4]['agent_reply'] == 'extra-reply'
+assert svc._reconstruct_rounds_from_topic({'discussion': mixed}) == reconstructed
+
+# 3. _read_regular_json_bytes enforces size cap and rejects irregular files / symlinks
+base_dir = Path(${JSON.stringify(stateDir)})
+small_json = base_dir / 'small.json'
+small_json.write_bytes(b'{"ok":true}')
+assert _read_regular_json_bytes(small_json, max_bytes=32) == b'{"ok":true}'
+try:
+    _read_regular_json_bytes(small_json, max_bytes=4)
+    raise AssertionError('Expected size cap ValueError')
+except ValueError:
+    pass
+try:
+    _read_regular_json_bytes(base_dir)
+    raise AssertionError('Expected directory ValueError')
+except ValueError:
+    pass
+
+meta_path = Path(${JSON.stringify(metaPath)})
+if os.name == 'posix':
+    fifo_path = base_dir / 'meta.fifo'
+    os.mkfifo(fifo_path)
+    try:
+        try:
+            _read_regular_json_bytes(fifo_path)
+            raise AssertionError('Expected FIFO ValueError')
+        except ValueError:
+            pass
+    finally:
+        fifo_path.unlink(missing_ok=True)
+
+    # 3a. Valid symlink metadata.json -> check_consistency desyncs, record_verification & rollback_full raise TopicValidationError
+    real_meta_bytes = meta_path.read_bytes()
+    outside_meta = base_dir / 'outside-meta.json'
+    outside_meta.write_bytes(real_meta_bytes)
+    meta_path.unlink()
+    os.symlink(outside_meta, meta_path)
+
+    sym_report = rec.check_consistency()
+    assert sym_report['consistent'] is False, sym_report
+    assert sym_report['metadata_json_synced'] is False, sym_report
+    assert 'metadata_json_error' in sym_report, sym_report
+
+    try:
+        svc.record_verification('adr-r9-rounds', 'cafebabe', 'Tester', expected_version=2)
+        raise AssertionError('Expected TopicValidationError on symlink metadata.json in record_verification')
+    except TopicValidationError:
+        pass
+
+    rev_id = svc.db.get_revisions(limit=1)[0]['rev_id']
+    try:
+        svc.rollback_full(rev_id, author='Tester', expected_revision=rev_id)
+        raise AssertionError('Expected TopicValidationError on symlink metadata.json in rollback_full')
+    except TopicValidationError:
+        pass
+
+    # 3b. Dangling symlink metadata.json even when DB has 0 topics -> check_consistency fails closed
+    meta_path.unlink()
+    os.symlink(base_dir / 'does-not-exist.json', meta_path)
+    with svc.db.get_connection() as conn:
+        conn.execute('DELETE FROM topics')
+        conn.commit()
+    dangling_report = rec.check_consistency()
+    assert dangling_report['consistent'] is False, dangling_report
+    assert dangling_report['metadata_json_synced'] is False, dangling_report
+    meta_path.unlink()
+    rec.rebuild_index_from_markdown()
+
+    # 3c. Oversized metadata.json (> 10 MiB) -> check_consistency treats as metadata_json_synced=False
+    saved_meta = meta_path.read_bytes()
+    with open(meta_path, 'wb') as f:
+        f.truncate(10 * 1024 * 1024 + 128)
+    big_report = rec.check_consistency()
+    assert big_report['consistent'] is False, big_report
+    assert big_report['metadata_json_synced'] is False, big_report
+    assert 'metadata_json_error' in big_report, big_report
+    meta_path.write_bytes(saved_meta)
+
+    # 3d. rollback_full except cleanup restores metadata.json atomically via temp file + os.replace (never through symlink)
+    canary = base_dir / 'canary.json'
+    canary.write_bytes(b'CANARY_UNTOUCHED')
+    rev_id = svc.db.get_revisions(limit=1)[0]['rev_id']
+    def swap_to_symlink_and_fail(*args, **kwargs):
+        if meta_path.exists() or meta_path.is_symlink():
+            meta_path.unlink()
+        os.symlink(canary, meta_path)
+        raise RuntimeError('simulated sync failure')
+    with mock.patch.object(svc.recovery, 'sync_metadata_json', side_effect=swap_to_symlink_and_fail):
+        try:
+            svc.rollback_full(rev_id, author='Tester', expected_revision=rev_id)
+            raise AssertionError('Expected RuntimeError')
+        except RuntimeError:
+            pass
+    assert canary.read_bytes() == b'CANARY_UNTOUCHED'
+    assert not meta_path.is_symlink()
+    assert meta_path.read_bytes() == saved_meta
+
+print('DECISIONS_PY_R9_OK')
+`;
+  const pyOut = execFileSync('python3', ['-c', pySuite], { encoding: 'utf8' });
+  assert.match(pyOut, /DECISIONS_PY_R9_OK/);
+});
