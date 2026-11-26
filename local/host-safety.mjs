@@ -102,7 +102,29 @@ export function assertWriteProtectedPath(targetPath) {
   return path.resolve(targetPath);
 }
 
+function assertWindowsPrivatePath(target, directory) {
+  if (!path.isAbsolute(target)) throw new Error('A local absolute path is required.');
+  const resolved = path.resolve(target);
+  const stat = fs.lstatSync(resolved);
+  if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1)) {
+    throw new Error('Private state requires an ordinary directory or single-link file.');
+  }
+  const systemRoot = process.env.SystemRoot;
+  if (!systemRoot || !/^[A-Za-z]:\\/.test(systemRoot)) throw new Error('Cannot locate the Windows system shell.');
+  const system32 = path.join(systemRoot, 'System32');
+  const shellHome = path.join(system32, 'WindowsPowerShell', 'v1.0');
+  try {
+    execFileSync(path.join(shellHome, 'powershell.exe'), [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned',
+      '-File', path.resolve(import.meta.dirname, '../scripts/Test-PrivatePath.ps1'), '-LiteralPath', resolved,
+    ], { cwd: shellHome, env: { SystemRoot: systemRoot, WINDIR: systemRoot, PATH: system32,
+      PSModulePath: path.join(shellHome, 'Modules') }, stdio: 'ignore', windowsHide: true, timeout: 15000 });
+  } catch { throw new Error('Windows private state ACL verification failed.'); }
+  return resolved;
+}
+
 export function assertPrivateState(stateDir) {
+  if (process.platform === 'win32') return assertWindowsPrivatePath(stateDir, true);
   const uid = currentPosixUid();
   const resolved = assertPlainLocalPath(stateDir);
   const stat = fs.lstatSync(resolved);
@@ -115,6 +137,7 @@ export function assertPrivateState(stateDir) {
 }
 
 export function assertPrivateFile(filePath) {
+  if (process.platform === 'win32') return assertWindowsPrivatePath(filePath, false);
   const uid = currentPosixUid();
   const resolved = assertPlainLocalPath(filePath);
   const stat = fs.lstatSync(resolved);

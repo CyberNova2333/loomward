@@ -23,9 +23,8 @@ function Assert-PlainLocalPath([string]$LiteralPath) {
   return $resolved
 }
 
-function Assert-PrivateState([string]$StateDir) {
-  $resolved=Assert-PlainLocalPath $StateDir
-  if(-not (Get-Item -LiteralPath $resolved -Force).PSIsContainer){throw 'Private state must be a directory.'}
+function Assert-PrivateAccess([string]$LiteralPath) {
+  $resolved=Assert-PlainLocalPath $LiteralPath
   # Restrict the entire control path, not just the final directory ACL. A
   # writable ancestor can allow replacement of an otherwise private runtime.
   Assert-WriteProtectedPath $resolved
@@ -34,6 +33,12 @@ function Assert-PrivateState([string]$StateDir) {
     $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin @($sid,'S-1-5-18')
   })
   if($unexpected.Count){throw 'Private state allows another principal. Installation or rotation stopped.'}
+  return $resolved
+}
+
+function Assert-PrivateState([string]$StateDir) {
+  $resolved=Assert-PrivateAccess $StateDir
+  if(-not (Get-Item -LiteralPath $resolved -Force).PSIsContainer){throw 'Private state must be a directory.'}
   return $resolved
 }
 
