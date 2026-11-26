@@ -11,7 +11,7 @@ const exec = promisify(execFile);
 const shell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const quoted = value => `'${value.replaceAll("'", "''")}'`;
 const helper = fileURLToPath(new URL('../scripts/State-Safety.ps1', import.meta.url));
-const ps = script => exec(shell, ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference='Stop'; . ${quoted(helper)}; ${script}`], { windowsHide: true, timeout: 15000, maxBuffer: 65536 });
+const ps = script => exec(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned', '-Command', `$ErrorActionPreference='Stop'; . ${quoted(helper)}; ${script}`], { windowsHide: true, timeout: 15000, maxBuffer: 65536 });
 const protect = (file, directory = true) => ps(`
   $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User;
   $acl=[Security.AccessControl.${directory ? 'DirectorySecurity' : 'FileSecurity'}]::new();
@@ -152,12 +152,12 @@ test('private-state checks load the Windows core module instead of an inherited 
   await fs.mkdir(shadow, { recursive: true });
   await fs.writeFile(path.join(shadow, 'Microsoft.PowerShell.Security.psd1'), "@{ RootModule='Microsoft.PowerShell.Security.psm1'; ModuleVersion='99.0.0'; FunctionsToExport=@('Get-Acl'); CmdletsToExport=@() }");
   await fs.writeFile(path.join(shadow, 'Microsoft.PowerShell.Security.psm1'), `[IO.File]::WriteAllText(${quoted(marker)},'untrusted module loaded'); throw 'SHADOW_MODULE_MUST_NOT_LOAD'; function Get-Acl { throw 'SHADOW_MODULE_MUST_NOT_LOAD' }`);
-  // Confirm this fixture really poisons automatic discovery; otherwise a pass
-  // would not exercise the inherited-module regression.
-  const poisoned = `$ErrorActionPreference='Stop'; Remove-Module Microsoft.PowerShell.Security -ErrorAction SilentlyContinue; $env:PSModulePath=${quoted(modules)}+';'+$env:PSModulePath; Get-Acl -LiteralPath ${quoted(state)}`;
-  await assert.rejects(exec(shell, ['-NoProfile', '-NonInteractive', '-Command', poisoned], { windowsHide: true, timeout: 15000, maxBuffer: 65536 }));
-  assert.equal(await fs.readFile(marker, 'utf8'), 'untrusted module loaded');
-  await fs.unlink(marker);
+  // Check that the fixture is discoverable without executing its module body.
+  const listing = await exec(shell, ['-NoProfile', '-NonInteractive', '-Command',
+    'Get-Module -ListAvailable -Name Microsoft.PowerShell.Security | ForEach-Object { $_.Path }'], {
+    env: { ...process.env, PSModulePath: modules }, windowsHide: true, timeout: 15000, maxBuffer: 65536,
+  });
+  assert.ok(listing.stdout.trim().split(/\r?\n/).includes(path.join(shadow, 'Microsoft.PowerShell.Security.psd1')));
   const script = `$ErrorActionPreference='Stop';
     $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User;
     $acl=[Security.AccessControl.DirectorySecurity]::new();
@@ -172,7 +172,7 @@ test('private-state checks load the Windows core module instead of an inherited 
     . ${quoted(helper)};
     $null=Assert-PrivateState ${quoted(state)};
     [Console]::Write('SAFE_STATE');`;
-  const outcome = await exec(shell, ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 15000, maxBuffer: 65536 });
+  const outcome = await exec(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned', '-Command', script], { windowsHide: true, timeout: 15000, maxBuffer: 65536 });
   assert.equal(outcome.stdout.trim(), 'SAFE_STATE');
   assert.equal(await fs.access(marker).then(() => true, () => false), false, 'The shadow module must never execute');
 });

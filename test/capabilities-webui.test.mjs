@@ -905,7 +905,9 @@ test('Docker sandbox dynamically hides disabled tools and mounts /workspace read
   skip: process.env.AGENTDOCK_DOCKER_TEST !== '1',
 }, async t => {
   const sandbox = await resolveTestSandbox();
-  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'agentdock-cap-docker-'));
+  // macOS may return /var/folders through the /var symlink.
+  const tempRoot = await fs.realpath(os.tmpdir());
+  const base = await fs.mkdtemp(path.join(tempRoot, 'agentdock-cap-docker-'));
   const workspace = path.join(base, 'workspace');
   const state = path.join(base, 'state');
   await fs.mkdir(workspace, { mode: 0o755 });

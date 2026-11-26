@@ -64,14 +64,14 @@ test('refresh rotation rejects a spent token and revokes the entire token family
 test('simultaneous refresh and revocation cannot resurrect authorization', {timeout:30000}, async t => {
   const f = await fixture(t);
   const [refresh, revoked] = await Promise.all([
-    f.refresh(f.tokens.refresh_token),
+    f.refresh(f.tokens.refresh_token).then(async response => ({ status: response.status, tokens: await response.json() })),
     f.form({token:f.tokens.refresh_token,token_type_hint:'refresh_token',client_id:f.client.client_id}),
   ]);
   assert.equal(revoked.status, 200);
   assert.ok([200,400].includes(refresh.status));
   assert.equal((await f.access(f.tokens.access_token)).status, 401);
   if (refresh.status === 200) {
-    const rotated = await refresh.json();
+    const rotated = refresh.tokens;
     assert.equal((await f.access(rotated.access_token)).status, 401);
     assert.equal((await f.refresh(rotated.refresh_token)).status, 400);
   }

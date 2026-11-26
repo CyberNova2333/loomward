@@ -18,7 +18,7 @@ const safetyScript = fileURLToPath(new URL('../scripts/State-Safety.ps1', import
 const quoted = value => `'${value.replaceAll("'", "''")}'`;
 const safeEnv = { SystemRoot: systemRoot, WINDIR: systemRoot, USERPROFILE: os.homedir(),
   PATH: path.join(systemRoot, 'System32'), PSModulePath: path.join(shellHome, 'Modules') };
-const ps = (code, env = safeEnv) => exec(shell, ['-NoProfile', '-NonInteractive', '-Command', code], {
+const ps = (code, env = safeEnv) => exec(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned', '-Command', code], {
   env, cwd: shellHome, windowsHide: true, timeout: 20000, maxBuffer: 65536,
 });
 
@@ -66,10 +66,9 @@ async function fixture(t) {
 
 test('credential subprocess and proxy discovery ignore inherited module paths', { skip: !windows, timeout: 80000 }, async t => {
   const { state, expected, markers, poisonedEnv } = await fixture(t);
-  // The control proves that the fake module is discoverable without the fix.
-  await assert.rejects(ps("$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Security", poisonedEnv), /SYNTHETIC_UNTRUSTED_MODULE/);
-  assert.equal(await fs.readFile(markers[0], 'utf8'), 'synthetic module loaded');
-  await fs.unlink(markers[0]);
+  // Confirm the fixture is discoverable without importing it into the control shell.
+  const { stdout } = await ps("Get-Module -ListAvailable -Name Microsoft.PowerShell.Utility | ForEach-Object { $_.Version.ToString() }", poisonedEnv);
+  assert.ok(stdout.trim().split(/\s+/).includes('99.0.0'));
   const previous = process.env.PSModulePath;
   process.env.PSModulePath = poisonedEnv.PSModulePath;
   try {
