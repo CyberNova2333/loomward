@@ -344,7 +344,7 @@ test('ModelBridge adapter enforces 12s timeout cap, sanitizes secrets, and degra
   assert.match(timedOut.error, /timed out/i);
 });
 
-test('adapters plugin integrates with LoomWard daemon approval pipeline, dual-origin console panels, and vault isolation', async t => {
+test('adapters plugin integrates with LoomWard daemon approval pipeline, unified console panels, and vault isolation', async t => {
   const stateDir = makeTempPrivateDir('.lw-adapters-state-');
   const workspaceDir = makeTempPrivateDir('.lw-adapters-ws-');
   t.after(() => {

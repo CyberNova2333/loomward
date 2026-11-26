@@ -10,7 +10,7 @@ export const ROOT_ONLY_SERVICES = Object.freeze([
   'host:platform',
   'host:vault',
   'host:approval-ledger',
-  'console:trust-origin',
+  'host:plugin-secrets-admin',
   'console:loopback',
 ]);
 

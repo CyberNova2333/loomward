@@ -89,7 +89,6 @@ export function validateConsolePanelDecl(decl) {
   const rawOrder = decl.order;
   const rawSubtitle = decl.subtitle;
   const rawBoundary = decl.executionBoundary;
-  const rawTrustReq = decl.trustOriginRequiredForMutations;
 
   if (schemaVersion !== undefined && schemaVersion !== CONSOLE_PANEL_SCHEMA_VERSION) {
     throw new Error(`Unsupported console panel schemaVersion: ${String(schemaVersion)}`);
@@ -116,7 +115,6 @@ export function validateConsolePanelDecl(decl) {
     order,
     executionBoundary: rawBoundary === 'in-process-root' ? 'in-process-root' : 'out-of-process',
     readOnly: true,
-    trustOriginRequiredForMutations: rawTrustReq !== false,
     ...(typeof getSnapshot === 'function' ? { getSnapshot } : {}),
   });
 }

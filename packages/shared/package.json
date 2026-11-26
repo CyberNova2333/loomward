@@ -13,10 +13,13 @@
     "./slots": "./src/slots.mjs",
     "./guard-types": "./src/guard-types.mjs",
     "./panel-schema": "./src/panel-schema.mjs",
-    "./content-guard": "./src/content-guard.mjs"
+    "./content-guard": "./src/content-guard.mjs",
+    "./network-policy": "./src/network-policy.mjs",
+    "./plugin-secrets": "./src/plugin-secrets.mjs",
+    "./moderation-config": "./src/moderation-config.mjs"
   },
   "scripts": {
-    "check": "node --check src/index.mjs && node --check src/contracts.mjs && node --check src/rpm.mjs && node --check src/deadline.mjs && node --check src/slots.mjs && node --check src/guard-types.mjs && node --check src/panel-schema.mjs && node --check src/content-guard.mjs",
+    "check": "node --check src/index.mjs && node --check src/contracts.mjs && node --check src/rpm.mjs && node --check src/deadline.mjs && node --check src/slots.mjs && node --check src/guard-types.mjs && node --check src/panel-schema.mjs && node --check src/content-guard.mjs && node --check src/network-policy.mjs && node --check src/plugin-secrets.mjs && node --check src/moderation-config.mjs",
     "test": "node --test test/*.test.mjs"
   }
 }

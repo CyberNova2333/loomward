@@ -12,6 +12,7 @@ import {
   REJECT_CODES,
   SlotError,
   VAULT_SLOT,
+  assertSafeEndpointUrl,
   buildContentInspectRequest,
   buildPermissionSubject,
   canonicalJson,
@@ -28,6 +29,7 @@ import {
   validateConsolePanelDecl,
   validateContentInspectVerdict,
   validateContractDecl,
+  validateModerationConfig,
   withDeadline,
 } from '../src/index.mjs';
 
@@ -452,4 +454,150 @@ test('Round 8 MechanismSlot immutability: hooks cannot mutate frozen inputs in-p
     ['replace', 'exec_command', true],
     ['after', 'exec_command', true],
   ]);
+});
+
+test('ContentInspect v2 validates multimodal packets, stream stages, inducement telemetry, and partial redactions', async () => {
+  const {
+    CONTENT_INSPECT_V2_PROTOCOL_VERSION,
+    buildContentInspectRequest,
+    validateContentInspectVerdict,
+    applyOutputRedaction,
+    classifyIpLiteral,
+    assertSafeIntegrationOrigin,
+    assertValidPluginNamespace,
+    assertValidPluginSecretKey,
+    assertValidPluginSecretValue,
+    PLUGIN_SECRETS_ADMIN_SERVICE,
+    ROOT_ONLY_SERVICES,
+  } = await import('../src/index.mjs');
+
+  assert.equal(ROOT_ONLY_SERVICES.includes(PLUGIN_SECRETS_ADMIN_SERVICE), true);
+  assert.equal(classifyIpLiteral('::ffff:169.254.169.254'), 'blocked');
+  assert.equal(classifyIpLiteral('64:ff9b::10.0.0.1'), 'private');
+  assert.equal(classifyIpLiteral('93.184.216.34'), 'public');
+  assert.equal(assertSafeIntegrationOrigin('https://api.example.com'), 'https://api.example.com');
+  assert.throws(() => assertSafeIntegrationOrigin('https://[::ffff:127.0.0.1]'), /loopback/);
+  assert.equal(assertValidPluginNamespace('llm-moderation'), 'llm-moderation');
+  assert.throws(() => assertValidPluginNamespace('../escape'), TypeError);
+  assert.equal(assertValidPluginSecretKey('OPENAI_API_KEY'), 'OPENAI_API_KEY');
+  assert.throws(() => assertValidPluginSecretKey('lowercase_key'), TypeError);
+  assert.equal(assertValidPluginSecretValue('secret-val'), 'secret-val');
+  assert.throws(() => assertValidPluginSecretValue('bad\0value'), TypeError);
+
+  const req = buildContentInspectRequest({
+    protocolVersion: CONTENT_INSPECT_V2_PROTOCOL_VERSION,
+    stage: 'stream_chunk',
+    requestId: 'stream-req-1',
+    streamId: 'st-1',
+    seq: 3,
+    toolName: 'exec_command',
+    modalityPackets: [
+      { modality: 'image', refKind: 'inline', mimeType: 'image/png', byteLength: 1024 },
+    ],
+    payload: { chunk: 'hello' },
+  });
+  assert.equal(req.protocolVersion, 2);
+  assert.equal(req.streamId, 'st-1');
+  assert.equal(req.modalityPackets.length, 1);
+
+  assert.throws(() => validateContentInspectVerdict({
+    protocolVersion: 2,
+    decision: 'escalate',
+    categories: ['safety.review'],
+  }, { stage: 'stream_chunk' }), /cannot escalate/);
+
+  const partialVerdict = validateContentInspectVerdict({
+    protocolVersion: 2,
+    decision: 'redact',
+    categories: ['safety.image'],
+    ruleId: 'MOD-IMG-1',
+    inducement: {
+      tested: true,
+      canaryInduced: false,
+      guardPrimaryScore: 0.12,
+      canaryOutputRiskScore: 0.05,
+      canaryModel: 'qwen-0.5b',
+    },
+    redactions: [{ index: 1, modality: 'image', replacementText: '[REDACTED_IMAGE: MOD-IMG-1]' }],
+  }, { stage: 'output' });
+  assert.equal(partialVerdict.inducement.canaryInduced, false);
+  assert.equal(partialVerdict.redactions.length, 1);
+
+  const originalReply = {
+    jsonrpc: '2.0',
+    id: 7,
+    result: {
+      content: [
+        { type: 'text', text: 'safe intro text' },
+        { type: 'image', data: 'AAAA', mimeType: 'image/png' },
+      ],
+      structuredContent: { raw: 'secret' },
+    },
+  };
+  const redactedReply = applyOutputRedaction(originalReply, partialVerdict, { stage: 'output' });
+  assert.equal(redactedReply.result.content[0].text, 'safe intro text');
+  assert.deepEqual(redactedReply.result.content[1], { type: 'text', text: '[REDACTED_IMAGE: MOD-IMG-1]' });
+  assert.equal(redactedReply.result.structuredContent.partiallyRedacted, true);
+  assert.deepEqual(redactedReply.result.structuredContent.redactedIndices, [1]);
+});
+
+test('assertSafeEndpointUrl & validateModerationConfig support Ollama defaults and opt-in LAN HTTP while still blocking metadata/public HTTP', () => {
+  assert.throws(
+    () => assertSafeEndpointUrl('http://192.168.1.50:11434', { allowLoopbackHttp: true, allowPrivateNetwork: false }),
+    /SSRF|private|loopback/i,
+  );
+  assert.equal(
+    assertSafeEndpointUrl('http://192.168.1.50:11434/api/chat', { allowLoopbackHttp: true, allowPrivateNetwork: true }),
+    'http://192.168.1.50:11434/api/chat',
+  );
+  assert.throws(
+    () => assertSafeEndpointUrl('http://169.254.169.254/latest/meta-data/', { allowLoopbackHttp: true, allowPrivateNetwork: true }),
+    /SSRF|blocked|metadata/i,
+  );
+  assert.throws(
+    () => assertSafeEndpointUrl('http://93.184.216.34:11434/api/chat', { allowLoopbackHttp: true, allowPrivateNetwork: true }),
+    /SSRF|https|public/i,
+  );
+
+  const ollamaDefaulted = validateModerationConfig({
+    localGuard: { kind: 'ollama', model: 'qwen3.5:9b' },
+  });
+  assert.equal(ollamaDefaulted.localGuard.kind, 'ollama');
+  assert.equal(ollamaDefaulted.localGuard.endpoint, 'http://127.0.0.1:11434/');
+  assert.equal(ollamaDefaulted.localGuard.model, 'qwen3.5:9b');
+  assert.equal(ollamaDefaulted.localGuard.think, false);
+  assert.equal(ollamaDefaulted.localGuard.allowPrivateNetwork, false);
+
+  assert.throws(
+    () => validateModerationConfig({
+      localGuard: { kind: 'ollama', endpoint: 'http://192.168.1.50:11434', allowPrivateNetwork: false },
+    }),
+  );
+
+  const lanApproved = validateModerationConfig({
+    mode: 'guard-plus-canary',
+    localGuard: {
+      kind: 'ollama',
+      endpoint: 'http://192.168.1.50:11434',
+      model: 'llama-guard3:8b',
+      think: false,
+      allowPrivateNetwork: true,
+    },
+    canary: {
+      enabled: true,
+      kind: 'ollama',
+      model: 'qwen3:0.6b',
+      allowPrivateNetwork: true,
+    },
+  });
+  assert.equal(lanApproved.localGuard.endpoint, 'http://192.168.1.50:11434/');
+  assert.equal(lanApproved.localGuard.allowPrivateNetwork, true);
+  assert.equal(lanApproved.canary.endpoint, 'http://127.0.0.1:11434/');
+  assert.equal(lanApproved.canary.think, false);
+
+  assert.throws(
+    () => validateModerationConfig({
+      localGuard: { kind: 'ollama', endpoint: 'http://169.254.169.254/latest', allowPrivateNetwork: true },
+    }),
+  );
 });

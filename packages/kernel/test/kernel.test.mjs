@@ -954,3 +954,153 @@ test('Round 9 kernel hardening: Symbol-keyed methods work cleanly without servic
 
   await control.stop();
 });
+
+test('KernelGuard binds plugin:secrets@1 strictly to caller unitId, blocks binder symbol, and locks tool:stream@1 allowReplace=false', async () => {
+  const {
+    PLUGIN_SECRETS_SLOT,
+    PLUGIN_SECRETS_ADMIN_SERVICE,
+    PLUGIN_SECRET_BINDER,
+  } = await import('@loomward/shared');
+
+  const sourceBytes = new TextEncoder().encode('kernel-secrets-stream-v1');
+  const entryHash = await sha256Tagged(sourceBytes);
+  const contract = validateContractDecl({
+    schemaVersion: 1,
+    id: 'secrets-root',
+    kind: 'root-plugin',
+    version: '3.0.0-alpha.0',
+    executionBoundary: 'in-process-root',
+    provides: [PLUGIN_SECRETS_SLOT, PLUGIN_SECRETS_ADMIN_SERVICE],
+  });
+  const rpm = await createFrozenRpm({
+    target: 'runtime',
+    rootPlugins: [
+      { id: contract.id, version: contract.version, entryHash, provides: [...contract.provides] },
+    ],
+  });
+
+  const secretsByUnit = new Map([
+    ['plugin-alpha', new Map([['API_KEY', 'alpha-secret']])],
+    ['plugin-beta', new Map([['API_KEY', 'beta-secret']])],
+  ]);
+
+  const { control } = await createLoomWardKernel({
+    rpm,
+    roots: [{
+      id: contract.id,
+      contract,
+      bytes: async () => sourceBytes,
+      load: async () => ({
+        name: 'secrets-root',
+        apply(ctx) {
+          ctx.provide(PLUGIN_SECRETS_ADMIN_SERVICE, {
+            adminPing: () => 'admin-ok',
+          });
+          ctx.provide(PLUGIN_SECRETS_SLOT, {
+            [PLUGIN_SECRET_BINDER]: unitId => ({
+              describeKeys: () => [...(secretsByUnit.get(unitId)?.keys() ?? [])],
+              getSecret: key => secretsByUnit.get(unitId)?.get(key) ?? null,
+            }),
+          });
+        },
+      }),
+    }],
+  });
+
+  assert.equal(PLATFORM_SLOTS.toolStream.name, 'tool:stream@1');
+  assert.equal(PLATFORM_SLOTS.toolStream.allowReplace, false);
+
+  let alphaSecrets;
+  let betaSecrets;
+  await control.mountExtensionUnit({
+    contract: {
+      schemaVersion: 1,
+      id: 'plugin-alpha',
+      kind: 'extension-plugin',
+      version: '3.0.0-alpha.0',
+      executionBoundary: 'out-of-process',
+      consumes: [PLUGIN_SECRETS_SLOT, 'tool:stream@1'],
+      writes: { hooks: [{ slot: 'tool:stream@1', phase: 'after' }] },
+    },
+    trust: { autoApproveTrusted: true },
+    serviceMethods: {
+      [PLUGIN_SECRETS_SLOT]: {
+        describeKeys: { mode: 'read', policy: 'public' },
+        getSecret: { mode: 'read', policy: 'trusted' },
+      },
+    },
+    load: () => ({
+      name: 'plugin-alpha',
+      apply(ctx) {
+        alphaSecrets = ctx.get(PLUGIN_SECRETS_SLOT);
+        assert.throws(() => ctx.get(PLUGIN_SECRETS_ADMIN_SERVICE), SlotError);
+        const streamSlot = ctx.get('tool:stream@1');
+        assert.throws(() => streamSlot.hook('replace', x => x), SlotError);
+      },
+    }),
+  });
+
+  await assert.rejects(
+    () => control.mountExtensionUnit({
+      contract: {
+        schemaVersion: 1,
+        id: 'plugin-beta',
+        kind: 'extension-plugin',
+        version: '3.0.0-alpha.0',
+        executionBoundary: 'out-of-process',
+        consumes: [PLUGIN_SECRETS_SLOT],
+      },
+      trust: {
+        approvedActions: [`service.invoke.read:${PLUGIN_SECRETS_SLOT}#describeKeys`],
+      },
+      serviceMethods: {
+        [PLUGIN_SECRETS_SLOT]: {
+          describeKeys: { mode: 'read', policy: 'public' },
+          getSecret: { mode: 'read', policy: 'trusted', async: false },
+        },
+      },
+      load: () => ({
+        name: 'plugin-beta',
+        apply(ctx) {
+          betaSecrets = ctx.get(PLUGIN_SECRETS_SLOT);
+        },
+      }),
+    }),
+    err => err.code === 'GUARD_TRUSTED_APPROVAL_REQUIRED'
+      && err.pendingActions?.includes(`service.invoke.read:${PLUGIN_SECRETS_SLOT}#getSecret`),
+  );
+
+  await control.mountExtensionUnit({
+    contract: {
+      schemaVersion: 1,
+      id: 'plugin-beta',
+      kind: 'extension-plugin',
+      version: '3.0.0-alpha.0',
+      executionBoundary: 'out-of-process',
+      consumes: [PLUGIN_SECRETS_SLOT],
+    },
+    trust: { autoApproveTrusted: true },
+    serviceMethods: {
+      [PLUGIN_SECRETS_SLOT]: {
+        describeKeys: { mode: 'read', policy: 'public' },
+      },
+    },
+    load: () => ({
+      name: 'plugin-beta',
+      apply(ctx) {
+        betaSecrets = ctx.get(PLUGIN_SECRETS_SLOT);
+      },
+    }),
+  });
+
+  // Alpha only reads its own namespace and cannot access the binder symbol.
+  assert.deepEqual(alphaSecrets.describeKeys('plugin-beta'), ['API_KEY']);
+  assert.equal(alphaSecrets.getSecret('API_KEY', 'plugin-beta'), 'alpha-secret');
+  assert.equal(alphaSecrets[PLUGIN_SECRET_BINDER], undefined);
+
+  // Beta only sees its own namespace keys and fails closed on undeclared getSecret().
+  assert.deepEqual(betaSecrets.describeKeys('plugin-alpha'), ['API_KEY']);
+  assert.throws(() => betaSecrets.getSecret('API_KEY'), SlotError);
+
+  await control.stop();
+});

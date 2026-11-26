@@ -53,10 +53,53 @@ export {
 } from './panel-schema.mjs';
 export {
   CONTENT_INSPECT_PROTOCOL_VERSION,
+  CONTENT_INSPECT_V2_PROTOCOL_VERSION,
+  CONTENT_INSPECT_SUPPORTED_VERSIONS,
   CONTENT_INSPECT_STAGES,
+  CONTENT_INSPECT_EXTENDED_STAGES,
   CONTENT_INSPECT_DECISIONS,
+  CONTENT_INSPECT_MODALITIES,
+  CONTENT_INSPECT_REF_KINDS,
   ToolBlockedError,
+  normalizeModalityPackets,
   buildContentInspectRequest,
   validateContentInspectVerdict,
   applyOutputRedaction,
 } from './content-guard.mjs';
+export {
+  classifyIpv4Octets,
+  parseIpv6Hextets,
+  isIpLiteralVersion,
+  isLoopbackHost,
+  classifyIpLiteral,
+  canonicalOriginKey,
+  assertValidHostname,
+  normalizeOriginList,
+  unsafeTargetUrlError,
+  assertSafeIntegrationOrigin,
+  assertSafeEndpointUrl,
+  assertSafeTargetUrl,
+} from './network-policy.mjs';
+export {
+  PLUGIN_SECRETS_SLOT,
+  PLUGIN_SECRETS_ADMIN_SERVICE,
+  PLUGIN_SECRET_BINDER,
+  PLUGIN_UNIT_ID_RE,
+  SECRET_KEY_RE,
+  MAX_PLUGIN_SECRET_KEYS,
+  MAX_PLUGIN_SECRET_VALUE_BYTES,
+  assertValidPluginNamespace,
+  assertValidPluginSecretKey,
+  assertValidPluginSecretValue,
+} from './plugin-secrets.mjs';
+export {
+  MODERATION_CONFIG_VERSION,
+  MODERATION_MODES,
+  MODERATION_POLICY_PROFILES,
+  MODERATION_SCOPES,
+  MODERATION_CLOUD_PROVIDERS,
+  MODERATION_STREAM_REDACT_POLICIES,
+  POLICY_PROFILE_DEFAULTS,
+  DEFAULT_MODERATION_CONFIG,
+  validateModerationConfig,
+} from './moderation-config.mjs';

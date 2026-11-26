@@ -7,6 +7,8 @@ import {
   CLOSED_SLOTS,
   ImplSlot,
   MechanismSlot,
+  PLUGIN_SECRETS_SLOT,
+  PLUGIN_SECRET_BINDER,
   ROOT_ONLY_SERVICES,
   SlotError,
   VAULT_SLOT,
@@ -44,7 +46,7 @@ const BLOCKED_CONTEXT_PROPS = new Set([
   'prototype',
 ]);
 
-const BLOCKED_SYMBOLS = new Set([ORIGINAL, CALLER, SHADOW, ISOLATE, TRACKER]);
+const BLOCKED_SYMBOLS = new Set([ORIGINAL, CALLER, SHADOW, ISOLATE, TRACKER, PLUGIN_SECRET_BINDER]);
 
 function isBlockedSymbol(prop) {
   if (typeof prop !== 'symbol') return false;
@@ -310,6 +312,16 @@ export class KernelGuard {
     if (isCordisContextOrFiber(raw)) {
       throw new SlotError(`Unit ${state.unitId} is forbidden from obtaining raw Cordis context on ${serviceName}.`);
     }
+    if (serviceName === PLUGIN_SECRETS_SLOT) {
+      if (!raw || typeof raw[PLUGIN_SECRET_BINDER] !== 'function') {
+        throw new SlotError(`Service ${serviceName} is missing kernel unit-binder.`);
+      }
+      const scoped = raw[PLUGIN_SECRET_BINDER](state.unitId);
+      if (!scoped || typeof scoped !== 'object' || isCordisContextOrFiber(scoped) || hasCordisInternalRef(scoped)) {
+        throw new SlotError(`Unit ${state.unitId} received an invalid scoped secret facade.`);
+      }
+      return this.wrapService(serviceName, scoped, state);
+    }
     const wrappedSlot = this.wrapSlot(raw, rawCtx, state);
     if (wrappedSlot) return wrappedSlot;
     return this.wrapService(serviceName, raw, state);
@@ -374,6 +386,9 @@ export class KernelGuard {
 
     methods.intercept = (name, config) => {
       guard.#assertUnitActive(state, `service.intercept:${name}`);
+      if (name === PLUGIN_SECRETS_SLOT || guard.#closedSlots.has(name) || guard.#rootOnlyServices.has(name)) {
+        throw new SlotError(`Unit ${state.unitId} is not allowed to intercept protected service: ${name}.`);
+      }
       guard.assertWriteAction(
         state,
         { kind: 'service.intercept', target: name },
@@ -410,7 +425,7 @@ export class KernelGuard {
         throw new SlotError(`Unit ${state.unitId} ctx.isolate requires a non-empty list of service names.`);
       }
       for (const n of list) {
-        if (guard.#closedSlots.has(n) || guard.#rootOnlyServices.has(n) || !state.manifest.writes.isolateProvides.includes(n)) {
+        if (guard.#closedSlots.has(n) || guard.#rootOnlyServices.has(n) || n === PLUGIN_SECRETS_SLOT || !state.manifest.writes.isolateProvides.includes(n)) {
           throw new SlotError(`Unit ${state.unitId} is not allowed to isolate service: ${n}.`);
         }
       }
