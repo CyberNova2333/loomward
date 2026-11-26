@@ -13,7 +13,7 @@
 
 导出密钥后，连接器立即剥离 `AGENTDOCK_BRIDGE_TOKEN` 等进程环境变量，不向容器或子进程传递底层诊断细节。
 
-`BridgeConnector` 通过 `proxyCandidates` 依次尝试环境变量 `HTTPS_PROXY`/`https_proxy`/`HTTP_PROXY`/`http_proxy`、系统代理配置（Windows 注册表 `Internet Settings` 或 macOS `scutil --proxy`）与直连路由，以 `Bearer BRIDGE_TOKEN` 建立 `wss://<origin>/bridge` 连接（禁用压缩与重定向，单帧上限 `1,200,000` 字节）。连接每 `20` 秒发送 ping 心跳帧，超过 `65000` 毫秒未收到 `pong` 即断开重连，退避上限 `30` 秒加随机抖动，并每秒轮询 `stop.request` 以响应受控停机。
+受保护入口校验私有发布目录的冻结 RPM，启动[宿主守护进程](../../packages/host/src/daemon.mjs)。[中继入口](../../packages/host/src/ingress-relay.mjs)通过 `proxyCandidates` 依次尝试环境变量 `HTTPS_PROXY`/`https_proxy`/`HTTP_PROXY`/`http_proxy`、系统代理配置（Windows 注册表 `Internet Settings` 或 macOS `scutil --proxy`）与直连路由，以 `Bearer BRIDGE_TOKEN` 建立 `wss://<origin>/bridge` 连接（禁用压缩与重定向，单帧上限 `1,200,000` 字节）。连接每 `20` 秒发送 ping 心跳帧，超过 `65000` 毫秒未收到 `pong` 即断开重连，退避上限 `30` 秒加随机抖动。连接器主进程每秒轮询 `stop.request`，触发时关闭中继与沙箱。
 
 ## 信封校验与十项工具策略
 
@@ -33,7 +33,7 @@
 
 ## 消费顺序与三类防重放账本
 
-对需要批准的请求，`BridgeConnector` 严格按以下先后顺序跨越异步边界：
+对需要批准的请求，[宿主调度流水线](../../packages/host/src/pipeline.mjs)按以下顺序执行：
 
 1. **预查持久账本**：调用 `RequestReceipts.inspect` 只读检查 `<stateDir>/request-receipts/<sha256(id)>.json`；若该桥接请求 ID 已执行或存在摘要冲突，直接拒绝而不再生成新的待批准记录。
 2. **先消费再登记**：当 `LocalApprovals.authorize` 找到匹配的 `.approved.json` 时，**先同步删除 `.approved.json` 与 `.request.json`**，随后再调用 `RequestReceipts.claim` 写入 24 小时持久账本（最多 `10000` 条，单条上限 512 字节，遇损坏或半写入文件按 `duplicate_or_incomplete` 失败关闭）。

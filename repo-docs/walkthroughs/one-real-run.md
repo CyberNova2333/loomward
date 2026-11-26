@@ -30,7 +30,7 @@
 
 ## Step 3: 同参数重试消费批准并记账
 
-客户端以相同工具和参数再次发起调用时，[连接器主流程](../../local/connector.mjs)按固定顺序完成交接：
+客户端以相同工具和参数再次发起调用时，[宿主调度流水线](../../packages/host/src/pipeline.mjs)按固定顺序完成交接：
 
 | 请求情形 | 可观察结果 | 源码边界依据 |
 | --- | --- | --- |
@@ -60,3 +60,23 @@ pnpm run check
 上述局部回归分别使用临时状态目录、本地回环 WebSocket 和沙箱受控模拟边界，不能自动替代真实 Windows 宿主 ACL 校验、固定开发镜像内集成回归或公网端到端验收；历史上随安全修复记录在案的真实部署、镜像校验与公网回归快照统一保存于[修复与验证快照](../../SECURITY-FIXES.md)。需要按目录快速找到其他模块或测试文件时，继续浏览[代码地图寻找源码与测试入口](../code-map.md)；要核对每项断言对应的源码依据与排除项，查看[源码证据审计与边界](../references/source-evidence.md)。
 
 证据状态：除特别标注外，本页基于当前源码已确认。
+
+### 在发布前复验受保护安装
+
+先停掉待升级的连接器。安装器把代码、依赖和文件摘要写入新的私有发布目录及其同名 `.installation.json`，逐个原子替换管理入口，最后替换 `config.json`。启动入口据此选择发布版本。中途退出后可从原入口启动旧版本，也可停止后重跑安装。复核文件摘要时按活动配置的 `sourceRoot` 选择同名清单，状态根目录的 `installation.json` 是最近一次准备发布的兼容副本。[POSIX 安装器](../../scripts/host-cli.mjs) · [Windows 安装器](../../scripts/Install-Hardened.ps1)
+
+两台隔离测试机都需要已登录的专用桌面账户、本地 Docker 引擎、相同镜像 ID 和按项目版本固定的 Node、pnpm。各账户在主目录保存 `.loomward-acceptance.json`，其中 `node`、`pnpm`、`docker` 是客体可执行文件的绝对路径，`context` 是本地 Docker 上下文名。macOS 使用开启了主机密钥校验的 SSH 别名，Windows 使用 libvirt 的 QEMU Guest Agent 安排普通权限的交互式任务。宿主 Python 需要能导入 `libvirt` 与 `libvirt_qemu`。将已核对的完整镜像 ID 赋给 `LOOMWARD_TEST_IMAGE` 后，在仓库根目录执行：
+
+```sh
+python3 tools/acceptance/run.py --image "$LOOMWARD_TEST_IMAGE" \
+  --mac-ssh loomward-test-mac --windows-domain loomward-test-windows --windows-user loomward-test
+```
+
+两台客体收到同一份源码包，并在各自的临时状态目录中验证原生凭据读回、插件密钥写入与删除、审核配置读回和 Docker 只读挂载。两次启动均通过回环 WebSocket 发送只读的 `computer_context` 请求，检查 `stream_end` 终帧中的请求 ID 和只读挂载模式。Windows 占用清单文件，macOS 为清单设置临时不可变标志。两端都验证旧版本在升级中断后仍可启动，再重试升级并核对凭据、Passkey 注册记录、能力设置和待批准请求。报告记录提交、工作树状态、源码包摘要、镜像 ID 和每项检查结果。双端均通过且各自标签下的容器计数为零，才会输出 `accepted: true`。可以用 `--only darwin` 或 `--only win32` 诊断单台客体。[双端验收入口](../../tools/acceptance/run.py) · [客体验收步骤](../../tools/acceptance/guest.mjs)
+
+控制台的共同行为可用 `node --test test/console-policy-contract.test.mjs` 复验。离线审核基线从插件目录运行以下命令，报告会列出放行变拦截、拦截变放行及增删的样本 ID；发生变化时退出码为 1。[控制台契约测试](../../test/console-policy-contract.test.mjs) · [标注样本](../../plugins/llm-moderation/test/fixtures/offline-policy.jsonl)
+
+```sh
+cd plugins/llm-moderation
+python3 -m engine.eval_runner --dataset test/fixtures/offline-policy.jsonl --baseline test/fixtures/offline-baseline.json
+```
