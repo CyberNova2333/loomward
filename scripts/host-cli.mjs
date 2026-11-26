@@ -37,7 +37,7 @@ import {
   validateStrongPassword,
   webuiAuthFilePath,
 } from '../local/webui-auth.mjs';
-import { isLoopbackHost, startWebUiServer } from '../local/webui.mjs';
+import { isLoopbackHost, defaultServiceController } from '../local/webui.mjs';
 import {
   assertPlainLocalPath,
   assertPrivateFile,
@@ -1094,13 +1094,17 @@ export async function runWebUi({
   port = 18797,
 } = {}) {
   const runtimeRoot = path.resolve(import.meta.dirname, '..');
-  const { realState } = readTrustedConfig(stateDir, runtimeRoot);
+  const { realState, config } = readTrustedConfig(stateDir, runtimeRoot);
   clearNodeOverrides();
   const parsedPort = Number(port);
   if (!Number.isInteger(parsedPort) || parsedPort < 0 || parsedPort > 65535) {
     throw new Error('Invalid --port value.');
   }
-  const server = await startWebUiServer({
+  const { startUnifiedConsole } = await import('../packages/console/src/server.mjs');
+  const { createPluginSecretsStore } = await import('../packages/host/src/plugin-secrets.mjs');
+  const server = await startUnifiedConsole({
+    pluginSecretsAdmin: createPluginSecretsStore({ stateDir: realState, workspaceRoots: config.roots }).adminView,
+    serviceController: defaultServiceController(realState),
     stateDir: realState,
     runtimeRoot,
     host,
@@ -1108,7 +1112,7 @@ export async function runWebUi({
     requirePrivateState: true,
   });
   const displayHost = host === '127.0.0.1' ? 'localhost' : host;
-  console.log(`AgentDock WebUI listening on http://${displayHost}:${server.port} (${server.url})`);
+  console.log(`LoomWard Console listening on http://${displayHost}:${server.port} (${server.url})`);
   await new Promise(resolve => {
     const shutdown = () => {
       void server.close().finally(resolve);

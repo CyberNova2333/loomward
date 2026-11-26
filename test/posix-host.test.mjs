@@ -7,6 +7,7 @@ import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import childProcess from 'node:child_process';
+import { issueSetupTicketSync } from '../local/webui-auth.mjs';
 import { syncBuiltinESMExports } from 'node:module';
 import { promisify } from 'node:util';
 import { EventEmitter } from 'node:events';
@@ -480,7 +481,7 @@ esac
   await fs.writeFile(path.join(stateDir, 'start'), `#!/bin/sh\nexec "${fakeNode}" "${installed.runtime}/scripts/host-cli.mjs" start --state-dir "${stateDir}" "$@"\n`);
   const policyFiles = [SECRET_META_FILE, SECRET_DATA_FILE, 'capabilities.json', 'webui-auth.json', 'approvals/fixture.request.json'];
   await fs.mkdir(path.join(stateDir, 'approvals'), { recursive: true, mode: 0o700 });
-  await fs.writeFile(path.join(stateDir, 'webui-auth.json'), '{"passkeys":[{"id":"acceptance-fixture"}]}', { mode: 0o600 });
+  issueSetupTicketSync(stateDir, { workspaceRoots: [workspace], passkeyDetector: () => ({ supported: false }) });
   await fs.writeFile(path.join(stateDir, 'approvals/fixture.request.json'), '{}', { mode: 0o600 });
   const hashes = () => policyFiles.map(file => sha256FileSync(path.join(stateDir, file)));
   const before = hashes();
@@ -530,6 +531,31 @@ esac
   const statusParsed = JSON.parse(statusCmdOut.stdout);
   assert.equal(statusParsed.supervisorAlive, true);
   assert.equal(statusParsed.connectorAlive, true);
+
+  const web = childProcess.spawn(path.join(stateDir, 'webui'), ['--port', '0'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    signal: AbortSignal.timeout(30000),
+  });
+  const ready = new Promise((resolve, reject) => {
+    let output = '';
+    web.stdout.on('data', chunk => {
+      output += chunk;
+      const match = output.match(/listening on http:\/\/localhost:(\d+)/);
+      if (match) resolve(Number(match[1]));
+    });
+    web.once('error', reject);
+    web.once('exit', () => reject(new Error('Protected console exited before listening.')));
+  });
+  const closed = new Promise(resolve => web.once('close', resolve));
+  try {
+    const port = await ready;
+    const baseUrl = `http://127.0.0.1:${port}`;
+    assert.equal((await fetch(baseUrl + '/brand-icon.svg')).headers.get('content-type'), 'image/svg+xml; charset=utf-8');
+    assert.equal((await fetch(baseUrl + '/api/plugin-secrets/meta')).status, 401);
+  } finally {
+    web.kill();
+    await closed;
+  }
 
   const stopOut = await execFile(path.join(stateDir, 'stop'), [], { timeout: 25000 });
   assert.match(stopOut.stdout, /Stopped this connector/);

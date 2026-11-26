@@ -1003,7 +1003,7 @@ export async function collectStatusSnapshot({
   };
 }
 
-function defaultServiceController(stateDir, systemdProbe, requirePrivateState = true) {
+export function defaultServiceController(stateDir, systemdProbe = defaultSystemdProbe, requirePrivateState = true) {
   const env = sanitizedToolEnv();
   const validatePosixWrapper = (wrapper, label) => {
     let st;
