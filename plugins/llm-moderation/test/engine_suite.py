@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 import urllib.parse
+from unittest.mock import patch
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -607,39 +608,48 @@ class ModerationEnginePythonTests(unittest.TestCase):
                 }).encode("utf-8"),
             )
 
-        res_qwen = evaluate_inspection(
-            inspect_request={
-                "protocolVersion": 2,
-                "stage": "input",
-                "requestId": "req-ollama-qwen",
-                "toolName": "browser_view",
-                "payload": {"text": "ordinary safe note without static rule match"},
-                "modalityPackets": [
-                    {"modality": "text", "refKind": "inline", "inlineData": "ordinary safe note without static rule match"},
-                    {"modality": "image", "refKind": "inline", "mimeType": "image/png", "inlineData": base64.b64encode(PNG_1X1).decode("ascii")},
-                ],
-            },
-            config={
-                "mode": "guard-plus-canary",
-                "policyProfile": "strict",
-                "cloudOptIn": False,
-                "localGuard": {
-                    "kind": "ollama",
-                    "endpoint": "http://192.168.1.50:11434",
-                    "model": "qwen3.5:9b",
-                    "think": False,
-                    "allowPrivateNetwork": True,
+        def inspect_qwen():
+            return evaluate_inspection(
+                inspect_request={
+                    "protocolVersion": 2,
+                    "stage": "input",
+                    "requestId": "req-ollama-qwen",
+                    "toolName": "browser_view",
+                    "payload": {"text": "ordinary safe note without static rule match"},
+                    "modalityPackets": [
+                        {"modality": "text", "refKind": "inline", "inlineData": "ordinary safe note without static rule match"},
+                        {"modality": "image", "refKind": "inline", "mimeType": "image/png", "inlineData": base64.b64encode(PNG_1X1).decode("ascii")},
+                    ],
                 },
-                "canary": {
-                    "enabled": True,
-                    "kind": "ollama",
-                    "endpoint": "http://127.0.0.1:11434",
-                    "model": "qwen3:0.6b",
-                    "think": False,
+                config={
+                    "mode": "guard-plus-canary",
+                    "policyProfile": "strict",
+                    "cloudOptIn": False,
+                    "localGuard": {
+                        "kind": "ollama",
+                        "endpoint": "http://192.168.1.50:11434",
+                        "model": "qwen3.5:9b",
+                        "think": False,
+                        "allowPrivateNetwork": True,
+                    },
+                    "canary": {
+                        "enabled": True,
+                        "kind": "ollama",
+                        "endpoint": "http://127.0.0.1:11434",
+                        "model": "qwen3:0.6b",
+                        "think": False,
+                    },
                 },
-            },
-            http_requester=mock_ollama,
-        )
+                http_requester=mock_ollama,
+            )
+
+        # The transport contract and missing-decoder policy are independent of runner packages.
+        with patch("engine.media_sanitizer.probe_optional_decoders", return_value={"pillow": False}):
+            missing = inspect_qwen()
+        self.assertEqual(missing["verdict"]["ruleId"], "MODALITY-DEPENDENCY-MISSING")
+        self.assertEqual(recorded, [])
+        with patch("engine.media_sanitizer.probe_optional_decoders", return_value={"pillow": True}):
+            res_qwen = inspect_qwen()
         self.assertEqual(res_qwen["verdict"]["decision"], "block")
         guard_url, guard_body = recorded[0]
         self.assertEqual(guard_url, "http://192.168.1.50:11434/api/chat")
