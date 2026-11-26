@@ -1035,6 +1035,7 @@
     return el("button", {
       id,
       type: "button",
+      tabindex: "0",
       class: "lw-chrome-button",
       title: label,
       "aria-label": label,
@@ -1094,6 +1095,7 @@
           el("div", { class: "lw-nav-group-title", text: group.title }),
           ...group.pages.map((item) => el("button", {
             type: "button",
+            tabindex: "0",
             class: `lw-nav-item ${state.page === item.id ? "active" : ""}`,
             "data-nav-id": item.id,
             "aria-current": state.page === item.id ? "page" : null,
@@ -1287,14 +1289,14 @@
     const relay = daemon?.online === true ? "\u5728\u7EBF" : daemon?.online === false ? "\u79BB\u7EBF" : unknown;
     const reviewMode = { "local-only": "\u4EC5\u672C\u5730", "cloud-first": "\u4E91\u7AEF\u4F18\u5148", "hybrid-tiered": "\u5206\u5C42\u5BA1\u67E5" }[mod?.mode] || mod?.mode || unknown;
     function statusCard(label, value, hint, icon, tone, pageId) {
-      return el("button", { type: "button", class: "lw-status-card", onClick: () => navigate(pageId) }, [
+      return el("button", { type: "button", tabindex: "0", class: "lw-status-card", onClick: () => navigate(pageId) }, [
         el("span", { class: "lw-status-label" }, [el("span", { class: "lw-status-icon " + tone }, [makeIcon(icon)]), label]),
         el("strong", { text: value }),
         el("span", { class: "lw-status-foot" }, [hint, makeIcon("arrowRight")])
       ]);
     }
     function flowNode(id, title, value, icon, pageId) {
-      return el("button", { id: "lw-flow-" + id, class: "lw-flow-node", type: "button", onClick: () => navigate(pageId) }, [
+      return el("button", { id: "lw-flow-" + id, class: "lw-flow-node", type: "button", tabindex: "0", onClick: () => navigate(pageId) }, [
         makeIcon(icon),
         el("strong", { text: title }),
         el("span", { text: value })
@@ -1303,7 +1305,7 @@
     function sectionBar(title, link, pageId) {
       return el("div", { class: "lw-board-heading" }, [
         el("h2", { text: title }),
-        link ? el("button", { class: "lw-board-link", type: "button", onClick: () => navigate(pageId) }, [link, makeIcon("chevronRight")]) : null
+        link ? el("button", { class: "lw-board-link", type: "button", tabindex: "0", onClick: () => navigate(pageId) }, [link, makeIcon("chevronRight")]) : null
       ]);
     }
     function fact(label, value) {
@@ -1337,6 +1339,7 @@
         el("button", {
           id: "lw-map-toggle",
           type: "button",
+          tabindex: "0",
           class: "lw-board-link",
           "aria-controls": "lw-flow-map",
           "aria-expanded": String(state.overviewTopologyOpen),
@@ -1482,7 +1485,7 @@
             iconName: "eye",
             className: "lw-btn lw-btn-trust lw-btn-sm",
             disabled: state.busy || leftSec <= 0,
-            attrs: { id: "lw-review-" + item.id, "data-countdown-disable-expires": item.expiresAt, "data-review-id": item.id },
+            attrs: { id: "lw-review-" + item.id, tabindex: "0", "data-countdown-disable-expires": item.expiresAt, "data-review-id": item.id },
             onClick: () => runMutation(async () => {
               const review = await client.api("/api/approvals/review", { method: "POST", body: { id: item.id } });
               state.reviewModal = { ...review, tool: item.tool, expiresAt: item.expiresAt };
@@ -1490,6 +1493,7 @@
           }) : null,
           item.id ? makeIconButton({
             text: "\u62D2\u7EDD\u5E76\u79FB\u9664",
+            attrs: { tabindex: "0" },
             iconName: "stop",
             className: "lw-btn lw-btn-danger lw-btn-sm",
             disabled: state.busy,
@@ -5289,6 +5293,7 @@ ${sampleBodyStr}` : curlSnippet })
             type: "button",
             class: "lw-btn",
             id: "lw-review-cancel",
+            tabindex: "0",
             text: "\u53D6\u6D88",
             onClick: () => {
               state.reviewModal = null;
@@ -5301,6 +5306,7 @@ ${sampleBodyStr}` : curlSnippet })
             disabled: state.busy || leftSec <= 0,
             "data-countdown-disable-expires": modal.expiresAt,
             id: "lw-review-confirm",
+            tabindex: "0",
             text: "\u786E\u8BA4\u6279\u51C6\u4E00\u6B21",
             onClick: () => runMutation(async () => {
               const res = await client.api("/api/approvals/approve", {
