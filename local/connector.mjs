@@ -6,7 +6,6 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { createSandboxRuntime } from './sandbox.mjs';
 import { RequestReceipts, TransientReceipts, StopReceipts } from './receipts.mjs';
 import { LocalApprovals } from './approvals.mjs';
 import { ApprovalRecordTooLargeError } from './approval-store.mjs';
@@ -139,47 +138,10 @@ export function proxyCandidates(targetOrigin) {
   return [...new Set(options)].sort((a, b) => Number(Boolean(b)) - Number(Boolean(a)));
 }
 
-export class BridgeConnector {
-  constructor({ origin, bridgeToken, runtime, stateDir, allowExec = true, workspaceRoots, externalMcpHub, auditFile, webuiPort = 18797, blockedOrigins = [], proxyProvider = proxyCandidates, socketFactory }) {
-    const url = new URL(origin);
-    if (!['https:', 'http:'].includes(url.protocol) || (url.protocol === 'http:' && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname))) {
-      throw new Error('The bridge requires HTTPS, except on loopback for tests');
-    }
-    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('Expected an origin without a path or credentials');
-    this.url = new URL('/bridge', url);
-    this.url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-    this.origin = url.origin;
-    this.token = bridgeToken;
-    this.runtime = runtime;
+class ConnectorReporter {
+  constructor(stateDir, origin) {
     this.stateDir = stateDir;
-    this.allowExec = allowExec !== false;
-    this.workspaceRoots = workspaceRoots;
-    const effectiveBlockedOrigins = [
-      this.origin,
-      ...(Number.isSafeInteger(webuiPort) && webuiPort > 0 && webuiPort <= 65535
-        ? [`http://127.0.0.1:${webuiPort}`, `http://localhost:${webuiPort}`, `http://[::1]:${webuiPort}`]
-        : []),
-      ...(Array.isArray(blockedOrigins) ? blockedOrigins : []),
-    ];
-    this.externalMcpHub = externalMcpHub !== undefined
-      ? externalMcpHub
-      : (stateDir
-          ? createExternalMcpHub({
-              stateDir,
-              workspaceRoots,
-              auditFile: auditFile || path.join(stateDir, 'audit.jsonl'),
-              blockedOrigins: effectiveBlockedOrigins,
-            })
-          : null);
-    this.proxyProvider = proxyProvider;
-    this.socketFactory = socketFactory || ((target, options) => new WebSocket(target, options));
-    this.running = false;
-    this.retries = 0;
-    this.inflight = new Map();
-    this.receipts = new RequestReceipts(stateDir);
-    this.controlReceipts = new TransientReceipts();
-    this.stopReceipts = new StopReceipts();
-    this.approvals = new LocalApprovals(stateDir, this.origin);
+    this.origin = origin;
     this.logQueue = Promise.resolve();
     this.statusQueue = Promise.resolve();
     this.lastOnline = null;
@@ -225,6 +187,50 @@ export class BridgeConnector {
     });
     this.statusQueue = action.catch(() => {});
     return action;
+  }
+
+}
+
+export class BridgeConnector extends ConnectorReporter {
+  constructor({ origin, bridgeToken, runtime, stateDir, allowExec = true, workspaceRoots, externalMcpHub, auditFile, webuiPort = 18797, blockedOrigins = [], proxyProvider = proxyCandidates, socketFactory }) {
+    const url = new URL(origin);
+    if (!['https:', 'http:'].includes(url.protocol) || (url.protocol === 'http:' && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname))) {
+      throw new Error('The bridge requires HTTPS, except on loopback for tests');
+    }
+    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('Expected an origin without a path or credentials');
+    super(stateDir, url.origin);
+    this.url = new URL('/bridge', url);
+    this.url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    this.token = bridgeToken;
+    this.runtime = runtime;
+    this.allowExec = allowExec !== false;
+    this.workspaceRoots = workspaceRoots;
+    const effectiveBlockedOrigins = [
+      this.origin,
+      ...(Number.isSafeInteger(webuiPort) && webuiPort > 0 && webuiPort <= 65535
+        ? [`http://127.0.0.1:${webuiPort}`, `http://localhost:${webuiPort}`, `http://[::1]:${webuiPort}`]
+        : []),
+      ...(Array.isArray(blockedOrigins) ? blockedOrigins : []),
+    ];
+    this.externalMcpHub = externalMcpHub !== undefined
+      ? externalMcpHub
+      : (stateDir
+          ? createExternalMcpHub({
+              stateDir,
+              workspaceRoots,
+              auditFile: auditFile || path.join(stateDir, 'audit.jsonl'),
+              blockedOrigins: effectiveBlockedOrigins,
+            })
+          : null);
+    this.proxyProvider = proxyProvider;
+    this.socketFactory = socketFactory || ((target, options) => new WebSocket(target, options));
+    this.running = false;
+    this.retries = 0;
+    this.inflight = new Map();
+    this.receipts = new RequestReceipts(stateDir);
+    this.controlReceipts = new TransientReceipts();
+    this.stopReceipts = new StopReceipts();
+    this.approvals = new LocalApprovals(stateDir, this.origin);
   }
 
   async start() {
@@ -289,6 +295,7 @@ export class BridgeConnector {
         if (message.type === 'pong') { this.retries = 0; receivedPong = true; lastPong = Date.now(); this.status(true); return; }
         if (message.type === 'cancel' && typeof message.id === 'string') { this.inflight.get(message.id)?.controller.abort(); return; }
         if (message.type !== 'request') return;
+        // Direct BridgeConnector clients use the legacy single-response protocol.
         const safeErrId = raw => (raw === null || (typeof raw === 'number' && Number.isFinite(raw)) || (typeof raw === 'string' && raw.length <= 256) ? raw : null);
         const send = body => {
           if (socket.readyState !== WebSocket.OPEN) return;
@@ -450,22 +457,33 @@ export class BridgeConnector {
 
 async function main() {
   const stateDir = path.resolve(process.argv[2] || defaultStateDirectory());
-  let connector = null;
+  let reporter;
   let stopPoll;
   try {
     const config = JSON.parse(await fs.readFile(path.join(stateDir, 'config.json'), 'utf8'));
+    reporter = new ConnectorReporter(stateDir, config.origin);
+    if (config.sandbox?.enabled !== true || config.requireLocalApproval !== true) {
+      throw new Error('Protected startup requires a Docker sandbox and local approval.');
+    }
     const secrets = loadSecrets(stateDir, { fields: ['bridgeToken'] });
-    // No bridge token is passed via environment to subprocesses run by tools.
     delete process.env.AGENTDOCK_BRIDGE_TOKEN;
-    const runtime = await createSandboxRuntime({ ...config, stateDir, auditFile: path.join(stateDir, 'audit.jsonl') });
-    connector = new BridgeConnector({
+    const { startLoomWardDaemon } = await import('../packages/host/src/daemon.mjs');
+    const port = Number.isSafeInteger(config.webuiPort) ? config.webuiPort : 18797;
+    const daemon = await startLoomWardDaemon({
+      requireFrozenRpm: true,
       origin: config.origin,
-      bridgeToken: secrets.bridgeToken,
-      runtime,
       stateDir,
-      allowExec: config.allowExec === true,
       workspaceRoots: config.roots,
-      webuiPort: Number.isSafeInteger(config.webuiPort) ? config.webuiPort : 18797,
+      sandboxConfig: { ...config, stateDir, auditFile: path.join(stateDir, 'audit.jsonl') },
+      allowExec: config.allowExec === true,
+      allowOutbound: config.sandbox.allowOutbound === true,
+      relay: { origin: config.origin, bridgeToken: secrets.bridgeToken },
+      mcpHubBlockedOrigins: ['localhost', '127.0.0.1', '[::1]'].map(host => `http://${host}:${port}`),
+      enableLlmModeration: await fs.stat(path.join(stateDir, 'moderation', 'config.json')).then(
+        () => true, error => { if (error.code !== 'ENOENT') throw error; return false; },
+      ),
+      record: (event, fields) => reporter.record(event, fields),
+      status: (online, options) => reporter.status(online, options),
     });
     secrets.bridgeToken = undefined;
     let stopping = false;
@@ -473,23 +491,24 @@ async function main() {
       if (stopping) return;
       stopping = true;
       clearInterval(stopPoll);
-      await connector.stop();
+      await daemon.stop();
+      await reporter.status(false, { force: true });
+      await Promise.all([reporter.logQueue, reporter.statusQueue]);
       process.exit(exitCode);
     };
     process.on('SIGINT', () => void shutdown(0));
     process.on('SIGTERM', () => void shutdown(0));
-    process.on('uncaughtException', async () => { await connector.record('uncaught_exception'); await shutdown(1); });
-    process.on('unhandledRejection', async () => { await connector.record('unhandled_rejection'); await shutdown(1); });
+    process.on('uncaughtException', async () => { await reporter.record('uncaught_exception'); await shutdown(1); });
+    process.on('unhandledRejection', async () => { await reporter.record('unhandled_rejection'); await shutdown(1); });
     // The local manager requests a clean stop without terminating unrelated processes.
     stopPoll = setInterval(async () => {
       if (await fs.access(path.join(stateDir, 'stop.request')).then(() => true, () => false)) {
         await shutdown(0);
       }
     }, 1000);
-    await connector.start();
   } catch (error) {
     clearInterval(stopPoll);
-    if (connector) await connector.record('startup_failed', { code: /^[A-Z0-9_]{1,48}$/.test(error?.code || '') ? error.code : 'STARTUP_ERROR' });
+    if (reporter) await reporter.record('startup_failed', { code: /^[A-Z0-9_]{1,48}$/.test(error?.code || '') ? error.code : 'STARTUP_ERROR' });
     else {
       try {
         await fs.appendFile(path.join(stateDir, 'connector.log'), JSON.stringify({

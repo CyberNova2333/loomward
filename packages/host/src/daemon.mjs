@@ -5,6 +5,9 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  PLUGIN_SECRETS_ADMIN_SERVICE,
+} from '@loomward/shared';
+import {
   buildWorkspaceRpm,
   createLoomWardKernel,
   loadWorkspaceRootRefs,
@@ -13,7 +16,7 @@ import {
 
 const MAX_RPM_FILE_BYTES = 2 * 1024 * 1024;
 
-async function loadOrBuildFrozenRpm(resolvedRoot, explicitRpm) {
+async function loadOrBuildFrozenRpm(resolvedRoot, explicitRpm, requireFrozenRpm) {
   if (explicitRpm) return explicitRpm;
   const frozenFile = path.join(resolvedRoot, 'rpm.json');
   let handle;
@@ -37,7 +40,7 @@ async function loadOrBuildFrozenRpm(resolvedRoot, explicitRpm) {
     await verifyWorkspaceRpm(resolvedRoot, parsed);
     return parsed;
   } catch (error) {
-    if (error?.code === 'ENOENT') {
+    if (!requireFrozenRpm && error?.code === 'ENOENT') {
       return (await buildWorkspaceRpm(resolvedRoot)).rpm;
     }
     throw error;
@@ -49,6 +52,7 @@ async function loadOrBuildFrozenRpm(resolvedRoot, explicitRpm) {
 export async function startLoomWardDaemon({
   rootDir = path.resolve(import.meta.dirname, '../../..'),
   rpm = null,
+  requireFrozenRpm = false,
   stateDir = null,
   origin = 'http://127.0.0.1',
   allowExec = undefined,
@@ -65,11 +69,13 @@ export async function startLoomWardDaemon({
   enableMcpHub = true,
   mcpHub = null,
   mcpHubBlockedOrigins = [],
+  enableLlmModeration = false,
+  llmModeration = null,
   consoleConfig = null,
   timeoutMs,
 } = {}) {
   const resolvedRoot = path.resolve(rootDir);
-  const frozenRpm = await loadOrBuildFrozenRpm(resolvedRoot, rpm);
+  const frozenRpm = await loadOrBuildFrozenRpm(resolvedRoot, rpm, requireFrozenRpm);
 
   let kernelControl = null;
   const effectiveConsoleConfig = consoleConfig
@@ -81,6 +87,7 @@ export async function startLoomWardDaemon({
           units: kernelControl ? kernelControl.units() : [],
           pendingTrustDecisions: [],
         }),
+        getPluginSecretsAdmin: () => (kernelControl ? kernelControl.getService(PLUGIN_SECRETS_ADMIN_SERVICE) : null),
         ...consoleConfig,
       }
     : {};
@@ -97,6 +104,7 @@ export async function startLoomWardDaemon({
       },
       host: {
         stateDir,
+        workspaceRoots,
         origin: origin || relay?.origin || 'http://127.0.0.1',
         approvals,
         receipts,
@@ -122,21 +130,15 @@ export async function startLoomWardDaemon({
   let relayIngress;
   try {
     const consoleSvc = control.getService('console:loopback');
-    const trustSvc = control.getService('console:trust-origin');
-    const consolePort = consoleSvc?.port || effectiveConsoleConfig?.consolePort || 18797;
-    const trustPort = trustSvc?.port || effectiveConsoleConfig?.trustPort || 18798;
+    const consolePort = consoleSvc?.port || effectiveConsoleConfig?.consolePort || effectiveConsoleConfig?.port || 18797;
     const effectiveBlockedOrigins = [
       ...new Set([
         origin,
         relay?.origin,
         consoleSvc?.url,
-        trustSvc?.url,
         `http://127.0.0.1:${consolePort}`,
         `http://localhost:${consolePort}`,
         `http://[::1]:${consolePort}`,
-        `http://127.0.0.1:${trustPort}`,
-        `http://localhost:${trustPort}`,
-        `http://[::1]:${trustPort}`,
         ...(Array.isArray(mcpHubBlockedOrigins) ? mcpHubBlockedOrigins : []),
       ].filter(Boolean)),
     ];
@@ -153,6 +155,27 @@ export async function startLoomWardDaemon({
           stateDir,
           workspaceRoots,
           blockedOrigins: effectiveBlockedOrigins,
+        },
+        trust: {
+          signed: true,
+          trustLevel: 'official',
+          autoApproveTrusted: true,
+        },
+      });
+    }
+
+    if (enableLlmModeration) {
+      const modContractPath = path.join(resolvedRoot, 'plugins/llm-moderation/src/contract.mjs');
+      const modEntryPath = path.join(resolvedRoot, 'plugins/llm-moderation/src/index.mjs');
+      const { contract: modContract } = await import(pathToFileURL(modContractPath).href);
+      await control.mountExtensionUnit({
+        contract: modContract,
+        load: () => import(pathToFileURL(modEntryPath).href),
+        config: {
+          stateDir,
+          workspaceRoots,
+          blockedOrigins: effectiveBlockedOrigins,
+          ...(llmModeration && typeof llmModeration === 'object' ? llmModeration : {}),
         },
         trust: {
           signed: true,

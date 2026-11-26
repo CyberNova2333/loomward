@@ -118,6 +118,26 @@ test('Worker enforces OAuth, browser-bound consent, PKCE, scopes and an authenti
   socket.addEventListener('message', event => {
     const message = JSON.parse(event.data);
     if (message.body?.method === 'test/hold') { held.push(message); return; }
+    if (message.type === 'request' && message.stream === true && message.body?.params?.arguments?.streamDemo === true) {
+      socket.send(JSON.stringify({
+        type: 'stream_chunk',
+        id: message.id,
+        seq: 0,
+        body: { jsonrpc: '2.0', method: 'notifications/loomward/chunk', params: { chunk: { text: 'hello-' } } },
+      }));
+      socket.send(JSON.stringify({
+        type: 'stream_chunk',
+        id: message.id,
+        seq: 1,
+        body: { jsonrpc: '2.0', method: 'notifications/loomward/chunk', params: { chunk: { text: 'world' } } },
+      }));
+      socket.send(JSON.stringify({
+        type: 'stream_end',
+        id: message.id,
+        body: { jsonrpc: '2.0', id: message.body.id, result: { streamed: true } },
+      }));
+      return;
+    }
     if (message.type === 'request') socket.send(JSON.stringify({ type: 'response', id: message.id, body: 'id' in message.body ? { jsonrpc: '2.0', id: message.body.id, result: { tools: [], echo: message.body.method } } : null }));
   });
   assert.equal((await request('/bridge', { headers: { upgrade: 'websocket', authorization: `Bearer ${secret}` } })).status, 409);
@@ -159,6 +179,39 @@ test('Worker enforces OAuth, browser-bound consent, PKCE, scopes and an authenti
   assert.equal((await request('/mcp', { method: 'POST', headers: readonlyHeaders, body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list' }) })).status, 200);
   assert.equal((await request('/mcp', { method: 'POST', headers: readonlyHeaders, body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'write_file', arguments: {} } }) })).status, 403);
   assert.equal((await request('/mcp', { method: 'POST', headers: readonlyHeaders, body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'exec_command', arguments: {} } }) })).status, 403);
+
+  // Native Streamable SSE (Accept: text/event-stream) delivers sequential chunks and degraded single-response fallback.
+  const sseRes = await request('/mcp', {
+    method: 'POST',
+    headers: { ...readonlyHeaders, accept: 'text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'computer_context', arguments: { streamDemo: true } } }),
+  });
+  assert.equal(sseRes.status, 200);
+  assert.match(sseRes.headers.get('content-type') || '', /^text\/event-stream/);
+  const sseBody = await sseRes.text();
+  const ssePayloads = sseBody
+    .split('\n\n')
+    .filter(Boolean)
+    .map(frame => JSON.parse(frame.replace(/^event: message\ndata: /, '')));
+  assert.equal(ssePayloads.length, 3);
+  assert.equal(ssePayloads[0].params.chunk.text, 'hello-');
+  assert.equal(ssePayloads[1].params.chunk.text, 'world');
+  assert.equal(ssePayloads[2].id, 6);
+  assert.equal(ssePayloads[2].result.streamed, true);
+
+  const fallbackSseRes = await request('/mcp', {
+    method: 'POST',
+    headers: { ...readonlyHeaders, accept: 'text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'computer_context', arguments: {} } }),
+  });
+  assert.equal(fallbackSseRes.status, 200);
+  const fallbackPayloads = (await fallbackSseRes.text())
+    .split('\n\n')
+    .filter(Boolean)
+    .map(frame => JSON.parse(frame.replace(/^event: message\ndata: /, '')));
+  assert.equal(fallbackPayloads.length, 1);
+  assert.equal(fallbackPayloads[0].id, 7);
+  assert.equal(fallbackPayloads[0].result.echo, 'tools/call');
 
   // Security & HTTP boundary regression checks:
   assert.equal((await instance.dispatchFetch(`http://bridge.example.test/healthz`, { redirect: 'manual' })).status, 400);

@@ -264,7 +264,14 @@ function normalizeErrorRpcId(raw) {
   return null;
 }
 
-  async function handleRequest(message, { signal: callerSignal } = {}) {
+  function runStreamSlot(meta, initialPayload) {
+    if (!slots.toolStream || typeof slots.toolStream.run !== 'function') {
+      return Promise.resolve(initialPayload);
+    }
+    return slots.toolStream.run(meta, async () => initialPayload);
+  }
+
+  async function executeDispatch(message, { signal: callerSignal, streaming = false, onChunk = null } = {}) {
     const rpcId = normalizeErrorRpcId(message?.body?.id);
     let authorized;
     try {
@@ -384,6 +391,7 @@ function normalizeErrorRpcId(raw) {
         providerName: ownerEntry.name,
         body: frozenBody,
         authorization: frozenAuth,
+        streaming: Boolean(streaming),
         signal: controller.signal,
       });
 
@@ -460,6 +468,129 @@ function normalizeErrorRpcId(raw) {
 
         controller.signal.throwIfAborted();
 
+        if (streaming && typeof onChunk === 'function') {
+          const startGate = await runStreamSlot({
+            phase: 'stream_start',
+            requestId: message.id,
+            streamId: message.id,
+            toolName: calledName,
+            providerName: ownerEntry.name,
+            arguments: deepFreezeClone(authorized.body.params?.arguments ?? {}),
+            signal: controller.signal,
+          }, { phase: 'stream_start', ok: true });
+          if (startGate?.blocked === true) {
+            throw new ToolBlockedError(startGate.reason || 'Tool stream blocked before start.', {
+              code: startGate.code || 'TOOL_HOOK_BLOCKED',
+              rule: startGate.rule || null,
+            });
+          }
+
+          let inSeq = 0;
+          let outSeq = 0;
+          const emitChunkEnvelope = async chunkPayload => {
+            await onChunk({
+              seq: outSeq++,
+              body: {
+                jsonrpc: '2.0',
+                method: 'notifications/loomward/chunk',
+                params: {
+                  streamId: message.id,
+                  requestId: authorized.body.id ?? null,
+                  chunk: chunkPayload,
+                },
+              },
+            });
+          };
+
+          const handleRawChunk = async rawChunk => {
+            controller.signal.throwIfAborted();
+            const seq = inSeq++;
+            const gated = await runStreamSlot({
+              phase: 'stream_chunk',
+              requestId: message.id,
+              streamId: message.id,
+              toolName: calledName,
+              providerName: ownerEntry.name,
+              seq,
+              signal: controller.signal,
+            }, rawChunk && typeof rawChunk === 'object' ? { ...rawChunk } : { type: 'text', text: String(rawChunk ?? '') });
+            if (gated?.blocked === true) {
+              controller.abort();
+              throw new ToolBlockedError(gated.reason || 'Tool stream chunk blocked by local safety hook.', {
+                code: gated.code || 'TOOL_OUTPUT_BLOCKED',
+                rule: gated.rule || null,
+              });
+            }
+            if (Array.isArray(gated?.releaseChunks)) {
+              for (const rel of gated.releaseChunks) {
+                await emitChunkEnvelope(rel);
+              }
+              return;
+            }
+            if (gated?.heldBack !== true) {
+              await emitChunkEnvelope(gated?.chunk !== undefined ? gated.chunk : gated);
+            }
+          };
+
+          let rpcErrorReply;
+          let rawFinalResult;
+          if (typeof ownerEntry.impl.callToolStream === 'function') {
+            rawFinalResult = await ownerEntry.impl.callToolStream(
+              calledName,
+              authorized.body.params?.arguments ?? {},
+              {
+                signal: controller.signal,
+                authorization: authorized.authorization,
+                requestId: message.id,
+                emit: handleRawChunk,
+              },
+            );
+          } else if (ownerEntry.name === 'sandbox-docker' && typeof ownerEntry.impl.handleRpc === 'function') {
+            const rpcReply = await ownerEntry.impl.handleRpc(authorized.body, {
+              signal: controller.signal,
+              authorization: authorized.authorization,
+              requestId: message.id,
+            });
+            if (!isValidJsonRpcReply(rpcReply, authorized.body.id ?? null)) throw new Error('Invalid sandbox reply.');
+            if (rpcReply.error) rpcErrorReply = rpcReply;
+            else rawFinalResult = rpcReply.result;
+          } else {
+            rawFinalResult = await ownerEntry.impl.callTool(
+              calledName,
+              authorized.body.params?.arguments ?? {},
+              {
+                signal: controller.signal,
+                authorization: authorized.authorization,
+                requestId: message.id,
+              },
+            );
+          }
+
+          const endGate = await runStreamSlot({
+            phase: 'stream_end',
+            requestId: message.id,
+            streamId: message.id,
+            toolName: calledName,
+            providerName: ownerEntry.name,
+            seq: inSeq,
+            signal: controller.signal,
+          }, rpcErrorReply ? { error: rpcErrorReply.error } : { result: rawFinalResult });
+          if (endGate?.blocked === true) {
+            throw new ToolBlockedError(endGate.reason || 'Tool stream tail blocked by local safety hook.', {
+              code: endGate.code || 'TOOL_OUTPUT_BLOCKED',
+              rule: endGate.rule || null,
+            });
+          }
+          if (Array.isArray(endGate?.releaseChunks)) {
+            for (const rel of endGate.releaseChunks) {
+              await emitChunkEnvelope(rel);
+            }
+          }
+          if (rpcErrorReply) return rpcErrorReply;
+          const finalToolResult = endGate?.result !== undefined ? endGate.result : rawFinalResult;
+          return { jsonrpc: '2.0', id: authorized.body.id ?? null, result: finalToolResult };
+        }
+
         if (ownerEntry.name === 'sandbox-docker' && typeof ownerEntry.impl.handleRpc === 'function') {
           return ownerEntry.impl.handleRpc(authorized.body, {
             signal: controller.signal,
@@ -533,9 +664,18 @@ function normalizeErrorRpcId(raw) {
     }
   }
 
+  function handleRequest(message, opts = {}) {
+    return executeDispatch(message, { signal: opts?.signal, streaming: false });
+  }
+
+  function handleStreamRequest(message, opts = {}) {
+    return executeDispatch(message, { signal: opts?.signal, streaming: true, onChunk: opts?.onChunk });
+  }
+
   return Object.freeze({
     ready,
     handleRequest,
+    handleStreamRequest,
     abort,
     abortAll,
     inflightCount: () => inflight.size,

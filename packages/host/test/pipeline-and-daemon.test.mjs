@@ -681,3 +681,185 @@ test('Round 8 sandbox root-plugin applies effective workspaceRoots and allowOutb
   assert.equal(payload.roots.includes(wrongRoot), false);
   assert.equal(payload.sandbox_allow_outbound, false);
 });
+
+test('streamed sandbox RPC errors keep their JSON-RPC error envelope', async t => {
+  const { stateDir, workspace } = await makeTempState(t);
+  const error = { code: -32001, message: 'Workspace unavailable' };
+  const daemon = await startLoomWardDaemon({
+    rootDir: REPO_ROOT,
+    stateDir,
+    workspaceRoots: [workspace],
+    enableMcpHub: false,
+    sandboxRuntime: {
+      handleRpc: async body => ({ jsonrpc: '2.0', id: body.id, error }),
+      close: async () => {},
+    },
+  });
+  t.after(() => daemon.stop());
+  const reply = await daemon.localIngress.dispatchRpcStream(
+    { jsonrpc: '2.0', id: 'context', method: 'tools/call', params: { name: 'computer_context', arguments: {} } },
+    { requestId: 'fixture-stream-error', onChunk: () => assert.fail('Unexpected chunk') },
+  );
+  assert.deepEqual(reply, { jsonrpc: '2.0', id: 'context', error });
+});
+
+test('Host native streaming pipeline enforces approval before streaming, supports tool:stream@1 chunk abort, and isolates plugin:secrets@1 by unitId', async t => {
+  const { PLUGIN_SECRETS_SLOT } = await import('@loomward/shared');
+  const { stateDir, workspace } = await makeTempState(t);
+
+  let streamAborted = false;
+  let approvedCallCount = 0;
+  let extAlphaSecrets = null;
+  let extBetaSecrets = null;
+
+  const sentWsFrames = [];
+  let fakeSocket;
+  const socketFactory = () => {
+    fakeSocket = new EventEmitter();
+    fakeSocket.readyState = 1;
+    fakeSocket.send = data => {
+      try { sentWsFrames.push(JSON.parse(data)); } catch {}
+    };
+    fakeSocket.close = () => { fakeSocket.readyState = 3; fakeSocket.emit('close', 1000); };
+    fakeSocket.terminate = () => { fakeSocket.readyState = 3; fakeSocket.emit('close', 1006); };
+    queueMicrotask(() => fakeSocket.emit('open'));
+    return fakeSocket;
+  };
+
+  const daemon = await startLoomWardDaemon({
+    rootDir: REPO_ROOT,
+    stateDir,
+    origin: 'https://bridge.example.test',
+    workspaceRoots: [workspace],
+    sandboxRuntime: createFakeSandboxRuntime(),
+    enableMcpHub: false,
+    approvals: {
+      async authorize(body) {
+        const allow = body.params?.arguments?.approved === true;
+        if (allow) approvedCallCount += 1;
+        return { approved: allow, id: 'ap-stream-1', expiresAt: Date.now() + 60_000 };
+      },
+    },
+    relay: {
+      origin: 'https://bridge.example.test',
+      bridgeToken: 'synthetic-token-value-1234567890abcdef',
+      proxyProvider: () => [null],
+      socketFactory,
+    },
+    consoleConfig: {},
+  });
+  t.after(() => daemon.stop());
+
+  const admin = daemon.control.getService('host:plugin-secrets-admin');
+  admin.setSecrets('stream-ext', { LLM_KEY: 'secret-for-stream-ext' });
+  admin.setSecrets('other-ext', { LLM_KEY: 'secret-for-other-ext' });
+
+  await daemon.control.mountExtensionUnit({
+    contract: {
+      schemaVersion: 1,
+      id: 'stream-ext',
+      kind: 'extension-plugin',
+      version: '3.0.0-alpha.0',
+      executionBoundary: 'out-of-process',
+      provides: ['tool:streaming-demo'],
+      consumes: ['tool:provider@1', 'tool:stream@1', PLUGIN_SECRETS_SLOT],
+      registers: [{ slot: 'tool:provider@1', name: 'streaming-demo' }],
+      writes: { hooks: [{ slot: 'tool:stream@1', phase: 'after' }] },
+    },
+    trust: { autoApproveTrusted: true },
+    load: () => ({
+      name: 'stream-ext',
+      apply(ctx) {
+        extAlphaSecrets = ctx.get(PLUGIN_SECRETS_SLOT);
+        ctx.get('tool:provider@1').register('streaming-demo', {
+          ownsTool: name => name === 'mcp__streaming__gen',
+          getToolScopes: () => new Map([['mcp__streaming__gen', ['computer:read']]]),
+          checkToolEnabled: () => ({ enabled: true }),
+          listTools: () => [{ name: 'mcp__streaming__gen', inputSchema: { type: 'object', properties: {} } }],
+          async callToolStream(_name, args, { signal, emit }) {
+            signal.addEventListener('abort', () => { streamAborted = true; }, { once: true });
+            await emit({ type: 'text', text: 'chunk-0' });
+            if (signal.aborted) return { aborted: true };
+            await emit({ type: 'text', text: args.poisonChunk ? 'BAD_CHUNK' : 'chunk-1' });
+            return { content: [{ type: 'text', text: 'stream-complete' }] };
+          },
+          async callTool() {
+            return { content: [{ type: 'text', text: 'sync-complete' }] };
+          },
+        });
+        ctx.get('tool:stream@1').hook('after', (chunkOut, meta) => {
+          if (meta.phase === 'stream_chunk' && chunkOut?.text === 'BAD_CHUNK') {
+            return { blocked: true, code: 'STREAM_BLOCKED', rule: 'ST-1', reason: 'Stream chunk violated safety rule.' };
+          }
+          return chunkOut;
+        });
+      },
+    }),
+  });
+
+  await daemon.control.mountExtensionUnit({
+    contract: {
+      schemaVersion: 1,
+      id: 'other-ext',
+      kind: 'extension-plugin',
+      version: '3.0.0-alpha.0',
+      executionBoundary: 'out-of-process',
+      consumes: [PLUGIN_SECRETS_SLOT],
+    },
+    trust: { autoApproveTrusted: true },
+    load: () => ({
+      name: 'other-ext',
+      apply(ctx) {
+        extBetaSecrets = ctx.get(PLUGIN_SECRETS_SLOT);
+      },
+    }),
+  });
+
+  // Extension namespace secret isolation:
+  assert.equal(extAlphaSecrets.getSecret('LLM_KEY'), 'secret-for-stream-ext');
+  assert.equal(extBetaSecrets.getSecret('LLM_KEY'), 'secret-for-other-ext');
+  assert.deepEqual(extBetaSecrets.buildChildEnvBindings({ MY_ENV: 'LLM_KEY' }), { MY_ENV: 'secret-for-other-ext' });
+  const perm = (await fs.stat(path.join(stateDir, 'plugin-secrets', 'stream-ext.secrets.json'))).mode & 0o777;
+  assert.equal(perm, 0o600);
+
+  // 1. Unapproved streaming request fails BEFORE tool runs or emits chunks.
+  const emittedUnapproved = [];
+  const unapprovedRes = await daemon.localIngress.dispatchRpcStream(
+    { jsonrpc: '2.0', id: 's-unapproved', method: 'tools/call', params: { name: 'mcp__streaming__gen', arguments: { approved: false } } },
+    { requestId: 'req_stream_unapproved', onChunk: c => emittedUnapproved.push(c) },
+  );
+  assert.equal(unapprovedRes.error.data.code, 'LOCAL_APPROVAL_REQUIRED');
+  assert.equal(emittedUnapproved.length, 0);
+
+  // 2. Approved healthy streaming emits chunks + final result cleanly via WSS relay ingress.
+  assert.ok(fakeSocket);
+  fakeSocket.emit('message', Buffer.from(JSON.stringify({
+    type: 'request',
+    id: 'ws-stream-ok',
+    issuedAt: Date.now(),
+    deadline: Date.now() + 30_000,
+    stream: true,
+    authorization: { userId: 'owner', clientId: 'test-client', scope: ['computer:read', 'computer:write', 'computer:execute'] },
+    body: { jsonrpc: '2.0', id: 's-ok', method: 'tools/call', params: { name: 'mcp__streaming__gen', arguments: { approved: true } } },
+  })), false);
+  const okDeadline = Date.now() + 2000;
+  while (!sentWsFrames.some(f => f.id === 'ws-stream-ok' && f.type === 'stream_end') && Date.now() < okDeadline) {
+    await new Promise(r => setTimeout(r, 15));
+  }
+  const okChunks = sentWsFrames.filter(f => f.id === 'ws-stream-ok' && f.type === 'stream_chunk');
+  const okEnd = sentWsFrames.find(f => f.id === 'ws-stream-ok' && f.type === 'stream_end');
+  assert.equal(okChunks.length, 2);
+  assert.equal(okChunks[0].body.params.chunk.text, 'chunk-0');
+  assert.equal(okEnd.body.result.content[0].text, 'stream-complete');
+  assert.equal(approvedCallCount, 1);
+
+  // 3. Mid-stream block aborts provider immediately after forwarding only safe prior chunks.
+  const emittedBlocked = [];
+  const blockedRes = await daemon.localIngress.dispatchRpcStream(
+    { jsonrpc: '2.0', id: 's-block', method: 'tools/call', params: { name: 'mcp__streaming__gen', arguments: { approved: true, poisonChunk: true } } },
+    { requestId: 'req_stream_block', onChunk: c => emittedBlocked.push(c) },
+  );
+  assert.equal(blockedRes.error.data.code, 'STREAM_BLOCKED');
+  assert.equal(emittedBlocked.length, 1);
+  assert.equal(streamAborted, true);
+});

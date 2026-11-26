@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // This file is part of LoomWard (织盾) and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
-import { VAULT_SLOT } from '@loomward/shared';
+import { PLUGIN_SECRETS_ADMIN_SERVICE, PLUGIN_SECRETS_SLOT, VAULT_SLOT } from '@loomward/shared';
 import { LocalApprovals } from '../../../local/approvals.mjs';
 import { RequestReceipts, TransientReceipts, StopReceipts } from '../../../local/receipts.mjs';
 import { createHostVaultBackend } from './vault.mjs';
+import { createPluginSecretsStore } from './plugin-secrets.mjs';
 import { ToolBlockedError, createCapabilityPolicyRule, createToolDispatchPipeline } from './pipeline.mjs';
 import { createCloudflareRelayIngress } from './ingress-relay.mjs';
 import { createLocalMcpIngress } from './ingress-local.mjs';
 
 export { contract } from './contract.mjs';
 export { createHostVaultBackend } from './vault.mjs';
+export { createPluginSecretsStore } from './plugin-secrets.mjs';
 export { ToolBlockedError, createCapabilityPolicyRule, createToolDispatchPipeline } from './pipeline.mjs';
 export { createCloudflareRelayIngress } from './ingress-relay.mjs';
 export { createLocalMcpIngress } from './ingress-local.mjs';
@@ -33,6 +35,7 @@ export function apply(ctx, config = {}) {
   const approvalSlot = ctx.get('approval:channel@1');
   const providerSlot = ctx.get('tool:provider@1');
   const invokeSlot = ctx.get('tool:invoke@1');
+  const streamSlot = ctx.get('tool:stream@1');
   const ingressSlot = ctx.get('gateway:ingress@1');
 
   const vaultBackend = config.vaultBackend ?? createHostVaultBackend({
@@ -58,10 +61,18 @@ export function apply(ctx, config = {}) {
   const controlReceipts = config.controlReceipts ?? new TransientReceipts();
   const stopReceipts = config.stopReceipts ?? new StopReceipts();
 
+  const pluginSecretsStore = createPluginSecretsStore({
+    stateDir,
+    workspaceRoots: Array.isArray(config.workspaceRoots) ? config.workspaceRoots : [],
+    requirePrivateState: config.requirePrivateState !== false,
+    onSecretsChanged: config.onPluginSecretsChanged,
+  });
+
   const pipeline = createToolDispatchPipeline({
     slots: {
       toolProvider: providerSlot,
       toolInvoke: invokeSlot,
+      toolStream: streamSlot,
       policyRule: policySlot,
       approvalChannel: approvalSlot,
     },
@@ -115,6 +126,8 @@ export function apply(ctx, config = {}) {
   }));
 
   ctx.provide('host:dispatch', pipeline);
+  ctx.provide(PLUGIN_SECRETS_SLOT, pluginSecretsStore.binderService);
+  ctx.provide(PLUGIN_SECRETS_ADMIN_SERVICE, pluginSecretsStore.adminView);
 
   ctx.provide('host:platform', Object.freeze({
     status: 'ready',

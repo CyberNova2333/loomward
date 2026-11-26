@@ -4,6 +4,10 @@
 export const MAX_RPC_BYTES = 1024 * 1024;
 export const MAX_REPLY_BYTES = 2 * 1024 * 1024;
 export const MAX_WS_PAYLOAD_BYTES = 1_200_000;
+export const MAX_STREAM_CHUNKS = 512;
+export const MAX_STREAM_FRAME_BYTES = 1_048_576;
+export const MAX_STREAM_TOTAL_BYTES = 8 * 1024 * 1024;
+export const STREAM_FRAME_TYPES = Object.freeze(['stream_chunk', 'stream_end']);
 export const HEARTBEAT_INTERVAL_MS = 20_000;
 export const HEARTBEAT_MAX_AGE_MS = 65_000;
 export const FIRST_HEARTBEAT_GRACE_MS = 10_000;

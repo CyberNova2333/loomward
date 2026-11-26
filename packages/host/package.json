@@ -9,6 +9,7 @@
     ".": "./src/index.mjs",
     "./contract": "./src/contract.mjs",
     "./vault": "./src/vault.mjs",
+    "./plugin-secrets": "./src/plugin-secrets.mjs",
     "./pipeline": "./src/pipeline.mjs",
     "./ingress-relay": "./src/ingress-relay.mjs",
     "./ingress-local": "./src/ingress-local.mjs",
@@ -21,7 +22,7 @@
     "ws": "8.22.0"
   },
   "scripts": {
-    "check": "node --check src/index.mjs && node --check src/contract.mjs && node --check src/vault.mjs && node --check src/pipeline.mjs && node --check src/ingress-relay.mjs && node --check src/ingress-local.mjs && node --check src/daemon.mjs",
+    "check": "node --check src/index.mjs && node --check src/contract.mjs && node --check src/vault.mjs && node --check src/plugin-secrets.mjs && node --check src/pipeline.mjs && node --check src/ingress-relay.mjs && node --check src/ingress-local.mjs && node --check src/daemon.mjs",
     "test": "node --test test/*.test.mjs"
   }
 }

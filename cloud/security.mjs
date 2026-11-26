@@ -3,6 +3,9 @@
 /** Shared, side-effect-free checks used at the public trust boundary. */
 export const MAX_RPC_BYTES = 1024 * 1024;
 export const MAX_REPLY_BYTES = 2 * 1024 * 1024;
+export const MAX_STREAM_CHUNKS = 512;
+export const MAX_STREAM_FRAME_BYTES = 1_048_576;
+export const MAX_STREAM_TOTAL_BYTES = 8 * 1024 * 1024;
 export const COMPUTER_SCOPES = ['computer:read', 'computer:write', 'computer:execute'];
 export const OAUTH_SCOPES = [...COMPUTER_SCOPES, 'offline_access'];
 export const PROTOCOL_VERSIONS = new Set(['2025-03-26', '2025-06-18', '2025-11-25']);

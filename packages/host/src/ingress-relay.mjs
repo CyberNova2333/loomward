@@ -6,6 +6,9 @@ import { proxyCandidates } from '../../../local/connector.mjs';
 
 const MAX_REPLY_BYTES = 2 * 1024 * 1024;
 const MAX_WS_PAYLOAD_BYTES = 1_200_000;
+const MAX_STREAM_CHUNKS = 512;
+const MAX_STREAM_FRAME_BYTES = 1_048_576;
+const MAX_STREAM_TOTAL_BYTES = 8 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const HEARTBEAT_MAX_AGE_MS = 65_000;
 
@@ -136,6 +139,66 @@ export function createCloudflareRelayIngress({
         };
         socketRequests.add(entry);
         try {
+          if (message.stream === true && typeof pipeline.handleStreamRequest === 'function') {
+            let sentChunks = 0;
+            let sentBytes = 0;
+            let streamAborted = false;
+            const body = await pipeline.handleStreamRequest(message, {
+              signal: reqController.signal,
+              onChunk: async ({ seq, body: chunkBody }) => {
+                if (streamAborted || socket.readyState !== WebSocket.OPEN) return;
+                let frameStr;
+                try {
+                  frameStr = JSON.stringify({ type: 'stream_chunk', id: message.id, seq, body: chunkBody });
+                } catch {
+                  streamAborted = true;
+                  reqController.abort();
+                  return;
+                }
+                const bytes = Buffer.byteLength(frameStr, 'utf8');
+                if (
+                  sentChunks >= MAX_STREAM_CHUNKS
+                  || bytes > MAX_STREAM_FRAME_BYTES
+                  || sentBytes + bytes > MAX_STREAM_TOTAL_BYTES
+                ) {
+                  streamAborted = true;
+                  reqController.abort();
+                  return;
+                }
+                sentChunks += 1;
+                sentBytes += bytes;
+                socket.send(frameStr);
+              },
+            });
+            if (socket.readyState !== WebSocket.OPEN) return;
+            let encodedEnd;
+            try {
+              encodedEnd = JSON.stringify({ type: 'stream_end', id: message.id, body });
+            } catch {
+              encodedEnd = JSON.stringify({
+                type: 'stream_end',
+                id: message.id,
+                body: {
+                  jsonrpc: '2.0',
+                  id: message.body?.id ?? null,
+                  error: { code: -32603, message: 'Failed to serialize stream terminal response.' },
+                },
+              });
+            }
+            if (Buffer.byteLength(encodedEnd) > MAX_REPLY_BYTES) {
+              encodedEnd = JSON.stringify({
+                type: 'stream_end',
+                id: message.id,
+                body: {
+                  jsonrpc: '2.0',
+                  id: message.body?.id ?? null,
+                  error: { code: -32603, message: 'Tool stream result exceeds the bridge limit; request a smaller range' },
+                },
+              });
+            }
+            socket.send(encodedEnd);
+            return;
+          }
           const body = await pipeline.handleRequest(message, { signal: reqController.signal });
           if (socket.readyState !== WebSocket.OPEN) return;
           // Note: when body === undefined (e.g., notifications/initialized), JSON.stringify omits `body`

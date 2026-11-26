@@ -405,9 +405,19 @@ const mcpHandler = {
     const scopes = requiredFor(body);
     if (context.props?.userId !== 'owner') return json({ error: 'Access denied.' }, 403);
     if (!scopes.every(scope => context.auth.scope.includes(scope))) return insufficientScope(context.auth, scopes);
+    const accept = (request.headers.get('accept') || '').toLowerCase();
+    const wantsExclusiveSse = accept.includes('text/event-stream') && !accept.includes('application/json');
+    const explicitStreamMeta = Boolean(
+      body.method === 'tools/call'
+      && (body.params?._meta?.loomwardStream === true || request.headers.get('x-loomward-stream') === '1'),
+    );
+    const wantsStream = !Array.isArray(body)
+      && 'id' in body
+      && body.method === 'tools/call'
+      && (wantsExclusiveSse || (accept.includes('text/event-stream') && explicitStreamMeta));
     // This response is internal to the AUTH Durable Object, never exposed as MCP output.
     // The Worker sends it to RELAY only after the serialized authentication phase ends.
-    return json({ body, authorization: { userId: 'owner', clientId: context.auth.clientId, scope: context.auth.scope } });
+    return json({ body, wantsStream, authorization: { userId: 'owner', clientId: context.auth.clientId, scope: context.auth.scope } });
   },
 };
 

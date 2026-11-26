@@ -424,7 +424,7 @@ test('POSIX host-cli setup and hardened install produce 0700 wrappers and reject
   assert.equal(stopped.stopped, true);
 });
 
-test('POSIX supervisor start, status, single-instance lock, and graceful stop work via generated launchers', { skip: !posix, timeout: 30000 }, async t => {
+test('POSIX supervisor start, status, single-instance lock, and graceful stop work via generated launchers', { skip: !posix, timeout: 90000 }, async t => {
   const execFile = promisify(childProcess.execFile);
   const base = await homeFixture(t);
   const workspace = path.join(base, 'workspace');
@@ -497,15 +497,11 @@ esac
   }
   assert.deepEqual(await fs.readFile(installed.runtime + '.installation.json'), originalManifest);
 
-  // Provide minimal prod stubs in the isolated test release so connector.mjs boots offline.
-  const wsDir = path.join(installed.runtime, 'node_modules', 'ws');
-  const proxyDir = path.join(installed.runtime, 'node_modules', 'https-proxy-agent');
-  await fs.mkdir(wsDir, { recursive: true });
-  await fs.mkdir(proxyDir, { recursive: true });
-  await fs.writeFile(path.join(wsDir, 'package.json'), '{"name":"ws","type":"module","main":"index.mjs"}');
-  await fs.writeFile(path.join(wsDir, 'index.mjs'), 'import { EventEmitter } from "node:events"; export default class WebSocket extends EventEmitter { static OPEN=1; static CONNECTING=0; static CLOSED=3; readyState=3; close(){} terminate(){} }');
-  await fs.writeFile(path.join(proxyDir, 'package.json'), '{"name":"https-proxy-agent","type":"module","main":"index.mjs"}');
-  await fs.writeFile(path.join(proxyDir, 'index.mjs'), 'export class HttpsProxyAgent {}');
+  // Install the same workspace graph the private release uses, from the local pnpm store.
+  const pnpmCli = path.resolve(import.meta.dirname, '../node_modules/pnpm/bin/pnpm.mjs');
+  await execFile(process.execPath, [pnpmCli, 'install', '--offline', '--frozen-lockfile', '--prod', '--ignore-scripts'], {
+    cwd: installed.runtime, timeout: 60000,
+  });
 
   t.after(async () => {
     await stopConnector({ stateDir }).catch(() => {});

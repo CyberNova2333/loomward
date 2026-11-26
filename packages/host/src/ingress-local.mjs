@@ -85,6 +85,57 @@ export function createLocalMcpIngress({
         activeControllers.delete(reqController);
       }
     },
+    async dispatchRpcStream(
+      body,
+      {
+        requestId = `local_${crypto.randomUUID().replaceAll('-', '')}`,
+        clientId: callerClientId = clientId,
+        scope = defaultScopes,
+        timeoutMs = 60_000,
+        signal,
+        onChunk,
+      } = {},
+    ) {
+      if (!running) {
+        const rawId = body?.id;
+        const safeId = rawId === null || (typeof rawId === 'number' && Number.isFinite(rawId)) || (typeof rawId === 'string' && rawId.length <= 256)
+          ? rawId
+          : null;
+        return {
+          jsonrpc: '2.0',
+          id: safeId,
+          error: { code: -32001, message: 'Local ingress is not running.' },
+        };
+      }
+      const now = Date.now();
+      const rawTimeout = Number(timeoutMs);
+      const boundedTimeout = Math.max(1000, Math.min(100_000, Number.isFinite(rawTimeout) ? Math.trunc(rawTimeout) : 60_000));
+      const envelope = {
+        type: 'request',
+        id: requestId,
+        issuedAt: now,
+        deadline: now + boundedTimeout,
+        authorization: {
+          userId: 'owner',
+          clientId: callerClientId,
+          scope: [...scope],
+        },
+        body,
+      };
+      const reqController = new AbortController();
+      const onCallerAbort = () => reqController.abort();
+      if (signal) {
+        if (signal.aborted) reqController.abort();
+        else signal.addEventListener('abort', onCallerAbort, { once: true });
+      }
+      activeControllers.add(reqController);
+      try {
+        return await pipeline.handleStreamRequest(envelope, { signal: reqController.signal, onChunk });
+      } finally {
+        if (signal) signal.removeEventListener('abort', onCallerAbort);
+        activeControllers.delete(reqController);
+      }
+    },
     health() {
       return { running, kind: 'local-direct' };
     },

@@ -30,6 +30,9 @@
 
 - **单机独占与心跳窗口**：同一时刻仅允许一条处于有效窗口内的连接器 WebSocket；新连接获得 `FIRST_HEARTBEAT_GRACE`（`10000` 毫秒）宽限期，收到自动响应的 ping/pong 心跳帧后进入 `HEARTBEAT_MAX_AGE`（`65000` 毫秒）在线期，并由 Durable Object Alarm 到期清理失活连接。
 - **停止通道隔离与取消匹配**：中继把 `stop_command` 划入独立通道（上限 `4` 并发，单客户端最多 `2` 个），其余普通 MCP 请求共享 `16` 并发槽位；超时时间固定为 `110000` 毫秒，超时返回 HTTP `504` 并提示操作可能已执行、切勿盲目重试。`notifications/cancelled` 通知按 `(clientId, requestId)` 精确匹配待决请求，阻止跨客户端误取消。
+- **原生流式 SSE / WebSocket 分片通道**：
+  - 当客户端在 `POST /mcp` 上独占请求 `Accept: text/event-stream` 或显式附带 `_meta.loomwardStream === true` / `x-loomward-stream: 1` 且调用单体 `tools/call` 时，云端入口将 `wantsStream: true` 传给 `BridgeRelay`。[中继状态与活性判定](../../cloud/relay.mjs)随后返回 `text/event-stream` 持久流，并通过 WebSocket 发送 `{ stream: true }` 请求信封，顺序接收宿主机 [中继入口](../../packages/host/src/ingress-relay.mjs)与[调度流水线](../../packages/host/src/pipeline.mjs) 经 `tool:stream@1` 暂留校验后的 `stream_chunk`（含单调递增 `seq` 与上限 `MAX_STREAM_CHUNKS=512`、`MAX_STREAM_FRAME_BYTES=1 MiB`、`MAX_STREAM_TOTAL_BYTES=8 MiB` 配额）及 `stream_end` 终帧；客户端断开或中途审查阻断会下发 `{ type: 'cancel' }` 触发本地 `AbortController` 立即停产。
+  - 受保护的 Windows 和 POSIX 启动器经 [连接器入口](../../local/connector.mjs) 加载私有发布目录内的宿主守护进程。启动时校验冻结的 RPM，再将请求交给同一条审批和流式调度链。仍使用旧版 `BridgeConnector` 的客户端可以回传单帧 `response`，中继会将其转换为一条 SSE 事件后关闭连接。
 
 ## 请求信封与常见边界行为
 
