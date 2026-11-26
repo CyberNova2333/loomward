@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import childProcess, { execFile } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { loadSecrets, proxyCandidates } from '../local/connector.mjs';
@@ -51,43 +52,52 @@ async function fixture(t) {
       [IO.File]::WriteAllText(${quoted(path.join(state, 'secrets.dpapi'))},[Convert]::ToBase64String($cipher));
     } finally {[Array]::Clear($plain,0,$plain.Length)}`);
   const moduleRoot = path.join(base, 'modules');
-  const markers = [];
+  // These discoverable manifests contain no executable module. Any attempt to load
+  // one fails because its declared fixture assembly does not exist.
   for (const [module, command] of [['Microsoft.PowerShell.Utility', 'Add-Type'], ['Microsoft.PowerShell.Management', 'Get-ItemProperty']]) {
     const directory = path.join(moduleRoot, module);
     await fs.mkdir(directory, { recursive: true });
-    const marker = path.join(base, `${command}-loaded.txt`);
-    markers.push(marker);
-    await fs.writeFile(path.join(directory, `${module}.psd1`), `@{ RootModule='${module}.psm1'; ModuleVersion='99.0.0'; FunctionsToExport=@('${command}'); CmdletsToExport=@() }`);
-    await fs.writeFile(path.join(directory, `${module}.psm1`), `[IO.File]::WriteAllText(${quoted(marker)},'synthetic module loaded'); function ${command} { throw 'SYNTHETIC_UNTRUSTED_MODULE' }`);
+    await fs.writeFile(path.join(directory, `${module}.psd1`),
+      `@{ ModuleVersion='99.0.0'; RequiredAssemblies=@('unavailable-fixture.dll'); CmdletsToExport=@('${command}') }`);
   }
   const poisonedEnv = { ...process.env, PSModulePath: `${moduleRoot};${safeEnv.PSModulePath}` };
-  return { base, state, expected, markers, poisonedEnv };
+  return { base, state, expected, poisonedEnv };
 }
 
 test('credential subprocess and proxy discovery ignore inherited module paths', { skip: !windows, timeout: 80000 }, async t => {
-  const { state, expected, markers, poisonedEnv } = await fixture(t);
+  const { state, expected, poisonedEnv } = await fixture(t);
   // Confirm the fixture is discoverable without importing it into the control shell.
   const { stdout } = await ps("Get-Module -ListAvailable -Name Microsoft.PowerShell.Utility | ForEach-Object { $_.Version.ToString() }", poisonedEnv);
   assert.ok(stdout.trim().split(/\s+/).includes('99.0.0'));
+  const launches = [];
+  const nativeExec = childProcess.execFileSync;
+  const observer = t.mock.method(childProcess, 'execFileSync', (file, args, options) => {
+    launches.push({ file, cwd: options.cwd, modulePath: options.env?.PSModulePath, script: args.includes('-File') });
+    return nativeExec(file, args, options);
+  });
+  syncBuiltinESMExports();
   const previous = process.env.PSModulePath;
   process.env.PSModulePath = poisonedEnv.PSModulePath;
   try {
     assert.deepEqual(loadSecrets(state), expected);
     assert.ok(Array.isArray(proxyCandidates()));
   } finally {
+    observer.mock.restore();
+    syncBuiltinESMExports();
     if (previous === undefined) delete process.env.PSModulePath;
     else process.env.PSModulePath = previous;
   }
-  for (const marker of markers) assert.equal(await fs.access(marker).then(() => true, () => false), false, 'No untrusted module may run');
+  assert.deepEqual(launches, [true, false].map(script => ({
+    file: shell, cwd: shellHome, modulePath: safeEnv.PSModulePath, script,
+  })));
 });
 
 test('direct credential export binds system modules before loading DPAPI data', { skip: !windows, timeout: 80000 }, async t => {
-  const { state, expected, markers, poisonedEnv } = await fixture(t);
+  const { state, expected, poisonedEnv } = await fixture(t);
   const { stdout, stderr } = await exec(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned', '-File', secretScript,
     '-Action', 'Export', '-StateDir', state], { env: poisonedEnv, windowsHide: true, timeout: 20000, maxBuffer: 65536 });
   assert.equal(stderr, '');
   assert.deepEqual(JSON.parse(stdout), expected);
-  for (const marker of markers) assert.equal(await fs.access(marker).then(() => true, () => false), false);
 });
 
 test('credential failures expose neither captured shell streams nor raw parse errors', { skip: !windows, timeout: 60000 }, async t => {
@@ -101,7 +111,7 @@ test('credential failures expose neither captured shell streams nor raw parse er
 });
 
 test('credential creation protects the destination and refuses a linked state path', { skip: !windows, timeout: 80000 }, async t => {
-  const { base, markers, poisonedEnv } = await fixture(t);
+  const { base, poisonedEnv } = await fixture(t);
   const state = path.join(base, 'new-state');
   const runCreate = directory => exec(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned', '-File', secretScript,
     '-Action', 'Create', '-StateDir', directory], { env: poisonedEnv, windowsHide: true, timeout: 20000, maxBuffer: 65536 });
@@ -109,7 +119,6 @@ test('credential creation protects the destination and refuses a linked state pa
   assert.equal(created.stderr, '');
   assert.ok((await fs.stat(path.join(state, 'secrets.dpapi'))).size > 0);
   await ps(`$ErrorActionPreference='Stop'; . ${quoted(safetyScript)}; $null=Assert-PrivateState ${quoted(state)}`);
-  for (const marker of markers) assert.equal(await fs.access(marker).then(() => true, () => false), false);
   const target = path.join(base, 'empty-target'), link = path.join(base, 'linked-state');
   await fs.mkdir(target);
   const permission = async () => (await ps(`$ErrorActionPreference='Stop'; . ${quoted(safetyScript)}; (Get-Acl -LiteralPath ${quoted(target)}).Sddl`)).stdout.trim();

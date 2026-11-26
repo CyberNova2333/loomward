@@ -147,11 +147,9 @@ test('private-state checks load the Windows core module instead of an inherited 
   const state = path.join(base, 'state');
   const modules = path.join(base, 'shadow-modules');
   const shadow = path.join(modules, 'Microsoft.PowerShell.Security');
-  const marker = path.join(base, 'shadow-loaded.txt');
   await fs.mkdir(state);
   await fs.mkdir(shadow, { recursive: true });
-  await fs.writeFile(path.join(shadow, 'Microsoft.PowerShell.Security.psd1'), "@{ RootModule='Microsoft.PowerShell.Security.psm1'; ModuleVersion='99.0.0'; FunctionsToExport=@('Get-Acl'); CmdletsToExport=@() }");
-  await fs.writeFile(path.join(shadow, 'Microsoft.PowerShell.Security.psm1'), `[IO.File]::WriteAllText(${quoted(marker)},'untrusted module loaded'); throw 'SHADOW_MODULE_MUST_NOT_LOAD'; function Get-Acl { throw 'SHADOW_MODULE_MUST_NOT_LOAD' }`);
+  await fs.writeFile(path.join(shadow, 'Microsoft.PowerShell.Security.psd1'), "@{ ModuleVersion='99.0.0'; RequiredAssemblies=@('unavailable-fixture.dll'); CmdletsToExport=@('Get-Acl') }");
   // Check that the fixture is discoverable without executing its module body.
   const listing = await exec(shell, ['-NoProfile', '-NonInteractive', '-Command',
     'Get-Module -ListAvailable -Name Microsoft.PowerShell.Security | ForEach-Object { $_.Path }'], {
@@ -171,8 +169,8 @@ test('private-state checks load the Windows core module instead of an inherited 
     $env:PSModulePath=${quoted(modules)}+';'+$env:PSModulePath;
     . ${quoted(helper)};
     $null=Assert-PrivateState ${quoted(state)};
-    [Console]::Write('SAFE_STATE');`;
+    [Console]::Write((Get-Command Get-Acl -CommandType Cmdlet).Module.Path);`;
   const outcome = await exec(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned', '-Command', script], { windowsHide: true, timeout: 15000, maxBuffer: 65536 });
-  assert.equal(outcome.stdout.trim(), 'SAFE_STATE');
-  assert.equal(await fs.access(marker).then(() => true, () => false), false, 'The shadow module must never execute');
+  assert.equal(path.normalize(outcome.stdout.trim()).toLowerCase(),
+    path.join(path.dirname(shell), 'Modules', 'Microsoft.PowerShell.Security', 'Microsoft.PowerShell.Security.psd1').toLowerCase());
 });
