@@ -83,7 +83,13 @@ const probeHealth = async origin => {
 const root = path.resolve(import.meta.dirname, '..');
 const stateDir = defaultStateDirectory();
 const config = JSON.parse(await fs.readFile(path.join(stateDir, 'config.json'), 'utf8'));
-const installation = JSON.parse(await fs.readFile(path.join(stateDir, 'installation.json'), 'utf8'));
+if (!path.isAbsolute(config.sourceRoot) || path.relative(stateDir, path.dirname(config.sourceRoot)) !== '' || !/^runtime-\d{8}-\d{6}-[a-f0-9]{8}$/.test(path.basename(config.sourceRoot))) throw new Error('Invalid active release');
+const manifestPath = config.sourceRoot + '.installation.json';
+const installation = JSON.parse(await fs.readFile(manifestPath, 'utf8').catch(error => {
+  if (error.code !== 'ENOENT') throw error;
+  return fs.readFile(path.join(stateDir, 'installation.json'), 'utf8');
+}));
+if (!path.isAbsolute(installation.runtime) || path.relative(installation.runtime, config.sourceRoot) !== '') throw new Error('Active installation manifest mismatch');
 const acceptance = JSON.parse(await fs.readFile(path.join(root, 'artifacts/acceptance-v2-result.json'), 'utf8'));
 const lifecycle = JSON.parse(await fs.readFile(path.join(root, 'artifacts/lifecycle-v2.json'), 'utf8'));
 const testOutput = await fs.readFile(path.join(root, process.env.AGENTDOCK_TEST_REPORT || 'artifacts/fix-round5/final-tests.txt'), 'utf8');

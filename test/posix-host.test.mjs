@@ -450,7 +450,7 @@ esac
 `, { mode: 0o755 });
 
   setupHost({ stateDir, roots: [workspace], origin: 'http://127.0.0.1:1', secretBackend: 'file' });
-  const installed = await installHardened({
+  const options = {
     stateDir,
     workspace,
     docker: fakeDocker,
@@ -464,7 +464,38 @@ esac
       version: '24.22.1',
     }),
     dockerInspector: () => ({ endpoint: 'unix:///var/run/docker.sock', imageId: `sha256:${'d'.repeat(64)}` }),
-  });
+  };
+  const installed = await installHardened(options);
+
+  // Simulate an installation predating per-release manifests and stable dispatch.
+  const configFile = path.join(stateDir, 'config.json');
+  const existing = JSON.parse(await fs.readFile(configFile));
+  existing.allowExec = false;
+  existing.webuiPort = 19001;
+  existing.sandbox.allowOutbound = false;
+  await fs.writeFile(configFile, JSON.stringify(existing));
+  const originalConfig = await fs.readFile(configFile);
+  const originalManifest = await fs.readFile(path.join(stateDir, 'installation.json'));
+  await fs.unlink(installed.runtime + '.installation.json');
+  await fs.writeFile(path.join(stateDir, 'start'), `#!/bin/sh\nexec "${fakeNode}" "${installed.runtime}/scripts/host-cli.mjs" start --state-dir "${stateDir}" "$@"\n`);
+  const policyFiles = [SECRET_META_FILE, SECRET_DATA_FILE, 'capabilities.json', 'webui-auth.json', 'approvals/fixture.request.json'];
+  await fs.mkdir(path.join(stateDir, 'approvals'), { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(stateDir, 'webui-auth.json'), '{"passkeys":[{"id":"acceptance-fixture"}]}', { mode: 0o600 });
+  await fs.writeFile(path.join(stateDir, 'approvals/fixture.request.json'), '{}', { mode: 0o600 });
+  const hashes = () => policyFiles.map(file => sha256FileSync(path.join(stateDir, file)));
+  const before = hashes();
+  for (const target of ['status', 'installation.json', 'config.json']) {
+    const rename = fsSync.renameSync;
+    const fault = t.mock.method(fsSync, 'renameSync', (src, dst) => {
+      if (dst === path.join(stateDir, target)) throw new Error('fixture publication interruption');
+      return rename(src, dst);
+    });
+    try { await assert.rejects(installHardened(options), /fixture publication interruption/); }
+    finally { fault.mock.restore(); }
+    assert.deepEqual(await fs.readFile(configFile), originalConfig);
+    assert.deepEqual(hashes(), before);
+  }
+  assert.deepEqual(await fs.readFile(installed.runtime + '.installation.json'), originalManifest);
 
   // Provide minimal prod stubs in the isolated test release so connector.mjs boots offline.
   const wsDir = path.join(installed.runtime, 'node_modules', 'ws');
@@ -511,6 +542,15 @@ esac
   assert.equal(afterStop.supervisorAlive, false);
   assert.equal(afterStop.connectorAlive, false);
   assert.equal(fsSync.existsSync(path.join(stateDir, 'supervisor.sock')), false);
+  const retry = await installHardened(options);
+  assert.notEqual(retry.runtime, installed.runtime);
+  const active = JSON.parse(await fs.readFile(configFile));
+  assert.equal(active.sourceRoot, retry.runtime);
+  assert.equal(active.allowExec, false);
+  assert.equal(active.sandbox.allowOutbound, false);
+  assert.equal(active.webuiPort, 19001);
+  assert.equal(JSON.parse(await fs.readFile(retry.runtime + '.installation.json')).runtime, retry.runtime);
+  assert.deepEqual(hashes(), before);
 });
 
 test('R6-H1/R6-H6: sha256FileSync refuses symlinks and cloudflare API helper rejects escaping paths', { skip: !posix }, async t => {

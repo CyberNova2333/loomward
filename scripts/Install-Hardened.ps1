@@ -83,30 +83,46 @@ $configFile=Join-Path $statePath 'config.json'
 $old=Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json
 Assert-ConnectorStopped $statePath
 Copy-Item -LiteralPath $configFile -Destination (Join-Path $statePath ('config-before-'+$release+'.json'))
+$upgrading=[object]::Equals($old.sandbox.enabled,$true)
+if($upgrading -and -not $PSBoundParameters.ContainsKey('AllowOutbound')){$AllowOutbound=[object]::Equals($old.sandbox.allowOutbound,$true)}
 $config=@{
-  origin=$old.origin;roots=@($workspacePath);defaultCwd=$workspacePath;allowExec=$true
+  origin=$old.origin;roots=@($workspacePath);defaultCwd=$workspacePath;allowExec=(-not $upgrading -or [object]::Equals($old.allowExec,$true))
   sourceRoot=$destination;nodePath=$node;nodeRoot=$nodeRuntime.nodeRoot;nodeSha256=$nodeRuntime.nodeSha256;requireLocalApproval=$true
   sandbox=@{enabled=$true;image=$imageId;dockerPath=$docker;context=$Context;allowOutbound=[bool]$AllowOutbound}
 }
-$temporary=Join-Path $statePath ('config-'+[Guid]::NewGuid().ToString('N')+'.tmp')
-try {
-  [IO.File]::WriteAllText($temporary,($config|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
-  Move-Item -LiteralPath $temporary -Destination $configFile -Force
-} finally { if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue} }
-$powershell=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-foreach($action in @('Start','Stop','Status','Password')) {
-  $content='@echo off'+"`r`n"+'setlocal DisableDelayedExpansion'+"`r`n"+'chcp 65001 >nul'+"`r`n"+'"'+$powershell+'" -NoProfile -ExecutionPolicy RemoteSigned -File "'+(Join-Path $destination 'scripts\Manage.ps1').Replace('%','%%')+'" -Action '+$action+' -StateDir "'+$statePath.Replace('%','%%')+'"'+"`r`n"
-  [IO.File]::WriteAllText((Join-Path $statePath ($action+'.cmd')),$content,[Text.UTF8Encoding]::new($false))
+foreach($field in $old.PSObject.Properties){
+  if(-not $config.ContainsKey($field.Name)){$config[$field.Name]=$field.Value}
 }
-if(Test-Path -LiteralPath (Join-Path $destination 'scripts\Approve.ps1')) {
-  $approve='@echo off'+"`r`n"+'setlocal DisableDelayedExpansion'+"`r`n"+'chcp 65001 >nul'+"`r`n"+'"'+$powershell+'" -NoProfile -ExecutionPolicy RemoteSigned -File "'+(Join-Path $destination 'scripts\Approve.ps1').Replace('%','%%')+'" -StateDir "'+$statePath.Replace('%','%%')+'"'+"`r`n"
-  [IO.File]::WriteAllText((Join-Path $statePath 'Approve.cmd'),$approve,[Text.UTF8Encoding]::new($false))
+# Replace files on the same volume. File.Replace keeps readers on either complete version.
+function Publish-Text([string]$target,[string]$text) {
+  $temp=Join-Path $statePath ('.publish-'+[Guid]::NewGuid().ToString('N')+'.tmp')
+  try {
+    [IO.File]::WriteAllText($temp,$text,[Text.UTF8Encoding]::new($false))
+    if([IO.File]::Exists($target)){[IO.File]::Replace($temp,$target,[System.Management.Automation.Language.NullString]::Value)}
+    else{[IO.File]::Move($temp,$target)}
+  } finally {if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)}}
+}
+$powershell=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$launcher=(Join-Path $destination 'scripts\Invoke-ActiveRelease.ps1').Replace('%','%%')
+foreach($action in @('Start','Stop','Status','Password','Approve')) {
+  $content='@echo off'+"`r`n"+'setlocal DisableDelayedExpansion'+"`r`n"+'chcp 65001 >nul'+"`r`n"+'"'+$powershell+'" -NoProfile -ExecutionPolicy RemoteSigned -File "'+$launcher+'" -Action '+$action+' -StateDir "'+$statePath.Replace('%','%%')+'"'+"`r`n"
+  Publish-Text (Join-Path $statePath ($action+'.cmd')) $content
 }
 $manifest=@{installedAt=[DateTime]::UtcNow.ToString('o');runtime=$destination;workspace=$workspacePath;image=$imageId;rpmManifestHash=$rpmManifestHash;sha256=@{}}
 Get-ChildItem -LiteralPath $destination -File -Recurse | Where-Object {$_.FullName -notlike '*\node_modules\*' -and $_.FullName -notlike '*\__pycache__\*' -and -not $_.Name.EndsWith('.pyc',[StringComparison]::OrdinalIgnoreCase)} | ForEach-Object {$manifest.sha256[$_.FullName.Substring($destination.Length+1).Replace('\','/')]=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
-$tmpManifest=Join-Path $statePath ('installation-'+[Guid]::NewGuid().ToString('N')+'.tmp')
-try {
-  [IO.File]::WriteAllText($tmpManifest,($manifest|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
-  Move-Item -LiteralPath $tmpManifest -Destination (Join-Path $statePath 'installation.json') -Force
-} finally { if(Test-Path -LiteralPath $tmpManifest){Remove-Item -LiteralPath $tmpManifest -Force -ErrorAction SilentlyContinue} }
+$manifestPath=Join-Path $statePath 'installation.json'
+if($old.sourceRoot -and [IO.Path]::GetDirectoryName($old.sourceRoot) -ieq $statePath -and [IO.Path]::GetFileName($old.sourceRoot) -cmatch '^runtime-\d{8}-\d{6}-[a-f0-9]{8}$'){
+  $previous=$old.sourceRoot+'.installation.json'
+  if(-not [IO.File]::Exists($previous)){
+    Assert-WriteProtectedPath $manifestPath
+    $legacy=[IO.File]::ReadAllText($manifestPath)
+    if(($legacy|ConvertFrom-Json).runtime -ine $old.sourceRoot){throw 'Active installation manifest mismatch.'}
+    Publish-Text $previous $legacy
+  }
+}
+$manifestText=$manifest|ConvertTo-Json -Depth 6
+Publish-Text ($destination+'.installation.json') $manifestText
+Publish-Text $manifestPath $manifestText
+Assert-ConnectorStopped $statePath
+Publish-Text $configFile ($config|ConvertTo-Json -Depth 100)
 [pscustomobject]@{runtime=$destination;workspace=$workspacePath;image=$imageId;context=$Context;allowOutbound=[bool]$AllowOutbound;rpmManifestHash=$rpmManifestHash;started=$false}|ConvertTo-Json

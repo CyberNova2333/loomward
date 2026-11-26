@@ -294,7 +294,7 @@ export async function installHardened({
   context,
   docker,
   proxy,
-  allowOutbound = true,
+  allowOutbound,
   nodeRuntimeProvider = ensurePinnedNodeRuntime,
   dockerInspector = inspectDockerInstallation,
   skipDependencyInstall = false,
@@ -376,11 +376,13 @@ export async function installHardened({
   fs.copyFileSync(configFile, path.join(statePath, `config-before-${release}.json`));
   fs.chmodSync(path.join(statePath, `config-before-${release}.json`), 0o600);
 
+  const upgrading = oldConfig.sandbox?.enabled === true;
+  const outgoing = allowOutbound ?? (!upgrading || oldConfig.sandbox.allowOutbound === true);
   const nextConfig = {
-    origin: oldConfig.origin,
+    ...oldConfig,
     roots: [workspacePath],
     defaultCwd: workspacePath,
-    allowExec: true,
+    allowExec: !upgrading || oldConfig.allowExec === true,
     sourceRoot: destination,
     nodePath: nodeRuntime.nodePath,
     nodeRoot: nodeRuntime.nodeRoot,
@@ -391,22 +393,21 @@ export async function installHardened({
       image: imageId,
       dockerPath,
       context: chosenContext,
-      allowOutbound: Boolean(allowOutbound),
+      allowOutbound: Boolean(outgoing),
     },
   };
-  writePrivateJsonSync(configFile, nextConfig);
   assertConfigOutsideWorkspace(capabilityFilePath(statePath), [workspacePath]);
   assertConfigOutsideWorkspace(webuiAuthFilePath(statePath), [workspacePath]);
   assertConfigOutsideWorkspace(mcpServersFilePath(statePath), [workspacePath]);
   if (!fs.existsSync(capabilityFilePath(statePath))) {
     writeCapabilitiesSync(
       statePath,
-      { fileRead: true, fileWrite: true, allowExec: true },
-      { configAllowExec: true, requirePrivateState: true, workspaceRoots: [workspacePath] },
+      { fileRead: true, fileWrite: true, allowExec: nextConfig.allowExec },
+      { configAllowExec: nextConfig.allowExec, requirePrivateState: true, workspaceRoots: [workspacePath] },
     );
   }
 
-  const cliEntry = path.join(destination, 'scripts', 'host-cli.mjs');
+  const launcher = path.join(destination, 'scripts', 'launch-active.mjs');
   for (const [wrapperName, action] of [
     ['start', 'start'],
     ['stop', 'stop'],
@@ -422,7 +423,7 @@ export async function installHardened({
       '#!/bin/sh',
       'set -eu',
       'unset NODE_OPTIONS NODE_PATH NODE_TLS_REJECT_UNAUTHORIZED NODE_EXTRA_CA_CERTS LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH',
-      `exec ${shellQuote(nodeRuntime.nodePath)} ${shellQuote(cliEntry)} ${action} --state-dir ${shellQuote(statePath)} "$@"`,
+      `exec ${shellQuote(nodeRuntime.nodePath)} ${shellQuote(launcher)} ${shellQuote(statePath)} ${action} "$@"`,
       '',
     ].join('\n');
     writeExecutableWrapperSync(path.join(statePath, wrapperName), script);
@@ -436,13 +437,27 @@ export async function installHardened({
     ...(rpmManifestHash ? { rpmManifestHash } : {}),
     sha256: collectReleaseHashes(destination),
   };
-  writePrivateJsonSync(path.join(statePath, 'installation.json'), manifest);
+  const manifestPath = path.join(statePath, 'installation.json');
+  // Preserve the active manifest for installations predating per-release records.
+  if (oldConfig.sourceRoot && path.dirname(oldConfig.sourceRoot) === statePath &&
+      /^runtime-\d{8}-\d{6}-[a-f0-9]{8}$/.test(path.basename(oldConfig.sourceRoot))) {
+    const previous = oldConfig.sourceRoot + '.installation.json';
+    if (!fs.existsSync(previous)) {
+      const legacy = JSON.parse(fs.readFileSync(assertPrivateFile(manifestPath), 'utf8'));
+      if (legacy.runtime !== oldConfig.sourceRoot) throw new Error('Active installation manifest mismatch.');
+      writePrivateJsonSync(previous, legacy);
+    }
+  }
+  writePrivateJsonSync(destination + '.installation.json', manifest);
+  writePrivateJsonSync(manifestPath, manifest);
+  assertConnectorStopped(statePath);
+  writePrivateJsonSync(configFile, nextConfig);
   return {
     runtime: destination,
     workspace: workspacePath,
     image: imageId,
     context: chosenContext,
-    allowOutbound: Boolean(allowOutbound),
+    allowOutbound: Boolean(outgoing),
     ...(rpmManifestHash ? { rpmManifestHash } : {}),
     started: false,
   };
@@ -1193,7 +1208,7 @@ async function main() {
         context: flags.context,
         docker: flags.docker,
         proxy: flags.proxy,
-        allowOutbound: flags['allow-outbound'] !== 'false',
+        allowOutbound: flags['allow-outbound'] === undefined ? undefined : flags['allow-outbound'] !== 'false',
       });
       console.log(JSON.stringify(result, null, 2));
       break;
