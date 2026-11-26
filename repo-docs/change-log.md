@@ -531,3 +531,11 @@ Windows 11、macOS 15.8.3 两台隔离副本分别通过全部 10 项检查。DP
 - Linux 从干净检出启用真实 Docker 运行 227 项回归，213 项通过，14 项 Windows 专属测试按平台跳过。控制台构建产物可重现，文档站构建通过。离线审核基线 5 个放行样本和 2 个拦截样本均与标注一致。
 
 Synced through 925d952ea4ef9bd72abae5d3f3b605c45238eb2b
+
+## 2026-11-26 在 Windows 11 补验 Linux 跳过的 14 项
+
+在本机 Windows 11 专业版（Build 26300）的隔离副本内，用普通测试账户、Windows PowerShell 5.1 和 Node.js `v24.22.1` 运行了 Linux 跳过的全部 14 项。受保护启动与管理 7 项、DPAPI 凭据子进程 4 项、NTFS 权限 2 项和 Windows 路径 1 项均通过。按文档命令从已提交源码复跑，分组汇总为 13/13 和 1/1，均无跳过。Docker 使用本机 `default` 上下文和固定镜像 `sha256:ef51fede32df12c340844bf36798c61f0d3220e0a7aab156e3d6e204d31c641e`。[复验命令和测试文件](walkthroughs/one-real-run.md#在-windows-上补验-linux-跳过的-14-项)
+
+模块来源检查读取 `Get-Acl` 的模块清单完整路径，并核对凭据和代理子进程实际使用的系统目录。命名空间路径测试在临时工作区中执行，拒绝写入后目录为空。真实 Docker 文件测试确认自定义 NTFS ACL 和原内容得到保留，继承 ACL 的文件可正常编辑。[PowerShell 管理回归](../test/management-safety.test.mjs) · [凭据回归](../test/secret-process.test.mjs) · [NTFS 回归](../test/windows-acl.test.mjs)
+
+Synced through 89dedbc9c68e5383e942a70b1d23f78de0c5a2fc

@@ -80,3 +80,25 @@ python3 tools/acceptance/run.py --image "$LOOMWARD_TEST_IMAGE" \
 cd plugins/llm-moderation
 python3 -m engine.eval_runner --dataset test/fixtures/offline-policy.jsonl --baseline test/fixtures/offline-baseline.json
 ```
+
+### 在 Windows 上补验 Linux 跳过的 14 项
+
+在已登录的专用 Windows 测试账户中，从仓库根目录运行以下 PowerShell 命令。使用上节的客体配置文件，并将 `LOOMWARD_TEST_IMAGE` 设为该 Docker 引擎中已准备好的完整镜像 ID。
+
+```powershell
+$lab = Get-Content -Raw (Join-Path $env:USERPROFILE '.loomward-acceptance.json') | ConvertFrom-Json
+$env:Path = (Split-Path -Parent $lab.node) + ';' + $env:Path
+$env:AGENTDOCK_DOCKER_TEST = '1'
+$env:AGENTDOCK_TEST_DOCKER = $lab.docker
+$env:AGENTDOCK_TEST_CONTEXT = $lab.context
+$env:AGENTDOCK_TEST_IMAGE = $env:LOOMWARD_TEST_IMAGE
+& $lab.pnpm install --frozen-lockfile --ignore-scripts
+if ($LASTEXITCODE) { throw '依赖安装失败' }
+
+& $lab.node --test --test-concurrency=1 test/management-safety.test.mjs test/secret-process.test.mjs test/windows-acl.test.mjs
+if ($LASTEXITCODE) { throw 'Windows 管理、凭据或 ACL 回归失败' }
+& $lab.node --test '--test-name-pattern=^Windows alternate streams and device aliases' test/tools.test.mjs
+if ($LASTEXITCODE) { throw 'Windows 文件路径回归失败' }
+```
+
+两次汇总应分别为 13 项和 1 项通过，跳过数均为零。Docker 用例会核对自定义 ACL 文件的原始内容及安全描述符，并实际编辑一个继承 ACL 的普通文件。[管理入口](../../test/management-safety.test.mjs) · [凭据子进程](../../test/secret-process.test.mjs) · [NTFS 与 Docker](../../test/windows-acl.test.mjs) · [文件路径](../../test/tools.test.mjs)
