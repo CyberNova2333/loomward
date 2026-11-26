@@ -13,8 +13,8 @@
   "featured": true,
   "order": 6,
   "repository": "https://github.com/CyberNova2333/agentdock-worker-remote",
-  "homepage": "https://agentdock-worker-remote.cbnv.me",
-  "docsUrl": "https://agentdock-worker-remote.cbnv.me/docs/",
+  "homepage": "https://loomward.cbnv.me",
+  "docsUrl": "https://loomward.cbnv.me/docs/",
   "license": "AGPL-3.0-only",
   "primaryLanguage": "JavaScript",
   "techStack": [

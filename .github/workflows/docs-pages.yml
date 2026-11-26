@@ -18,6 +18,9 @@ concurrency:
 
 jobs:
   build:
+    permissions:
+      contents: read
+      pages: read
     name: 构建文档站
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -40,7 +43,7 @@ jobs:
         run: pnpm --dir docs-site install --frozen-lockfile
       - name: 配置 GitHub Pages
         id: pages
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886f7745b # v5.0.0
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
       - name: 构建文档站
         env:
           PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}

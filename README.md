@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="https://agentdock-worker-remote.cbnv.me/">在线文档站</a> · <a href="docs-site/index.md">文档站源码</a> · <a href="repo-docs/README.md">源码阅读指南</a>
+  <a href="https://loomward.cbnv.me/">在线文档站</a> · <a href="docs-site/index.md">文档站源码</a> · <a href="repo-docs/README.md">源码阅读指南</a>
 </p>
 
 面向单人开发者的综合本地 Agent 安全管控平台（前身为 `AgentDock Bridge`，现已升级为 **LoomWard · 织盾** `pnpm workspace` monorepo）：以 **Cordis 4** 微内核、冻结根插件清单（RPM）与无状态 `PolicyTree` 为治理底座，结合 Cloudflare Workers OAuth 2.1 远程中继、跨平台（Windows / macOS / Linux）本机逐参人工审批、只读 Linux Docker 沙箱、第三方 MCP 聚合接入、R1–R7 防泄漏护栏与人机协作决策台账。

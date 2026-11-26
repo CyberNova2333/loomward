@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="https://agentdock-worker-remote.cbnv.me/en/">Live Documentation</a> · <a href="docs-site/en/index.md">Docs Source</a> · <a href="repo-docs/README.md">Source Walkthrough (ZH)</a>
+  <a href="https://loomward.cbnv.me/en/">Live Documentation</a> · <a href="docs-site/en/index.md">Docs Source</a> · <a href="repo-docs/README.md">Source Walkthrough (ZH)</a>
 </p>
 
 Personal local Agent security and control plane (evolved from `AgentDock Bridge` into the **LoomWard** `pnpm workspace` monorepo): built on a **Cordis 4** microkernel with frozen Root Plugin Manifests (RPM) and stateless `PolicyTree` guards, unifying Cloudflare Workers OAuth 2.1 remote MCP relay, exact local approval on Windows/macOS/Linux, disposable read-only Linux Docker sandboxes, third-party MCP aggregation, R1–R7 anti-leak guardrails, and a Human-Agent decision ledger.
