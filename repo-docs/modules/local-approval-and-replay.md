@@ -31,6 +31,8 @@
 2. **紧凑序列化与发布预算**：[批准存储](../../local/approval-store.mjs)限定待批准请求（`.request.json`）上限为 `1200000` 字节（约 1.2 MB），已批准标记（`.approved.json`）上限为 512 字节。`atomicJson` 在创建临时文件前先按紧凑 JSON 计算最终 UTF-8 字节长度，超限直接抛出 `ApprovalRecordTooLargeError`（返回 `APPROVAL_RECORD_TOO_LARGE`），防止缩进放大或超长参数污染本机批准界面；发布通过只读独占文件（`wx`）、刷盘后硬链接原子创建，避免覆盖同名批准。
 3. **队列容量与人工确认界面**：[批准状态机](../../local/approvals.mjs)限制单条待批记录有效期 `5` 分钟（`300000` 毫秒），队列上限 `64` 条、单客户端上限 `8` 条；写入前先清扫已过期 `.request.json` 与陈旧临时文件，若残留条目仍超过 `1024` 才拒绝入队并要求维护清理。用户既可通过 `Approve.cmd` / `~/.agentdock-bridge/approve` 启动[批准终端界面](../../local/approval-cli.mjs)（使用 `safeText` 将控制字符及 Unicode 双向/隐形格式字符转义为 `\uXXXX`，确认输入 `APPROVE <uuid>`），也可在通过 PassKey / 强密码及标签页隔离认证的[本机监控 WebUI](../../local/webui.mjs)「实时审计」页选择「复核完整请求」。列表仅含摘要信息，`POST /api/approvals/review` 按需读取选中的请求，展示网关来源、授权范围和完整参数，并转义不可见控制字符。确认时 `POST /api/approvals/approve` 重新核对记录摘要，两条入口均由 `approveRequest` 发布一次性的 `.approved.json`。
 
+在控制台用键盘复核时，弹窗先聚焦“取消”。按 Shift+Tab 可查看完整请求，按 Tab 可移至“确认批准一次”。Esc 或取消会把焦点还给原请求；明确批准后，焦点返回审批队列标题。实时状态推送期间也可继续当前的键盘操作。[控制台复核界面](../../packages/console/web/console/main.mjs)
+
 ## 消费顺序与三类防重放账本
 
 对需要批准的请求，[宿主调度流水线](../../packages/host/src/pipeline.mjs)按以下顺序执行：
