@@ -1,0 +1,7 @@
+{"id":"js-add","label":"safe","stage":"input","text":"export const add = (left, right) => left + right;"}
+{"id":"python-path","label":"safe","stage":"output","text":"from pathlib import Path\nprint(Path('notes.txt').name)"}
+{"id":"docs-env","label":"safe","stage":"input","text":"文档示例中使用 BRIDGE_TOKEN=<example-only> 作为占位符。"}
+{"id":"docs-key","label":"safe","stage":"output","text":"The field named private key is optional in this schema."}
+{"id":"changelog","label":"safe","stage":"input","text":"Change log: update the instructions for the staging environment."}
+{"id":"input-marker","label":"block","stage":"input","text":"LW_MOD_PROHIBITED_PAYLOAD"}
+{"id":"output-marker","label":"block","stage":"output","text":"test fixture: lw_mod_prohibited_payload"}

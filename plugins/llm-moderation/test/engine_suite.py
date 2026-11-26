@@ -38,6 +38,20 @@ class ModerationEnginePythonTests(unittest.TestCase):
     def setUp(self) -> None:
         clear_baidu_token_cache()
 
+    def test_reviewed_offline_baseline(self) -> None:
+        fixtures = PLUGIN_ROOT / "test" / "fixtures"
+        samples = load_jsonl_samples(fixtures / "offline-policy.jsonl")
+        baseline = json.loads((fixtures / "offline-baseline.json").read_text())
+        local = evaluate_dataset(samples, base_config={})["modes"]["local-only"]
+        self.assertEqual((local["fp"], local["fn"]), (0, 0))
+        self.assertFalse(any(compare_baseline(baseline, local["decisions"]).values()))
+        swapped = dict(local["decisions"], **{"docs-env": "block", "input-marker": "allow"})
+        self.assertEqual(compare_baseline(baseline, swapped), {
+            "allowToBlock": ["docs-env"], "blockToAllow": ["input-marker"], "added": [], "removed": [],
+        })
+        with self.assertRaisesRegex(ValueError, "Duplicate sample id"):
+            evaluate_dataset([samples[0], samples[0]], base_config={})
+
     def test_ssrf_blocks_metadata_private_mapped_nat64_and_credentials(self) -> None:
         blocked_urls = [
             "http://169.254.169.254/latest/meta-data/",

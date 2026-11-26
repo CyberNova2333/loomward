@@ -1,0 +1,9 @@
+{
+  "js-add": "allow",
+  "python-path": "allow",
+  "docs-env": "allow",
+  "docs-key": "allow",
+  "changelog": "allow",
+  "input-marker": "block",
+  "output-marker": "block"
+}
