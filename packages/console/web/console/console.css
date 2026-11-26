@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-only */
 @import "../shared/theme.css";
+@import "./overview.css";
 
 :root {
   --sidebar-width: 218px;

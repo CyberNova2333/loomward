@@ -268,10 +268,11 @@
     draftAuth: { setupToken: "", password: "", passkeyLabel: "" },
     draftSecret: { unitId: "llm-moderation", key: "", value: "" },
     draftCloudCreds: {},
-    pluginSecretUnits: [],
+    pluginSecretUnits: null,
     page: "overview",
     modTab: "routing",
     mobileNavOpen: false,
+    overviewTopologyOpen: false,
     toolFilter: "all",
     toolSearch: "",
     toolCatalogMode: "mcp",
@@ -541,7 +542,7 @@
       state.ollamaTestResult = null;
       state.ollamaInstallConfirm = false;
       state.draftCloudCreds = {};
-      state.pluginSecretUnits = [];
+      state.pluginSecretUnits = null;
       state.liveKernelEvents = [];
       state.mobileNavOpen = false;
     }
@@ -1270,250 +1271,133 @@
     ]);
   }
   function renderOverviewPage() {
-    const snap = state.snapshot || {};
-    const daemon = snap.daemon || {};
-    const cap = snap.capabilities || {};
-    const kernel = snap.kernel || { roots: [], units: [] };
-    const panels = snap.panels || [];
-    const pending = snap.approvals?.pendingCount || 0;
-    const modCfg = state.moderationConfig || DEFAULT_MOD_CONFIG;
-    const mountRw = cap.mountMode === "readwrite" || Boolean(cap.fileWrite);
-    const modCloudLive = Boolean(modCfg.cloudOptIn && (modCfg.mode === "cloud-first" || modCfg.mode === "hybrid-tiered"));
-    const totalSecretKeys = (state.pluginSecretUnits || []).reduce((acc, u) => acc + (u?.keys?.length || 0), 0);
-    const ollamaModelsCount = Array.isArray(state.ollama?.models) ? state.ollama.models.length : 0;
-    const navLinkBtn = (label, pageId, icon = "arrowRight") => makeIconButton({
-      text: label,
-      iconName: icon,
-      className: "lw-btn lw-btn-sm",
-      onClick: () => navigate(pageId)
+    const heading = makePageHeader("\u7CFB\u7EDF\u6982\u89C8", "\u67E5\u770B\u5F85\u529E\u5BA1\u6279\u3001\u5DE5\u4F5C\u533A\u6743\u9650\u4E0E\u6700\u8FD1\u7684\u5DE5\u5177\u8C03\u7528\u3002");
+    const snap = state.snapshot;
+    if (!snap) return el("div", { class: "lw-stack-md" }, [heading, el("p", { role: "status", text: "\u7B49\u5F85\u8FD0\u884C\u72B6\u6001\u2026" })]);
+    const { approvals, capabilities: cap, daemon, kernel, events } = snap;
+    const pending = approvals?.pendingCount;
+    const units = kernel?.units;
+    const roots = kernel?.roots;
+    const mod = state.moderationConfig;
+    const unknown = "\u672A\u4E0A\u62A5";
+    const mount = { readonly: "\u53EA\u8BFB", readwrite: "\u53EF\u8BFB\u5199", locked: "\u5DF2\u9501\u5B9A" }[cap?.mountMode] || unknown;
+    const relay = daemon?.online === true ? "\u5728\u7EBF" : daemon?.online === false ? "\u79BB\u7EBF" : unknown;
+    const reviewMode = { "local-only": "\u4EC5\u672C\u5730", "cloud-first": "\u4E91\u7AEF\u4F18\u5148", "hybrid-tiered": "\u5206\u5C42\u5BA1\u67E5" }[mod?.mode] || mod?.mode || unknown;
+    function statusCard(label, value, hint, icon, tone, pageId) {
+      return el("button", { type: "button", class: "lw-status-card", onClick: () => navigate(pageId) }, [
+        el("span", { class: "lw-status-label" }, [el("span", { class: "lw-status-icon " + tone }, [makeIcon(icon)]), label]),
+        el("strong", { text: value }),
+        el("span", { class: "lw-status-foot" }, [hint, makeIcon("arrowRight")])
+      ]);
+    }
+    function flowNode(title, value, icon, pageId) {
+      return el("button", { class: "lw-flow-node", type: "button", onClick: () => navigate(pageId) }, [
+        makeIcon(icon),
+        el("strong", { text: title }),
+        el("span", { text: value })
+      ]);
+    }
+    function sectionBar(title, link, pageId) {
+      return el("div", { class: "lw-board-heading" }, [
+        el("h2", { text: title }),
+        link ? el("button", { class: "lw-board-link", type: "button", onClick: () => navigate(pageId) }, [link, makeIcon("chevronRight")]) : null
+      ]);
+    }
+    function fact(label, value) {
+      return el("div", { class: "lw-board-fact" }, [
+        el("dt", { text: label }),
+        el("dd", { text: value })
+      ]);
+    }
+    function switchValue(value) {
+      return value === true ? "\u5DF2\u542F\u7528" : value === false ? "\u5DF2\u7981\u7528" : unknown;
+    }
+    function unitNames(list) {
+      if (!Array.isArray(list)) return unknown;
+      return list.map((unit) => unit.id || unit).join("\u3001") || "\u65E0";
+    }
+    const auditRows = (events || []).slice(0, 5).map((event) => {
+      const date = new Date(event.time);
+      const time = event.time && Number.isFinite(date.getTime());
+      return el("li", { class: "lw-recent-item" }, [
+        el("span", { class: "lw-event-dot is-" + event.tone, "aria-hidden": "true" }),
+        el("div", {}, [
+          el("strong", { text: event.name || event.source }),
+          el("span", { text: event.label || event.source })
+        ]),
+        time ? el("time", { datetime: event.time, title: date.toLocaleString(), text: date.toLocaleTimeString("zh-CN", { hour12: false }) }) : null
+      ]);
     });
-    const topologySvg = svgEl("svg", {
-      viewBox: "0 0 356 312",
-      class: "lw-svg-diagram",
-      role: "img",
-      "aria-label": "LoomWard \u7CFB\u7EDF\u5B9E\u65F6\u5B89\u5168\u62D3\u6251\u56FE"
-    }, [
-      svgEl("path", {
-        d: "M 156 34 L 196 34",
-        class: `lw-svg-wire ${daemon.online ? "lw-svg-wire-active" : "lw-svg-wire-off"}`
-      }),
-      svgEl("path", {
-        d: "M 273 58 C 273 78, 178 72, 178 92",
-        class: "lw-svg-wire lw-svg-wire-active"
-      }),
-      svgEl("path", {
-        d: "M 178 138 C 178 164, 60 158, 60 186",
-        class: `lw-svg-wire ${mountRw || cap.allowExec ? "lw-svg-wire-warn" : "lw-svg-wire-active"}`
-      }),
-      svgEl("path", {
-        d: "M 178 138 L 178 186",
-        class: `lw-svg-wire ${modCloudLive ? "lw-svg-wire-warn" : "lw-svg-wire-active"}`
-      }),
-      svgEl("path", {
-        d: "M 178 138 C 178 164, 296 158, 296 186",
-        class: `lw-svg-wire ${(kernel.units || []).length > 0 ? "lw-svg-wire-active" : "lw-svg-wire-off"}`
-      }),
-      svgNodeBox({
-        x: 8,
-        y: 10,
-        w: 148,
-        h: 48,
-        title: "1. \u4E91\u7AEF OAuth \u4E2D\u7EE7",
-        sub: daemon.online ? "WSS / SSE \u5DF2\u8FDE\u63A5" : "\u672C\u5730\u9884\u89C8\u5F85\u547D",
-        stateCls: daemon.online ? "is-ok" : "is-active"
-      }),
-      svgNodeBox({
-        x: 198,
-        y: 10,
-        w: 150,
-        h: 48,
-        title: "2. \u5BBF\u4E3B\u5BA1\u6279\u67A2\u7EBD",
-        sub: pending > 0 ? `${pending} \u6761\u5F85\u4EBA\u5DE5\u590D\u6838` : "24h \u9632\u91CD\u653E\u5DF2\u5C31\u7EEA",
-        stateCls: pending > 0 ? "is-warn" : "is-ok",
-        isDelta: pending > 0
-      }),
-      svgNodeBox({
-        x: 58,
-        y: 92,
-        w: 240,
-        h: 46,
-        title: "3. \u62A4\u680F\u5BA1\u67E5\u94FE (antileak \u2192 mod)",
-        sub: `\u6A21\u5F0F: ${modCfg.mode} \xB7 ${modCloudLive ? modCfg.cloudProvider : "\u96F6\u5916\u90E8\u5916\u53D1"}`,
-        stateCls: modCloudLive ? "is-warn" : "is-active"
-      }),
-      svgNodeBox({
-        x: 6,
-        y: 186,
-        w: 108,
-        h: 70,
-        title: "Docker \u6C99\u7BB1",
-        sub: `mount:${mountRw ? "rw" : "ro"}`,
-        badge: cap.allowExec ? "exec \u5F00\u542F" : "exec \u7981\u7528",
-        stateCls: mountRw || cap.allowExec ? "is-warn" : "is-ok",
-        badgeCls: mountRw || cap.allowExec ? "is-warn" : "is-ok"
-      }),
-      svgNodeBox({
-        x: 124,
-        y: 186,
-        w: 108,
-        h: 70,
-        title: "\u672C\u5730\u5BA1\u67E5\u6A21\u578B",
-        sub: clipText(modCfg.localGuard?.model || "rules", 13),
-        badge: state.ollama?.running ? `${ollamaModelsCount} Ollama \u6A21\u578B` : modCfg.localGuard?.kind || "ollama",
-        stateCls: "is-active",
-        badgeCls: state.ollama?.running ? "is-ok" : "is-muted"
-      }),
-      svgNodeBox({
-        x: 242,
-        y: 186,
-        w: 108,
-        h: 70,
-        title: "\u8FDB\u7A0B\u5916\u6269\u5C55",
-        sub: `${(kernel.units || []).length} \u5DF2\u6302\u8F7D`,
-        badge: `${panels.length} \u58F0\u660E\u5F0F\u9762\u677F`,
-        stateCls: (kernel.units || []).length > 0 ? "is-active" : "is-off",
-        badgeCls: "is-muted"
-      }),
-      svgEl("path", { d: "M 178 256 L 178 268", class: "lw-svg-wire lw-svg-wire-active" }),
-      svgEl("path", { d: "M 296 256 L 296 268", class: "lw-svg-wire lw-svg-wire-active" }),
-      svgNodeBox({
-        x: 6,
-        y: 268,
-        w: 344,
-        h: 36,
-        title: `KernelGuard \u51ED\u636E\u9694\u79BB \xB7 ${totalSecretKeys} \u9879\u53EA\u5199\u5BC6\u94A5`,
-        sub: "",
-        stateCls: "is-ok"
-      })
-    ]);
-    const overviewSplit = el("div", { class: "lw-doc-split" }, [
-      el("div", { class: "lw-doc-main" }, [
-        pending > 0 ? el("div", { class: "lw-doc-callout is-warn" }, [
-          el("div", { class: "lw-row lw-between" }, [
-            el("span", { text: `\u5F53\u524D\u6709 ${pending} \u6761\u654F\u611F\u5DE5\u5177\u8C03\u7528\u7B49\u5F85\u672C\u673A\u4EBA\u5DE5\u667A\u80FD\u53C2\u6570\u590D\u6838\uFF0C\u786E\u8BA4\u4E00\u81F4\u540E\u624D\u4F1A\u7B7E\u53D1\u5355\u6B21\u6267\u884C\u8BB8\u53EF\u3002` }),
-            makeIconButton({
-              text: "\u524D\u5F80\u5BA1\u6279\u961F\u5217",
-              iconName: "clipboardCheck",
-              className: "lw-btn lw-btn-trust lw-btn-sm",
-              onClick: () => navigate("approvals")
-            })
-          ])
-        ]) : null,
-        makeStatStrip([
-          { icon: "cloud", label: "\u4E91\u7AEF\u4E2D\u7EE7", value: daemon.online ? "WSS \u5728\u7EBF" : "\u672C\u5730\u5F85\u547D", tone: daemon.online ? "ok" : "" },
-          { icon: "lock", label: "\u5DE5\u4F5C\u533A\u6302\u8F7D", value: mountRw ? "\u8BFB\u5199\u5F00\u653E (:rw)" : "\u53EA\u8BFB\u9501\u5B9A (:ro)", tone: mountRw ? "warn" : "ok" },
-          { icon: "layers", label: "\u5FAE\u5185\u6838\u88C5\u914D", value: `${kernel.roots?.length || 0} \u6839 / ${kernel.units?.length || 0} \u6269\u5C55` },
-          { icon: "shieldCheck", label: "\u5185\u5BB9\u5BA1\u67E5", value: `${modCfg.mode}`, tone: modCloudLive ? "warn" : "ok" }
-        ]),
-        el("section", { class: "lw-section" }, [
-          el("div", { class: "lw-section-head" }, [
-            el("div", {}, [
-              el("h3", { text: "\u5B9E\u65F6\u5B89\u5168\u9632\u7EBF\u4E0E\u80FD\u529B\u603B\u89C8" }),
-              el("p", { text: "\u4EE5\u4E0B\u5F00\u5173\u4E0E\u7B56\u7565\u5B9E\u65F6\u70ED\u751F\u6548\u4E8E\u53D7\u9650 Docker \u5BB9\u5668\u4E0E\u8FDB\u7A0B\u5916\u5BA1\u67E5\u7BA1\u7EBF\u3002" })
-            ]),
-            navLinkBtn("\u914D\u7F6E\u80FD\u529B\u5F00\u5173", "capabilities", "sliders")
-          ]),
-          el("div", { class: "lw-setting-list" }, [
-            el("div", { class: "lw-hairline-row" }, [
-              el("span", { class: "lw-switch-main" }, [
-                makeIcon("file"),
-                el("span", { class: "lw-switch-copy" }, [
-                  el("span", { class: "lw-switch-label", text: "\u6587\u4EF6\u8BFB\u53D6\u4E0E\u68C0\u7D22 (fileRead)" }),
-                  el("span", { class: "lw-switch-sub", text: "read_file / list_directory / search_files" })
-                ])
-              ]),
-              el("span", { class: `lw-pill ${cap.fileRead ? "lw-pill-ok" : "lw-pill-err"}`, text: cap.fileRead ? "\u5DF2\u542F\u7528" : "\u5DF2\u7194\u65AD\u62E6\u622A" })
-            ]),
-            el("div", { class: "lw-hairline-row" }, [
-              el("span", { class: "lw-switch-main" }, [
-                makeIcon("lock"),
-                el("span", { class: "lw-switch-copy" }, [
-                  el("span", { class: "lw-switch-label", text: "\u5DE5\u4F5C\u533A\u5199\u5165 (fileWrite)" }),
-                  el("span", { class: "lw-switch-sub", text: "\u5173\u95ED\u65F6\u5BB9\u5668\u5F3A\u5236\u964D\u7EA7\u4E3A\u53EA\u8BFB\u6302\u8F7D :ro" })
-                ])
-              ]),
-              el("span", { class: `lw-pill ${cap.fileWrite ? "lw-pill-warn" : "lw-pill-ok"}`, text: cap.fileWrite ? "\u8BFB\u5199\u5F00\u653E (:rw)" : "\u53EA\u8BFB\u4FDD\u62A4\u4E2D (:ro)" })
-            ]),
-            el("div", { class: "lw-hairline-row" }, [
-              el("span", { class: "lw-switch-main" }, [
-                makeIcon("terminal"),
-                el("span", { class: "lw-switch-copy" }, [
-                  el("span", { class: "lw-switch-label", text: "\u5BB9\u5668\u547D\u4EE4\u884C (allowExec)" }),
-                  el("span", { class: "lw-switch-sub", text: "\u4E00\u6B21\u6027\u65E0\u5165\u7AD9 Linux \u5BB9\u5668\u6267\u884C\u6743\u9650" })
-                ])
-              ]),
-              el("span", { class: `lw-pill ${cap.allowExec ? "lw-pill-warn" : "lw-pill-ok"}`, text: cap.allowExec ? "\u5DF2\u542F\u7528" : "\u5DF2\u7981\u7528" })
-            ]),
-            el("div", { class: "lw-hairline-row" }, [
-              el("span", { class: "lw-switch-main" }, [
-                makeIcon("shieldCheck"),
-                el("span", { class: "lw-switch-copy" }, [
-                  el("span", { class: "lw-switch-label", text: `\u591A\u6A21\u6001 LLM \u5BA1\u67E5 (${modCfg.mode})` }),
-                  el("span", { class: "lw-switch-sub", text: `\u56DE\u9000\u9884\u8BBE: ${modCfg.policyProfile} \xB7 Guard: ${modCfg.localGuard?.model || "rules"}` })
-                ])
-              ]),
-              el("div", { class: "lw-row" }, [
-                el("span", { class: `lw-pill ${modCloudLive ? "lw-pill-warn" : "lw-pill-ok"}`, text: modCloudLive ? `\u4E91\u7AEF ${modCfg.cloudProvider}` : "\u4EC5\u672C\u5730\u95ED\u73AF" }),
-                navLinkBtn("\u8C03\u6574\u7B56\u7565", "moderation", "shieldCheck")
-              ])
-            ])
-          ])
-        ]),
-        el("section", { class: "lw-section" }, [
-          el("div", { class: "lw-section-head" }, [
-            el("div", {}, [
-              el("h3", { text: "Cordis \u5FAE\u5185\u6838\u88C5\u914D\u4E0E\u6269\u5C55\u5355\u5143" }),
-              el("p", { text: "\u6839\u63D2\u4EF6\u8FD0\u884C\u4E8E\u51BB\u7ED3\u7269\u7406\u76EE\u5F55\uFF08RPM\uFF09\uFF1B\u7B2C\u4E09\u65B9\u4E0E\u591A\u8BED\u8A00\u63D2\u4EF6\u7ECF\u8FDB\u7A0B\u5916\u8FB9\u754C\u63A5\u5165\u3002" })
-            ]),
-            panels.length ? navLinkBtn(`\u67E5\u770B\u6269\u5C55\u9762\u677F (${panels.length})`, "panels", "layoutPanel") : null
-          ]),
-          el("div", { class: "lw-setting-list" }, [
-            el("div", { class: "lw-hairline-row" }, [
-              el("span", { class: "lw-switch-label", text: "\u51BB\u7ED3\u6839\u63D2\u4EF6 (RPM)" }),
-              el("div", { class: "lw-row" }, (kernel.roots || []).map((r) => el("span", { class: "lw-pill lw-pill-info lw-mono", text: r.id || r })))
-            ]),
-            el("div", { class: "lw-hairline-row" }, [
-              el("span", { class: "lw-switch-label", text: "\u8FDB\u7A0B\u5916\u6269\u5C55\u5355\u5143 (out-of-process)" }),
-              el("div", { class: "lw-row" }, (kernel.units || []).length ? kernel.units.map((u) => el("span", { class: "lw-pill lw-pill-ok lw-mono", text: u.id || u })) : [el("span", { class: "lw-muted", text: "\u65E0\u5DF2\u6302\u8F7D\u6269\u5C55\u5355\u5143" })])
-            ]),
-            el("div", { class: "lw-hairline-row" }, [
-              el("span", { class: "lw-switch-label", text: "\u53EA\u5199\u51ED\u636E\u547D\u540D\u7A7A\u95F4" }),
-              el("div", { class: "lw-row" }, [
-                el("span", { class: "lw-pill lw-pill-info", text: `${(state.pluginSecretUnits || []).length} \u5355\u5143 / ${totalSecretKeys} \u5BC6\u94A5` }),
-                navLinkBtn("\u7BA1\u7406\u5BC6\u94A5", "secrets", "key")
-              ])
-            ])
-          ])
-        ])
+    const topology = el("section", { class: "lw-board-panel lw-map-panel" }, [
+      el("div", { class: "lw-board-heading" }, [
+        el("h2", { text: "\u8FD0\u884C\u62D3\u6251" }),
+        el("button", {
+          id: "lw-map-toggle",
+          type: "button",
+          class: "lw-board-link",
+          "aria-controls": "lw-flow-map",
+          "aria-expanded": String(state.overviewTopologyOpen),
+          onClick: () => {
+            state.overviewTopologyOpen = !state.overviewTopologyOpen;
+            render();
+            document.getElementById("lw-map-toggle")?.focus({ preventScroll: true });
+          }
+        }, [state.overviewTopologyOpen ? "\u6536\u8D77\u62D3\u6251" : "\u5C55\u5F00\u62D3\u6251", makeIcon("layers")])
       ]),
-      el("aside", { class: "lw-doc-aside" }, [
-        el("div", { class: "lw-section-head" }, [
-          el("div", {}, [
-            el("h3", { text: "\u7CFB\u7EDF\u8FD0\u884C\u62D3\u6251\u6001" }),
-            el("p", { text: "\u5B9E\u65F6\u6C47\u603B\u5F53\u524D\u6743\u9650\u5F00\u5173\u3001\u5BA1\u67E5\u94FE\u4E0E\u6269\u5C55\u8FB9\u754C" })
-          ]),
-          el("span", { class: `lw-pill ${pending > 0 || mountRw ? "lw-pill-warn" : "lw-pill-ok"}`, text: pending > 0 ? `${pending} \u5F85\u5BA1` : "\u53D7\u63A7\u6001" })
+      el("div", { id: "lw-flow-map", class: "lw-flow-map" + (state.overviewTopologyOpen ? " is-open" : ""), role: "group", "aria-label": "\u8FD0\u884C\u62D3\u6251\uFF0C\u9009\u62E9\u8282\u70B9\u67E5\u770B\u914D\u7F6E\u6216\u961F\u5217" }, [
+        el("div", { class: "lw-flow-entry" }, [
+          flowNode("\u4E91\u7AEF\u4E2D\u7EE7", relay, "cloud", "capabilities"),
+          el("span", { class: "lw-flow-connector", "aria-hidden": "true" }, [makeIcon("arrowRight")]),
+          flowNode("\u672C\u673A\u5BA1\u6279", pending == null ? unknown : pending + " \u9879\u5F85\u5904\u7406", "clipboardCheck", "approvals")
         ]),
-        topologySvg,
-        el("div", { class: "lw-aside-list" }, [
-          el("div", { class: "lw-aside-row" }, [
-            el("span", { class: "lw-muted", text: "SSE \u5B9E\u65F6\u901A\u9053" }),
-            el("strong", { text: state.sseStatus === "open" || state.sseStatus === "connected" ? "\u5728\u7EBF\u63A8\u6D41\u4E2D" : state.sseStatus })
-          ]),
-          el("div", { class: "lw-aside-row" }, [
-            el("span", { class: "lw-muted", text: "\u4F1A\u8BDD\u9694\u79BB\u673A\u5236" }),
-            el("strong", { text: (state.auth?.sessionPersistence || "tab") === "tab" ? "\u6807\u7B7E\u9875\u4EE4\u724C\u9694\u79BB" : "\u6D4F\u89C8\u5668\u4F1A\u8BDD" })
-          ]),
-          el("div", { class: "lw-aside-row" }, [
-            el("span", { class: "lw-muted", text: "\u805A\u5408\u5DE5\u5177\u5165\u53E3" }),
-            el("strong", { text: `${(cap.effectiveTools || []).length} \u9879\u5DE5\u5177` })
-          ])
+        el("div", { class: "lw-flow-hub" }, [makeIcon("shield"), el("strong", { text: "LoomWard \u5BBF\u4E3B" })]),
+        el("div", { class: "lw-flow-branches" }, [
+          flowNode("Docker \u6C99\u7BB1", mount, "terminal", "capabilities"),
+          flowNode("\u5185\u5BB9\u5BA1\u67E5", mod?.enabled === false ? "\u5DF2\u5173\u95ED" : reviewMode, "shieldCheck", "moderation"),
+          flowNode("\u8FDB\u7A0B\u5916\u6269\u5C55", units ? units.length + " \u4E2A\u5355\u5143" : unknown, "layers", "panels")
         ])
       ])
     ]);
-    return el("div", { class: "lw-stack-md" }, [
-      makePageHeader("\u7CFB\u7EDF\u6982\u89C8", "\u6C47\u603B\u672C\u5730\u5B88\u62A4\u8FDB\u7A0B\u3001\u5DE5\u4F5C\u533A\u6302\u8F7D\u59FF\u6001\u3001\u5FAE\u5185\u6838\u88C5\u914D\u6E05\u5355\u4E0E\u5185\u5BB9\u5B89\u5168\u7BA1\u7EBF\u72B6\u6001\u3002"),
-      overviewSplit
+    return el("div", { class: "lw-overview" }, [
+      heading,
+      el("div", { class: "lw-status-grid" }, [
+        statusCard("\u5F85\u5BA1\u6279\u8BF7\u6C42", pending ?? "\u2014", pending > 0 ? "\u524D\u5F80\u5904\u7406" : "\u67E5\u770B\u5BA1\u6279\u961F\u5217", "clipboardCheck", pending > 0 ? "amber" : "blue", "approvals"),
+        statusCard("\u4E91\u7AEF\u4E2D\u7EE7", relay, "\u67E5\u770B\u5BBF\u4E3B\u670D\u52A1", "cloud", daemon?.online ? "green" : "slate", "capabilities"),
+        statusCard("\u5DE5\u4F5C\u533A\u6302\u8F7D", mount, "\u67E5\u770B\u6C99\u7BB1\u6743\u9650", "lock", cap?.mountMode === "readonly" ? "green" : cap?.mountMode ? "amber" : "slate", "capabilities"),
+        statusCard("\u8FDB\u7A0B\u5916\u6269\u5C55", units?.length ?? "\u2014", "\u67E5\u770B\u6269\u5C55\u9762\u677F", "layers", "violet", "panels")
+      ]),
+      el("div", { class: "lw-board-grid" }, [
+        topology,
+        el("section", { class: "lw-board-panel" }, [
+          sectionBar("\u6700\u8FD1\u5BA1\u8BA1", "\u67E5\u770B\u5168\u90E8", "audit"),
+          auditRows.length ? el("ul", { class: "lw-recent" }, auditRows) : el("p", { class: "lw-board-empty", text: events ? "\u6682\u65E0\u5BA1\u8BA1\u8BB0\u5F55" : unknown }),
+          snap.telemetry ? el("div", { class: "lw-board-totals" }, [
+            ["\u6210\u529F", snap.telemetry.totalAuditSuccess],
+            ["\u5931\u8D25", snap.telemetry.totalAuditFailed],
+            ["\u7B56\u7565\u62E6\u622A", snap.telemetry.totalBlocked]
+          ].map(([label, value]) => el("span", {}, [label, el("b", { text: value ?? "\u2014" })]))) : null
+        ])
+      ]),
+      el("div", { class: "lw-board-grid" }, [
+        el("section", { class: "lw-board-panel" }, [
+          sectionBar("\u5DE5\u4F5C\u533A\u6743\u9650", "\u7BA1\u7406\u80FD\u529B", "capabilities"),
+          el("dl", { class: "lw-board-facts" }, [
+            fact("\u6587\u4EF6\u8BFB\u53D6", switchValue(cap?.fileRead)),
+            fact("\u6587\u4EF6\u5199\u5165", switchValue(cap?.fileWrite)),
+            fact("\u5BB9\u5668\u547D\u4EE4\u6267\u884C", switchValue(cap?.allowExec)),
+            fact("\u5DF2\u542F\u7528\u5DE5\u5177", cap?.effectiveTools?.filter((tool) => tool.enabled).length ?? unknown)
+          ])
+        ]),
+        el("section", { class: "lw-board-panel" }, [
+          sectionBar("\u6269\u5C55\u4E0E\u51ED\u636E", "\u7BA1\u7406\u5BC6\u94A5", "secrets"),
+          el("dl", { class: "lw-board-facts" }, [
+            fact("\u6839\u63D2\u4EF6", unitNames(roots)),
+            fact("\u8FDB\u7A0B\u5916\u5355\u5143", unitNames(units)),
+            fact("\u58F0\u660E\u5F0F\u9762\u677F", snap.panels?.length ?? unknown),
+            fact("\u53EA\u5199\u5BC6\u94A5", state.pluginSecretUnits == null ? unknown : state.pluginSecretUnits.reduce((n, unit) => n + (unit.keys?.length || 0), 0))
+          ])
+        ])
+      ])
     ]);
   }
   function renderApprovalsPage() {

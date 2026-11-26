@@ -60,10 +60,11 @@ const state = {
   draftAuth: { setupToken: '', password: '', passkeyLabel: '' },
   draftSecret: { unitId: 'llm-moderation', key: '', value: '' },
   draftCloudCreds: {},
-  pluginSecretUnits: [],
+  pluginSecretUnits: null,
   page: 'overview',
   modTab: 'routing',
   mobileNavOpen: false,
+  overviewTopologyOpen: false,
   toolFilter: 'all',
   toolSearch: '',
   toolCatalogMode: 'mcp',
@@ -343,7 +344,7 @@ async function refreshAuthState() {
     state.ollamaTestResult = null;
     state.ollamaInstallConfirm = false;
     state.draftCloudCreds = {};
-    state.pluginSecretUnits = [];
+    state.pluginSecretUnits = null;
     state.liveKernelEvents = [];
     state.mobileNavOpen = false;
   }
@@ -1078,237 +1079,135 @@ function renderAuthGate() {
 }
 
 function renderOverviewPage() {
-  const snap = state.snapshot || {};
-  const daemon = snap.daemon || {};
-  const cap = snap.capabilities || {};
-  const kernel = snap.kernel || { roots: [], units: [] };
-  const panels = snap.panels || [];
-  const pending = snap.approvals?.pendingCount || 0;
-  const modCfg = state.moderationConfig || DEFAULT_MOD_CONFIG;
-  const mountRw = cap.mountMode === 'readwrite' || Boolean(cap.fileWrite);
-  const modCloudLive = Boolean(modCfg.cloudOptIn && (modCfg.mode === 'cloud-first' || modCfg.mode === 'hybrid-tiered'));
-  const totalSecretKeys = (state.pluginSecretUnits || []).reduce((acc, u) => acc + (u?.keys?.length || 0), 0);
-  const ollamaModelsCount = Array.isArray(state.ollama?.models) ? state.ollama.models.length : 0;
+  const heading = makePageHeader('系统概览', '查看待办审批、工作区权限与最近的工具调用。');
+  const snap = state.snapshot;
+  if (!snap) return el('div', { class: 'lw-stack-md' }, [heading, el('p', { role: 'status', text: '等待运行状态…' })]);
 
-  const navLinkBtn = (label, pageId, icon = 'arrowRight') => makeIconButton({
-    text: label,
-    iconName: icon,
-    className: 'lw-btn lw-btn-sm',
-    onClick: () => navigate(pageId),
+  const { approvals, capabilities: cap, daemon, kernel, events } = snap;
+  const pending = approvals?.pendingCount;
+  const units = kernel?.units;
+  const roots = kernel?.roots;
+  const mod = state.moderationConfig;
+  const unknown = '未上报';
+  const mount = { readonly: '只读', readwrite: '可读写', locked: '已锁定' }[cap?.mountMode] || unknown;
+  const relay = daemon?.online === true ? '在线' : daemon?.online === false ? '离线' : unknown;
+  const reviewMode = { 'local-only': '仅本地', 'cloud-first': '云端优先', 'hybrid-tiered': '分层审查' }[mod?.mode] || mod?.mode || unknown;
+
+  function statusCard(label, value, hint, icon, tone, pageId) {
+    return el('button', { type: 'button', class: 'lw-status-card', onClick: () => navigate(pageId) }, [
+      el('span', { class: 'lw-status-label' }, [el('span', { class: 'lw-status-icon ' + tone }, [makeIcon(icon)]), label]),
+      el('strong', { text: value }),
+      el('span', { class: 'lw-status-foot' }, [hint, makeIcon('arrowRight')]),
+    ]);
+  }
+
+  function flowNode(title, value, icon, pageId) {
+    return el('button', { class: 'lw-flow-node', type: 'button', onClick: () => navigate(pageId) }, [
+      makeIcon(icon), el('strong', { text: title }), el('span', { text: value }),
+    ]);
+  }
+
+  function sectionBar(title, link, pageId) {
+    return el('div', { class: 'lw-board-heading' }, [
+      el('h2', { text: title }),
+      link ? el('button', { class: 'lw-board-link', type: 'button', onClick: () => navigate(pageId) }, [link, makeIcon('chevronRight')]) : null,
+    ]);
+  }
+
+  function fact(label, value) {
+    return el('div', { class: 'lw-board-fact' }, [
+      el('dt', { text: label }), el('dd', { text: value }),
+    ]);
+  }
+
+  function switchValue(value) {
+    return value === true ? '已启用' : value === false ? '已禁用' : unknown;
+  }
+
+  function unitNames(list) {
+    if (!Array.isArray(list)) return unknown;
+    return list.map(unit => unit.id || unit).join('、') || '无';
+  }
+
+  const auditRows = (events || []).slice(0, 5).map(event => {
+    const date = new Date(event.time);
+    const time = event.time && Number.isFinite(date.getTime());
+    return el('li', { class: 'lw-recent-item' }, [
+      el('span', { class: 'lw-event-dot is-' + event.tone, 'aria-hidden': 'true' }),
+      el('div', {}, [
+        el('strong', { text: event.name || event.source }),
+        el('span', { text: event.label || event.source }),
+      ]),
+      time ? el('time', { datetime: event.time, title: date.toLocaleString(), text: date.toLocaleTimeString('zh-CN', { hour12: false }) }) : null,
+    ]);
   });
 
-  const topologySvg = svgEl('svg', {
-    viewBox: '0 0 356 312',
-    class: 'lw-svg-diagram',
-    role: 'img',
-    'aria-label': 'LoomWard 系统实时安全拓扑图',
-  }, [
-    svgEl('path', {
-      d: 'M 156 34 L 196 34',
-      class: `lw-svg-wire ${daemon.online ? 'lw-svg-wire-active' : 'lw-svg-wire-off'}`,
-    }),
-    svgEl('path', {
-      d: 'M 273 58 C 273 78, 178 72, 178 92',
-      class: 'lw-svg-wire lw-svg-wire-active',
-    }),
-    svgEl('path', {
-      d: 'M 178 138 C 178 164, 60 158, 60 186',
-      class: `lw-svg-wire ${mountRw || cap.allowExec ? 'lw-svg-wire-warn' : 'lw-svg-wire-active'}`,
-    }),
-    svgEl('path', {
-      d: 'M 178 138 L 178 186',
-      class: `lw-svg-wire ${modCloudLive ? 'lw-svg-wire-warn' : 'lw-svg-wire-active'}`,
-    }),
-    svgEl('path', {
-      d: 'M 178 138 C 178 164, 296 158, 296 186',
-      class: `lw-svg-wire ${(kernel.units || []).length > 0 ? 'lw-svg-wire-active' : 'lw-svg-wire-off'}`,
-    }),
-    svgNodeBox({
-      x: 8, y: 10, w: 148, h: 48,
-      title: '1. 云端 OAuth 中继',
-      sub: daemon.online ? 'WSS / SSE 已连接' : '本地预览待命',
-      stateCls: daemon.online ? 'is-ok' : 'is-active',
-    }),
-    svgNodeBox({
-      x: 198, y: 10, w: 150, h: 48,
-      title: '2. 宿主审批枢纽',
-      sub: pending > 0 ? `${pending} 条待人工复核` : '24h 防重放已就绪',
-      stateCls: pending > 0 ? 'is-warn' : 'is-ok',
-      isDelta: pending > 0,
-    }),
-    svgNodeBox({
-      x: 58, y: 92, w: 240, h: 46,
-      title: '3. 护栏审查链 (antileak → mod)',
-      sub: `模式: ${modCfg.mode} · ${modCloudLive ? modCfg.cloudProvider : '零外部外发'}`,
-      stateCls: modCloudLive ? 'is-warn' : 'is-active',
-    }),
-    svgNodeBox({
-      x: 6, y: 186, w: 108, h: 70,
-      title: 'Docker 沙箱',
-      sub: `mount:${mountRw ? 'rw' : 'ro'}`,
-      badge: cap.allowExec ? 'exec 开启' : 'exec 禁用',
-      stateCls: mountRw || cap.allowExec ? 'is-warn' : 'is-ok',
-      badgeCls: mountRw || cap.allowExec ? 'is-warn' : 'is-ok',
-    }),
-    svgNodeBox({
-      x: 124, y: 186, w: 108, h: 70,
-      title: '本地审查模型',
-      sub: clipText(modCfg.localGuard?.model || 'rules', 13),
-      badge: state.ollama?.running ? `${ollamaModelsCount} Ollama 模型` : (modCfg.localGuard?.kind || 'ollama'),
-      stateCls: 'is-active',
-      badgeCls: state.ollama?.running ? 'is-ok' : 'is-muted',
-    }),
-    svgNodeBox({
-      x: 242, y: 186, w: 108, h: 70,
-      title: '进程外扩展',
-      sub: `${(kernel.units || []).length} 已挂载`,
-      badge: `${panels.length} 声明式面板`,
-      stateCls: (kernel.units || []).length > 0 ? 'is-active' : 'is-off',
-      badgeCls: 'is-muted',
-    }),
-    svgEl('path', { d: 'M 178 256 L 178 268', class: 'lw-svg-wire lw-svg-wire-active' }),
-    svgEl('path', { d: 'M 296 256 L 296 268', class: 'lw-svg-wire lw-svg-wire-active' }),
-    svgNodeBox({
-      x: 6, y: 268, w: 344, h: 36,
-      title: `KernelGuard 凭据隔离 · ${totalSecretKeys} 项只写密钥`,
-      sub: '',
-      stateCls: 'is-ok',
-    }),
-  ]);
-
-  const overviewSplit = el('div', { class: 'lw-doc-split' }, [
-    el('div', { class: 'lw-doc-main' }, [
-      pending > 0
-        ? el('div', { class: 'lw-doc-callout is-warn' }, [
-            el('div', { class: 'lw-row lw-between' }, [
-              el('span', { text: `当前有 ${pending} 条敏感工具调用等待本机人工智能参数复核，确认一致后才会签发单次执行许可。` }),
-              makeIconButton({
-                text: '前往审批队列',
-                iconName: 'clipboardCheck',
-                className: 'lw-btn lw-btn-trust lw-btn-sm',
-                onClick: () => navigate('approvals'),
-              }),
-            ]),
-          ])
-        : null,
-      makeStatStrip([
-        { icon: 'cloud', label: '云端中继', value: daemon.online ? 'WSS 在线' : '本地待命', tone: daemon.online ? 'ok' : '' },
-        { icon: 'lock', label: '工作区挂载', value: mountRw ? '读写开放 (:rw)' : '只读锁定 (:ro)', tone: mountRw ? 'warn' : 'ok' },
-        { icon: 'layers', label: '微内核装配', value: `${kernel.roots?.length || 0} 根 / ${kernel.units?.length || 0} 扩展` },
-        { icon: 'shieldCheck', label: '内容审查', value: `${modCfg.mode}`, tone: modCloudLive ? 'warn' : 'ok' },
-      ]),
-      el('section', { class: 'lw-section' }, [
-        el('div', { class: 'lw-section-head' }, [
-          el('div', {}, [
-            el('h3', { text: '实时安全防线与能力总览' }),
-            el('p', { text: '以下开关与策略实时热生效于受限 Docker 容器与进程外审查管线。' }),
-          ]),
-          navLinkBtn('配置能力开关', 'capabilities', 'sliders'),
-        ]),
-        el('div', { class: 'lw-setting-list' }, [
-          el('div', { class: 'lw-hairline-row' }, [
-            el('span', { class: 'lw-switch-main' }, [
-              makeIcon('file'),
-              el('span', { class: 'lw-switch-copy' }, [
-                el('span', { class: 'lw-switch-label', text: '文件读取与检索 (fileRead)' }),
-                el('span', { class: 'lw-switch-sub', text: 'read_file / list_directory / search_files' }),
-              ]),
-            ]),
-            el('span', { class: `lw-pill ${cap.fileRead ? 'lw-pill-ok' : 'lw-pill-err'}`, text: cap.fileRead ? '已启用' : '已熔断拦截' }),
-          ]),
-          el('div', { class: 'lw-hairline-row' }, [
-            el('span', { class: 'lw-switch-main' }, [
-              makeIcon('lock'),
-              el('span', { class: 'lw-switch-copy' }, [
-                el('span', { class: 'lw-switch-label', text: '工作区写入 (fileWrite)' }),
-                el('span', { class: 'lw-switch-sub', text: '关闭时容器强制降级为只读挂载 :ro' }),
-              ]),
-            ]),
-            el('span', { class: `lw-pill ${cap.fileWrite ? 'lw-pill-warn' : 'lw-pill-ok'}`, text: cap.fileWrite ? '读写开放 (:rw)' : '只读保护中 (:ro)' }),
-          ]),
-          el('div', { class: 'lw-hairline-row' }, [
-            el('span', { class: 'lw-switch-main' }, [
-              makeIcon('terminal'),
-              el('span', { class: 'lw-switch-copy' }, [
-                el('span', { class: 'lw-switch-label', text: '容器命令行 (allowExec)' }),
-                el('span', { class: 'lw-switch-sub', text: '一次性无入站 Linux 容器执行权限' }),
-              ]),
-            ]),
-            el('span', { class: `lw-pill ${cap.allowExec ? 'lw-pill-warn' : 'lw-pill-ok'}`, text: cap.allowExec ? '已启用' : '已禁用' }),
-          ]),
-          el('div', { class: 'lw-hairline-row' }, [
-            el('span', { class: 'lw-switch-main' }, [
-              makeIcon('shieldCheck'),
-              el('span', { class: 'lw-switch-copy' }, [
-                el('span', { class: 'lw-switch-label', text: `多模态 LLM 审查 (${modCfg.mode})` }),
-                el('span', { class: 'lw-switch-sub', text: `回退预设: ${modCfg.policyProfile} · Guard: ${modCfg.localGuard?.model || 'rules'}` }),
-              ]),
-            ]),
-            el('div', { class: 'lw-row' }, [
-              el('span', { class: `lw-pill ${modCloudLive ? 'lw-pill-warn' : 'lw-pill-ok'}`, text: modCloudLive ? `云端 ${modCfg.cloudProvider}` : '仅本地闭环' }),
-              navLinkBtn('调整策略', 'moderation', 'shieldCheck'),
-            ]),
-          ]),
-        ]),
-      ]),
-      el('section', { class: 'lw-section' }, [
-        el('div', { class: 'lw-section-head' }, [
-          el('div', {}, [
-            el('h3', { text: 'Cordis 微内核装配与扩展单元' }),
-            el('p', { text: '根插件运行于冻结物理目录（RPM）；第三方与多语言插件经进程外边界接入。' }),
-          ]),
-          panels.length ? navLinkBtn(`查看扩展面板 (${panels.length})`, 'panels', 'layoutPanel') : null,
-        ]),
-        el('div', { class: 'lw-setting-list' }, [
-          el('div', { class: 'lw-hairline-row' }, [
-            el('span', { class: 'lw-switch-label', text: '冻结根插件 (RPM)' }),
-            el('div', { class: 'lw-row' }, (kernel.roots || []).map(r => el('span', { class: 'lw-pill lw-pill-info lw-mono', text: r.id || r }))),
-          ]),
-          el('div', { class: 'lw-hairline-row' }, [
-            el('span', { class: 'lw-switch-label', text: '进程外扩展单元 (out-of-process)' }),
-            el('div', { class: 'lw-row' }, (kernel.units || []).length
-              ? kernel.units.map(u => el('span', { class: 'lw-pill lw-pill-ok lw-mono', text: u.id || u }))
-              : [el('span', { class: 'lw-muted', text: '无已挂载扩展单元' })]),
-          ]),
-          el('div', { class: 'lw-hairline-row' }, [
-            el('span', { class: 'lw-switch-label', text: '只写凭据命名空间' }),
-            el('div', { class: 'lw-row' }, [
-              el('span', { class: 'lw-pill lw-pill-info', text: `${(state.pluginSecretUnits || []).length} 单元 / ${totalSecretKeys} 密钥` }),
-              navLinkBtn('管理密钥', 'secrets', 'key'),
-            ]),
-          ]),
-        ]),
-      ]),
+  const topology = el('section', { class: 'lw-board-panel lw-map-panel' }, [
+    el('div', { class: 'lw-board-heading' }, [
+      el('h2', { text: '运行拓扑' }),
+      el('button', {
+        id: 'lw-map-toggle', type: 'button', class: 'lw-board-link', 'aria-controls': 'lw-flow-map',
+        'aria-expanded': String(state.overviewTopologyOpen),
+        onClick: () => {
+          state.overviewTopologyOpen = !state.overviewTopologyOpen;
+          render();
+          document.getElementById('lw-map-toggle')?.focus({ preventScroll: true });
+        },
+      }, [state.overviewTopologyOpen ? '收起拓扑' : '展开拓扑', makeIcon('layers')]),
     ]),
-    el('aside', { class: 'lw-doc-aside' }, [
-      el('div', { class: 'lw-section-head' }, [
-        el('div', {}, [
-          el('h3', { text: '系统运行拓扑态' }),
-          el('p', { text: '实时汇总当前权限开关、审查链与扩展边界' }),
-        ]),
-        el('span', { class: `lw-pill ${pending > 0 || mountRw ? 'lw-pill-warn' : 'lw-pill-ok'}`, text: pending > 0 ? `${pending} 待审` : '受控态' }),
+    el('div', { id: 'lw-flow-map', class: 'lw-flow-map' + (state.overviewTopologyOpen ? ' is-open' : ''), role: 'group', 'aria-label': '运行拓扑，选择节点查看配置或队列' }, [
+      el('div', { class: 'lw-flow-entry' }, [
+        flowNode('云端中继', relay, 'cloud', 'capabilities'),
+        el('span', { class: 'lw-flow-connector', 'aria-hidden': 'true' }, [makeIcon('arrowRight')]),
+        flowNode('本机审批', pending == null ? unknown : pending + ' 项待处理', 'clipboardCheck', 'approvals'),
       ]),
-      topologySvg,
-      el('div', { class: 'lw-aside-list' }, [
-        el('div', { class: 'lw-aside-row' }, [
-          el('span', { class: 'lw-muted', text: 'SSE 实时通道' }),
-          el('strong', { text: state.sseStatus === 'open' || state.sseStatus === 'connected' ? '在线推流中' : state.sseStatus }),
-        ]),
-        el('div', { class: 'lw-aside-row' }, [
-          el('span', { class: 'lw-muted', text: '会话隔离机制' }),
-          el('strong', { text: (state.auth?.sessionPersistence || 'tab') === 'tab' ? '标签页令牌隔离' : '浏览器会话' }),
-        ]),
-        el('div', { class: 'lw-aside-row' }, [
-          el('span', { class: 'lw-muted', text: '聚合工具入口' }),
-          el('strong', { text: `${(cap.effectiveTools || []).length} 项工具` }),
-        ]),
+      el('div', { class: 'lw-flow-hub' }, [makeIcon('shield'), el('strong', { text: 'LoomWard 宿主' })]),
+      el('div', { class: 'lw-flow-branches' }, [
+        flowNode('Docker 沙箱', mount, 'terminal', 'capabilities'),
+        flowNode('内容审查', mod?.enabled === false ? '已关闭' : reviewMode, 'shieldCheck', 'moderation'),
+        flowNode('进程外扩展', units ? units.length + ' 个单元' : unknown, 'layers', 'panels'),
       ]),
     ]),
   ]);
 
-  return el('div', { class: 'lw-stack-md' }, [
-    makePageHeader('系统概览', '汇总本地守护进程、工作区挂载姿态、微内核装配清单与内容安全管线状态。'),
-    overviewSplit,
+  return el('div', { class: 'lw-overview' }, [
+    heading,
+    el('div', { class: 'lw-status-grid' }, [
+      statusCard('待审批请求', pending ?? '—', pending > 0 ? '前往处理' : '查看审批队列', 'clipboardCheck', pending > 0 ? 'amber' : 'blue', 'approvals'),
+      statusCard('云端中继', relay, '查看宿主服务', 'cloud', daemon?.online ? 'green' : 'slate', 'capabilities'),
+      statusCard('工作区挂载', mount, '查看沙箱权限', 'lock', cap?.mountMode === 'readonly' ? 'green' : cap?.mountMode ? 'amber' : 'slate', 'capabilities'),
+      statusCard('进程外扩展', units?.length ?? '—', '查看扩展面板', 'layers', 'violet', 'panels'),
+    ]),
+    el('div', { class: 'lw-board-grid' }, [
+      topology,
+      el('section', { class: 'lw-board-panel' }, [
+        sectionBar('最近审计', '查看全部', 'audit'),
+        auditRows.length ? el('ul', { class: 'lw-recent' }, auditRows) : el('p', { class: 'lw-board-empty', text: events ? '暂无审计记录' : unknown }),
+        snap.telemetry ? el('div', { class: 'lw-board-totals' }, [
+          ['成功', snap.telemetry.totalAuditSuccess], ['失败', snap.telemetry.totalAuditFailed], ['策略拦截', snap.telemetry.totalBlocked],
+        ].map(([label, value]) => el('span', {}, [label, el('b', { text: value ?? '—' })]))) : null,
+      ]),
+    ]),
+    el('div', { class: 'lw-board-grid' }, [
+      el('section', { class: 'lw-board-panel' }, [
+        sectionBar('工作区权限', '管理能力', 'capabilities'),
+        el('dl', { class: 'lw-board-facts' }, [
+          fact('文件读取', switchValue(cap?.fileRead)),
+          fact('文件写入', switchValue(cap?.fileWrite)),
+          fact('容器命令执行', switchValue(cap?.allowExec)),
+          fact('已启用工具', cap?.effectiveTools?.filter(tool => tool.enabled).length ?? unknown),
+        ]),
+      ]),
+      el('section', { class: 'lw-board-panel' }, [
+        sectionBar('扩展与凭据', '管理密钥', 'secrets'),
+        el('dl', { class: 'lw-board-facts' }, [
+          fact('根插件', unitNames(roots)),
+          fact('进程外单元', unitNames(units)),
+          fact('声明式面板', snap.panels?.length ?? unknown),
+          fact('只写密钥', state.pluginSecretUnits == null ? unknown : state.pluginSecretUnits.reduce((n, unit) => n + (unit.keys?.length || 0), 0)),
+        ]),
+      ]),
+    ]),
   ]);
 }
 
