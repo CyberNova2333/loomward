@@ -185,7 +185,7 @@ export async function apply(ctx, cfg = {}) {
   function getConfig() {
     return loadEffectiveModerationConfig({
       stateDir: cfg.stateDir || null,
-      workspaceRoots: cfg.workspaceRoots || [],
+      readStoredConfig: cfg.readStoredConfig,
       inlineConfig: cfg.moderation || cfg.inlineConfig || null,
       blockedOrigins: cfg.blockedOrigins || [],
       preferInlineConfig: cfg.preferInlineConfig === true,

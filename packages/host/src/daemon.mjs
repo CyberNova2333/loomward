@@ -2,6 +2,7 @@
 // This file is part of LoomWard (织盾) and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
 import fs from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { readModerationConfigSync } from '../../../local/moderation-config.mjs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -176,6 +177,9 @@ export async function startLoomWardDaemon({
           workspaceRoots,
           blockedOrigins: effectiveBlockedOrigins,
           ...(llmModeration && typeof llmModeration === 'object' ? llmModeration : {}),
+          readStoredConfig: () => readModerationConfigSync(stateDir, {
+            workspaceRoots, blockedOrigins: effectiveBlockedOrigins, fallback: null,
+          }),
         },
         trust: {
           signed: true,
