@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // This file is part of LoomWard (织盾) and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
-// Single-Origin Unified Console UI controller with VitePress-style sidebar navigation.
+// Single-Origin Unified Console UI controller with grouped workspace navigation.
 import {
   b64urlToBytes,
   bytesToB64url,
@@ -143,6 +143,8 @@ function navigate(pageId, opts = {}) {
     void loadFencingConfig({ silent: true });
   }
   render();
+  (root.querySelector('.lw-page-head h1') || root.querySelector('#lw-main'))?.focus({ preventScroll: true });
+  window.scrollTo(0, 0);
 }
 
 function stopOllamaPolling() {
@@ -438,6 +440,10 @@ async function handleLogout() {
 }
 
 const ICON_SHAPES = {
+  menu: [['path', { d: 'M3 6h18M3 12h18M3 18h18' }]],
+  close: [['path', { d: 'm6 6 12 12M18 6 6 18' }]],
+  moon: [['path', { d: 'M20.6 13A8.8 8.8 0 0 1 11 3.4 9 9 0 1 0 20.6 13Z' }]],
+  sun: [['circle', { cx: 12, cy: 12, r: 4 }], ['path', { d: 'M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5' }]],
   shield: [['path', { d: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z' }]],
   shieldCheck: [
     ['path', { d: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z' }],
@@ -819,143 +825,125 @@ function makeSegmentedChoice({ options, value, savedValue, disabled = false, onS
 
 function makePageHeader(title, desc) {
   return el('div', { class: 'lw-page-head' }, [
-    el('h2', { text: title }),
+    el('h1', { text: title, tabindex: '-1' }),
     desc ? el('p', { class: 'lw-page-desc', text: desc }) : null,
   ]);
 }
 
+const NAV_GROUPS = [
+  { title: '工作台', pages: [
+    { id: 'overview', label: '系统概览', icon: 'home' },
+    { id: 'approvals', label: '审批队列', icon: 'clipboardCheck' },
+    { id: 'audit', label: '实时审计', icon: 'activity' },
+  ] },
+  { title: '策略与权限', pages: [
+    { id: 'capabilities', label: '能力与服务', icon: 'sliders' },
+    { id: 'fencing', label: '安全围栏', icon: 'shield' },
+    { id: 'moderation', label: '内容审查', icon: 'shieldCheck' },
+    { id: 'secrets', label: '插件密钥', icon: 'key' },
+  ] },
+  { title: '工具与扩展', pages: [
+    { id: 'tools', label: 'API 工作台', icon: 'code' },
+    { id: 'panels', label: '扩展面板', icon: 'layoutPanel' },
+  ] },
+];
+const drawerViewport = window.matchMedia('(max-width: 900px)');
+
+function brand() {
+  return el('div', { class: 'lw-brand' }, [
+    el('img', { src: '/brand-icon.svg', alt: '', width: '39', height: '39' }),
+    el('div', { class: 'lw-brand-copy' }, [
+      el('strong', { text: 'LoomWard' }),
+      el('span', { text: '织盾控制台' }),
+    ]),
+  ]);
+}
+
+function chromeButton(id, icon, label, action, attrs = {}) {
+  return el('button', {
+    id, type: 'button', class: 'lw-chrome-button', title: label, 'aria-label': label, onClick: action, ...attrs,
+  }, [makeIcon(icon)]);
+}
+
+function setDrawer(open) {
+  state.mobileNavOpen = open;
+  render();
+  root.querySelector(open ? '.lw-nav-item.active' : '#lw-menu-open')?.focus();
+}
+
 function renderTopbar() {
   const authed = Boolean(state.auth?.authenticated);
-  const sseOk = state.sseStatus === 'open' || state.sseStatus === 'connected';
-
+  const group = NAV_GROUPS.find(g => g.pages.some(p => p.id === state.page));
+  const live = state.sseStatus === 'connected' || state.sseStatus === 'open';
+  const streamLabel = live ? '推送在线' : state.sseStatus === 'connecting' ? '正在连接' : '推送未连接';
+  const dark = theme.current() === 'dark';
   return el('header', { class: 'lw-topbar' }, [
     el('div', { class: 'lw-topbar-inner' }, [
-      el('div', { class: 'lw-brand' }, [
-        authed
-          ? el('button', {
-              type: 'button',
-              class: 'lw-btn lw-btn-sm lw-menu-btn',
-              'aria-expanded': String(state.mobileNavOpen),
-              text: state.mobileNavOpen ? '关闭导航' : '导航菜单',
-              onClick: () => { state.mobileNavOpen = !state.mobileNavOpen; render(); },
-            })
-          : null,
-        el('img', {
-          src: '/brand-icon.svg',
-          class: 'lw-console-logo',
-          alt: 'LoomWard · 织盾',
-          width: '34',
-          height: '34',
+      authed ? el('div', { class: 'lw-location' }, [
+        chromeButton('lw-menu-open', 'menu', '打开导航', () => setDrawer(true), {
+          class: 'lw-chrome-button lw-menu-btn', 'aria-controls': 'lw-navigation', 'aria-expanded': String(state.mobileNavOpen),
         }),
-        el('div', {}, [
-          el('div', { class: 'lw-row' }, [
-            el('h1', { class: 'lw-brand-title', text: 'LoomWard · 织盾' }),
-            el('span', { class: 'lw-pill lw-pill-info', text: '安全控制台' }),
-          ]),
-          el('p', { class: 'lw-brand-sub', text: '本地回环管控面 · Cordis 4 微内核与多模态防护' }),
-        ]),
-      ]),
-      el('div', { class: 'lw-row' }, [
-        authed && state.auth?.authMethod
-          ? el('span', {
-              class: `lw-pill ${state.auth.authMethod === 'preview' ? 'lw-pill-warn' : ''}`,
-              text: state.auth.authMethod === 'preview'
-                ? '本地预览（免初始化）'
-                : state.auth.authMethod === 'passkey' ? 'PassKey 会话' : '强密码会话',
-            })
-          : null,
-        authed
-          ? el('span', {
-              class: `lw-pill ${sseOk ? 'lw-pill-ok' : 'lw-pill-warn'}`,
-              text: sseOk ? 'SSE 在线' : `SSE ${state.sseStatus}`,
-            })
-          : el('span', { class: 'lw-pill lw-pill-warn', text: '未解锁' }),
-        el('button', {
-          type: 'button',
-          class: 'lw-btn lw-btn-sm',
-          text: theme.current() === 'dark' ? '浅色' : '深色',
-          onClick: () => { theme.toggle(); render(); },
-        }),
-        authed
-          ? el('button', {
-              type: 'button',
-              class: 'lw-btn lw-btn-sm',
-              disabled: state.busy,
-              text: '锁定退出',
-              onClick: handleLogout,
-            })
-          : null,
+        el('span', { class: 'lw-location-root', text: '控制台' }),
+        makeIcon('chevronRight'),
+        el('strong', { text: group?.title || '工作台' }),
+      ]) : brand(),
+      el('div', { class: 'lw-topbar-actions' }, [
+        authed ? el('span', { class: `lw-stream-state ${live ? 'is-online' : ''}`, text: streamLabel }) : null,
+        chromeButton('lw-theme', dark ? 'sun' : 'moon', dark ? '切换到浅色' : '切换到深色', () => { theme.toggle(); render(); }),
+        authed ? chromeButton('lw-lock', 'lock', '锁定退出', handleLogout, { disabled: state.busy }) : null,
       ]),
     ]),
   ]);
 }
 
 function renderSidebar() {
-  const pendingCount = state.snapshot?.approvals?.pendingCount || 0;
-  const panelsCount = state.snapshot?.panels?.length || 0;
-  const mcpCount = state.snapshot?.mcpServers?.serverCount || 0;
-  const cacheMissing = state.fencingData?.cache?.status && state.fencingData.cache.status !== 'fresh';
-  const enabledToolsCount = (state.snapshot?.capabilities?.effectiveTools || []).filter(t => t.enabled).length;
-  const persistence = state.auth?.sessionPersistence || 'tab';
-
-  const groups = [
-    {
-      title: '运行总览',
-      items: [
-        { id: 'overview', label: '系统概览', icon: 'home' },
-      ],
-    },
-    {
-      title: '安全与治理',
-      items: [
-        { id: 'approvals', label: '待审审批队列', icon: 'clipboardCheck', badge: pendingCount > 0 ? String(pendingCount) : '', warn: pendingCount > 0 },
-        { id: 'capabilities', label: '能力开关与服务', icon: 'sliders' },
-        { id: 'fencing', label: 'Agent 安全围栏', icon: 'shield', badge: mcpCount > 0 ? String(mcpCount) : (cacheMissing ? '!' : ''), warn: Boolean(cacheMissing) },
-        { id: 'moderation', label: 'LLM 审查策略', icon: 'shieldCheck' },
-        { id: 'secrets', label: '插件密钥库', icon: 'key' },
-      ],
-    },
-    {
-      title: '扩展与观测',
-      items: [
-        { id: 'tools', label: 'API 接口工作台', icon: 'code', badge: enabledToolsCount > 0 ? String(enabledToolsCount) : '' },
-        { id: 'panels', label: '声明式扩展面板', icon: 'layoutPanel', badge: String(panelsCount) },
-        { id: 'audit', label: '实时审计通道', icon: 'activity' },
-      ],
-    },
-  ];
-
+  const pending = state.snapshot?.approvals?.pendingCount;
+  const cacheStatus = state.fencingData?.cache?.status;
+  const session = state.auth?.previewMode ? '本地预览' : state.auth?.authMethod === 'passkey' ? 'PassKey 会话' : '密码会话';
   return el('aside', {
-    class: `lw-sidebar ${state.mobileNavOpen ? 'open' : ''}`,
-    'aria-label': '控制台侧边导航',
+    id: 'lw-navigation', class: `lw-sidebar ${state.mobileNavOpen ? 'open' : ''}`, 'aria-label': '控制台导航',
   }, [
-    el('nav', { class: 'lw-sidebar-nav' }, groups.map(group => el('div', { class: 'lw-nav-group' }, [
-      el('div', { class: 'lw-nav-group-title', text: group.title }),
-      ...group.items.map(item => el('button', {
-        type: 'button',
-        class: `lw-nav-item ${state.page === item.id ? 'active' : ''}`,
-        'data-nav-id': item.id,
-        'aria-current': state.page === item.id ? 'page' : 'false',
-        onClick: () => navigate(item.id),
-      }, [
-        el('span', { class: 'lw-nav-left' }, [
-          makeIcon(item.icon),
-          el('span', { text: item.label }),
-        ]),
-        item.badge
-          ? el('span', { class: `lw-nav-badge ${item.warn ? 'lw-nav-badge-warn' : ''}`, text: item.badge })
-          : null,
-      ])),
-    ]))),
-    el('div', { class: 'lw-sidebar-footer' }, [
-      el('div', { class: 'lw-row lw-between' }, [
-        el('span', { class: 'lw-sidebar-meta', text: 'KernelGuard' }),
-        el('span', { class: 'lw-pill lw-pill-ok', text: '已锁定' }),
+    el('div', { class: 'lw-sidebar-head' }, [
+      brand(),
+      chromeButton('lw-menu-close', 'close', '关闭导航', () => setDrawer(false), { class: 'lw-chrome-button lw-menu-btn' }),
+    ]),
+    el('nav', { class: 'lw-sidebar-nav', 'aria-label': '页面' }, NAV_GROUPS.map(group =>
+      el('div', { class: 'lw-nav-group' }, [
+        el('div', { class: 'lw-nav-group-title', text: group.title }),
+        ...group.pages.map(item => el('button', {
+          type: 'button', class: `lw-nav-item ${state.page === item.id ? 'active' : ''}`,
+          'data-nav-id': item.id, 'aria-current': state.page === item.id ? 'page' : null,
+          onClick: () => navigate(item.id),
+        }, [
+          makeIcon(item.icon), el('span', { text: item.label }),
+          item.id === 'approvals' && pending > 0 ? el('span', { class: 'lw-nav-badge', text: String(pending) }) : null,
+          item.id === 'fencing' && cacheStatus && cacheStatus !== 'fresh'
+            ? el('span', { class: 'lw-nav-badge', 'aria-label': '围栏缓存需要检查', title: '围栏缓存需要检查', text: '!' }) : null,
+        ])),
       ]),
-      el('div', { class: 'lw-sidebar-meta', text: `会话策略：${persistence === 'tab' ? '标签页隔离' : '浏览器会话'}` }),
+    )),
+    el('div', { class: 'lw-sidebar-footer' }, [
+      makeIcon('lock'),
+      el('div', {}, [
+        el('strong', { text: session }),
+        el('span', { text: state.auth?.sessionPersistence === 'browser' ? '浏览器会话' : '标签页隔离' }),
+      ]),
     ]),
   ]);
 }
+
+drawerViewport.addEventListener('change', () => {
+  if (state.mobileNavOpen && !drawerViewport.matches) { state.mobileNavOpen = false; render(); }
+});
+document.addEventListener('keydown', event => {
+  if (!state.mobileNavOpen) return;
+  if (event.key === 'Escape') { event.preventDefault(); setDrawer(false); return; }
+  if (event.key !== 'Tab') return;
+  const buttons = root.querySelectorAll('.lw-sidebar button');
+  const first = buttons[0], last = buttons[buttons.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+  if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+});
 
 function renderAuthGate() {
   const auth = state.auth || {};
@@ -1468,7 +1456,7 @@ function renderApprovalsPage() {
   ]);
 
   return el('div', { class: 'lw-stack-md' }, [
-    makePageHeader('待审审批队列', '对敏感工具调用核对完整未脱敏参数与 policyDigest，批准后仅单次消费并登记 24h 防重放账本。'),
+    makePageHeader('审批队列', '核对工具与调用参数后，可批准一次执行或拒绝请求。'),
     splitLayout,
   ]);
 }
@@ -1733,7 +1721,7 @@ function renderCapabilitiesPage() {
   ]);
 
   return el('div', { class: 'lw-stack-md' }, [
-    makePageHeader('能力开关与宿主服务', '实时原子修改工作区外 0600 策略开关与浏览器会话持久化姿态。'),
+    makePageHeader('能力与服务', '管理工作区读写、命令执行和宿主服务。'),
     splitLayout,
   ]);
 }
@@ -2952,7 +2940,7 @@ function renderModerationPage() {
   ]);
 
   return el('div', { class: 'lw-stack-md' }, [
-    makePageHeader('LLM 多模态内容安全审查策略', '热更新 <stateDir>/moderation/config.json（0600），位于离线 antileak 护栏之后按策略执行。'),
+    makePageHeader('内容审查', '配置本地与云端模型的审查顺序和异常处理方式。'),
     el('datalist', { id: datalistId }, [...modelChoices].map(name => el('option', { value: name }))),
     tabBar,
     state.modTab === 'ollama' ? renderOllamaManagerCard() : routingSplit,
@@ -3145,7 +3133,7 @@ function renderSecretsPage() {
   ]);
 
   return el('div', { class: 'lw-stack-md' }, [
-    makePageHeader('扩展插件密钥库（只写隔离）', '按 KernelGuard 绑定 unitId 分仓加密落盘，前端与工具日志永远无法读取明文。'),
+    makePageHeader('插件密钥', '按插件保存凭据，保存后可查看键名或更新密钥。'),
     split,
   ]);
 }
@@ -3228,7 +3216,7 @@ function renderPanelCard(panel) {
 function renderPanelsPage() {
   const panels = state.snapshot?.panels || [];
   return el('div', { class: 'lw-stack-md' }, [
-    makePageHeader('声明式扩展面板（console:panel@1）', '由进程外插件按纯 JSON Schema 声明并由主机脱敏清洗渲染，零可执行脚本注入。'),
+    makePageHeader('扩展面板', '查看已安装插件提供的面板和操作。'),
     makeStatStrip([
       { icon: 'layoutPanel', label: '已挂载扩展面板', value: `${panels.length} 个`, tone: panels.length > 0 ? 'ok' : '' },
       { icon: 'shieldCheck', label: '脚本与 HTML', value: '严格零执行注入' },
@@ -3425,7 +3413,7 @@ function renderAuditPage() {
   });
 
   return el('div', { class: 'lw-stack-md' }, [
-    makePageHeader('实时审计通道', '经由进程内通道与私有 0600 control.sock 推流的元数据与工具拦截历史；点击任意记录行可展开详细 Trace 与 Transport JSON。'),
+    makePageHeader('实时审计', '查看最近的工具调用与内核事件，展开记录可核对详情。'),
     makeStatStrip([
       { icon: 'activity', label: 'SSE 实时通道', value: sseOk ? '在线推送中' : state.sseStatus, tone: sseOk ? 'ok' : 'warn' },
       { icon: 'terminal', label: '内核控制事件', value: `${state.liveKernelEvents.length} 条` },
@@ -4191,7 +4179,7 @@ function renderToolsPage() {
   }
 
   return el('div', { class: 'lw-stack-md' }, [
-    makePageHeader('API 接口工作台（APIFox 双栏契约视图）', '左边检索浏览，右边直接调试参数负载、单工具熔断开关或探测控制台接口；覆盖内置沙箱、第三方 MCP 与控制面 HTTP API。'),
+    makePageHeader('API 工作台', '检索工具和控制台接口，查看参数、权限与调试结果。'),
     makeStatStrip([
       { icon: 'code', label: 'MCP 工具总计', value: `${allTools.length} 项` },
       { icon: 'lock', label: 'Docker 沙箱接口', value: `${sandboxCount} 项`, tone: 'ok' },
@@ -5160,7 +5148,7 @@ function renderFencingPage() {
   ]);
 
   return el('div', { class: 'lw-stack-md' }, [
-    makePageHeader('Agent 安全围栏', '集中治理 R1–R7 离线防泄漏策略与第三方进程外 MCP 工具围栏，严格保持 fail-closed 边界与写后不可读回。'),
+    makePageHeader('安全围栏', '管理离线防泄漏规则和第三方 MCP 工具的访问策略。'),
     tabBar,
     activeTab === 'mcp' ? renderFencingMcpTab() : renderFencingAntileakTab(),
   ]);
@@ -5235,10 +5223,14 @@ function render() {
   const prevScrollTop = prevPre ? prevPre.scrollTop : 0;
   const prevScrollLeft = prevPre ? prevPre.scrollLeft : 0;
 
+  const navFocus = document.activeElement?.closest('.lw-nav-item')?.dataset.navId;
+  const chromeFocus = document.activeElement?.closest('.lw-chrome-button')?.id;
+  const sidebarScroll = root.querySelector('.lw-sidebar')?.scrollTop;
   clearNode(root);
-  const children = [renderTopbar()];
+  const children = [];
 
   if (!state.auth?.authenticated) {
+    children.push(renderTopbar());
     const main = el('main', { class: 'lw-shell' });
     if (state.error) main.append(el('div', { class: 'lw-banner lw-banner-err', role: 'alert', text: state.error }));
     if (state.notice) main.append(el('div', { class: 'lw-banner lw-banner-ok', role: 'status', text: state.notice }));
@@ -5252,19 +5244,26 @@ function render() {
 
     const backdrop = el('div', {
       class: `lw-sidebar-backdrop ${state.mobileNavOpen ? 'open' : ''}`,
-      onClick: () => { state.mobileNavOpen = false; render(); },
+      onClick: () => setDrawer(false),
     });
 
     children.push(el('div', { class: 'lw-app-frame' }, [
       renderSidebar(),
       backdrop,
-      el('main', { class: 'lw-content' }, [contentInner]),
+      el('div', { class: 'lw-work-area', inert: state.mobileNavOpen ? '' : null }, [
+        renderTopbar(),
+        el('main', { id: 'lw-main', class: 'lw-content', tabindex: '-1' }, [contentInner]),
+      ]),
     ]));
   }
 
   const modal = renderReviewModal();
   if (modal) children.push(modal);
   root.append(...children);
+  const sidebar = root.querySelector('.lw-sidebar');
+  if (sidebar && sidebarScroll) sidebar.scrollTop = sidebarScroll;
+  if (navFocus) sidebar?.querySelector(`[data-nav-id="${CSS.escape(navFocus)}"]`)?.focus({ preventScroll: true });
+  if (chromeFocus) document.getElementById(chromeFocus)?.focus({ preventScroll: true });
 
   if (modal && (prevScrollTop > 0 || prevScrollLeft > 0)) {
     const nextPre = root.querySelector('.lw-modal .lw-pre');

@@ -348,6 +348,8 @@
       void loadFencingConfig({ silent: true });
     }
     render();
+    (root.querySelector(".lw-page-head h1") || root.querySelector("#lw-main"))?.focus({ preventScroll: true });
+    window.scrollTo(0, 0);
   }
   function stopOllamaPolling() {
     if (state.ollamaPollTimer) {
@@ -631,6 +633,10 @@
     });
   }
   var ICON_SHAPES = {
+    menu: [["path", { d: "M3 6h18M3 12h18M3 18h18" }]],
+    close: [["path", { d: "m6 6 12 12M18 6 6 18" }]],
+    moon: [["path", { d: "M20.6 13A8.8 8.8 0 0 1 11 3.4 9 9 0 1 0 20.6 13Z" }]],
+    sun: [["circle", { cx: 12, cy: 12, r: 4 }], ["path", { d: "M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5" }]],
     shield: [["path", { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" }]],
     shieldCheck: [
       ["path", { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" }],
@@ -993,132 +999,146 @@
   }
   function makePageHeader(title, desc) {
     return el("div", { class: "lw-page-head" }, [
-      el("h2", { text: title }),
+      el("h1", { text: title, tabindex: "-1" }),
       desc ? el("p", { class: "lw-page-desc", text: desc }) : null
     ]);
   }
+  var NAV_GROUPS = [
+    { title: "\u5DE5\u4F5C\u53F0", pages: [
+      { id: "overview", label: "\u7CFB\u7EDF\u6982\u89C8", icon: "home" },
+      { id: "approvals", label: "\u5BA1\u6279\u961F\u5217", icon: "clipboardCheck" },
+      { id: "audit", label: "\u5B9E\u65F6\u5BA1\u8BA1", icon: "activity" }
+    ] },
+    { title: "\u7B56\u7565\u4E0E\u6743\u9650", pages: [
+      { id: "capabilities", label: "\u80FD\u529B\u4E0E\u670D\u52A1", icon: "sliders" },
+      { id: "fencing", label: "\u5B89\u5168\u56F4\u680F", icon: "shield" },
+      { id: "moderation", label: "\u5185\u5BB9\u5BA1\u67E5", icon: "shieldCheck" },
+      { id: "secrets", label: "\u63D2\u4EF6\u5BC6\u94A5", icon: "key" }
+    ] },
+    { title: "\u5DE5\u5177\u4E0E\u6269\u5C55", pages: [
+      { id: "tools", label: "API \u5DE5\u4F5C\u53F0", icon: "code" },
+      { id: "panels", label: "\u6269\u5C55\u9762\u677F", icon: "layoutPanel" }
+    ] }
+  ];
+  var drawerViewport = window.matchMedia("(max-width: 900px)");
+  function brand() {
+    return el("div", { class: "lw-brand" }, [
+      el("img", { src: "/brand-icon.svg", alt: "", width: "39", height: "39" }),
+      el("div", { class: "lw-brand-copy" }, [
+        el("strong", { text: "LoomWard" }),
+        el("span", { text: "\u7EC7\u76FE\u63A7\u5236\u53F0" })
+      ])
+    ]);
+  }
+  function chromeButton(id, icon, label, action, attrs = {}) {
+    return el("button", {
+      id,
+      type: "button",
+      class: "lw-chrome-button",
+      title: label,
+      "aria-label": label,
+      onClick: action,
+      ...attrs
+    }, [makeIcon(icon)]);
+  }
+  function setDrawer(open) {
+    state.mobileNavOpen = open;
+    render();
+    root.querySelector(open ? ".lw-nav-item.active" : "#lw-menu-open")?.focus();
+  }
   function renderTopbar() {
     const authed = Boolean(state.auth?.authenticated);
-    const sseOk = state.sseStatus === "open" || state.sseStatus === "connected";
+    const group = NAV_GROUPS.find((g) => g.pages.some((p) => p.id === state.page));
+    const live = state.sseStatus === "connected" || state.sseStatus === "open";
+    const streamLabel = live ? "\u63A8\u9001\u5728\u7EBF" : state.sseStatus === "connecting" ? "\u6B63\u5728\u8FDE\u63A5" : "\u63A8\u9001\u672A\u8FDE\u63A5";
+    const dark = theme.current() === "dark";
     return el("header", { class: "lw-topbar" }, [
       el("div", { class: "lw-topbar-inner" }, [
-        el("div", { class: "lw-brand" }, [
-          authed ? el("button", {
-            type: "button",
-            class: "lw-btn lw-btn-sm lw-menu-btn",
-            "aria-expanded": String(state.mobileNavOpen),
-            text: state.mobileNavOpen ? "\u5173\u95ED\u5BFC\u822A" : "\u5BFC\u822A\u83DC\u5355",
-            onClick: () => {
-              state.mobileNavOpen = !state.mobileNavOpen;
-              render();
-            }
-          }) : null,
-          el("img", {
-            src: "/brand-icon.svg",
-            class: "lw-console-logo",
-            alt: "LoomWard \xB7 \u7EC7\u76FE",
-            width: "34",
-            height: "34"
+        authed ? el("div", { class: "lw-location" }, [
+          chromeButton("lw-menu-open", "menu", "\u6253\u5F00\u5BFC\u822A", () => setDrawer(true), {
+            class: "lw-chrome-button lw-menu-btn",
+            "aria-controls": "lw-navigation",
+            "aria-expanded": String(state.mobileNavOpen)
           }),
-          el("div", {}, [
-            el("div", { class: "lw-row" }, [
-              el("h1", { class: "lw-brand-title", text: "LoomWard \xB7 \u7EC7\u76FE" }),
-              el("span", { class: "lw-pill lw-pill-info", text: "\u5B89\u5168\u63A7\u5236\u53F0" })
-            ]),
-            el("p", { class: "lw-brand-sub", text: "\u672C\u5730\u56DE\u73AF\u7BA1\u63A7\u9762 \xB7 Cordis 4 \u5FAE\u5185\u6838\u4E0E\u591A\u6A21\u6001\u9632\u62A4" })
-          ])
-        ]),
-        el("div", { class: "lw-row" }, [
-          authed && state.auth?.authMethod ? el("span", {
-            class: `lw-pill ${state.auth.authMethod === "preview" ? "lw-pill-warn" : ""}`,
-            text: state.auth.authMethod === "preview" ? "\u672C\u5730\u9884\u89C8\uFF08\u514D\u521D\u59CB\u5316\uFF09" : state.auth.authMethod === "passkey" ? "PassKey \u4F1A\u8BDD" : "\u5F3A\u5BC6\u7801\u4F1A\u8BDD"
-          }) : null,
-          authed ? el("span", {
-            class: `lw-pill ${sseOk ? "lw-pill-ok" : "lw-pill-warn"}`,
-            text: sseOk ? "SSE \u5728\u7EBF" : `SSE ${state.sseStatus}`
-          }) : el("span", { class: "lw-pill lw-pill-warn", text: "\u672A\u89E3\u9501" }),
-          el("button", {
-            type: "button",
-            class: "lw-btn lw-btn-sm",
-            text: theme.current() === "dark" ? "\u6D45\u8272" : "\u6DF1\u8272",
-            onClick: () => {
-              theme.toggle();
-              render();
-            }
+          el("span", { class: "lw-location-root", text: "\u63A7\u5236\u53F0" }),
+          makeIcon("chevronRight"),
+          el("strong", { text: group?.title || "\u5DE5\u4F5C\u53F0" })
+        ]) : brand(),
+        el("div", { class: "lw-topbar-actions" }, [
+          authed ? el("span", { class: `lw-stream-state ${live ? "is-online" : ""}`, text: streamLabel }) : null,
+          chromeButton("lw-theme", dark ? "sun" : "moon", dark ? "\u5207\u6362\u5230\u6D45\u8272" : "\u5207\u6362\u5230\u6DF1\u8272", () => {
+            theme.toggle();
+            render();
           }),
-          authed ? el("button", {
-            type: "button",
-            class: "lw-btn lw-btn-sm",
-            disabled: state.busy,
-            text: "\u9501\u5B9A\u9000\u51FA",
-            onClick: handleLogout
-          }) : null
+          authed ? chromeButton("lw-lock", "lock", "\u9501\u5B9A\u9000\u51FA", handleLogout, { disabled: state.busy }) : null
         ])
       ])
     ]);
   }
   function renderSidebar() {
-    const pendingCount = state.snapshot?.approvals?.pendingCount || 0;
-    const panelsCount = state.snapshot?.panels?.length || 0;
-    const mcpCount = state.snapshot?.mcpServers?.serverCount || 0;
-    const cacheMissing = state.fencingData?.cache?.status && state.fencingData.cache.status !== "fresh";
-    const enabledToolsCount = (state.snapshot?.capabilities?.effectiveTools || []).filter((t) => t.enabled).length;
-    const persistence = state.auth?.sessionPersistence || "tab";
-    const groups = [
-      {
-        title: "\u8FD0\u884C\u603B\u89C8",
-        items: [
-          { id: "overview", label: "\u7CFB\u7EDF\u6982\u89C8", icon: "home" }
-        ]
-      },
-      {
-        title: "\u5B89\u5168\u4E0E\u6CBB\u7406",
-        items: [
-          { id: "approvals", label: "\u5F85\u5BA1\u5BA1\u6279\u961F\u5217", icon: "clipboardCheck", badge: pendingCount > 0 ? String(pendingCount) : "", warn: pendingCount > 0 },
-          { id: "capabilities", label: "\u80FD\u529B\u5F00\u5173\u4E0E\u670D\u52A1", icon: "sliders" },
-          { id: "fencing", label: "Agent \u5B89\u5168\u56F4\u680F", icon: "shield", badge: mcpCount > 0 ? String(mcpCount) : cacheMissing ? "!" : "", warn: Boolean(cacheMissing) },
-          { id: "moderation", label: "LLM \u5BA1\u67E5\u7B56\u7565", icon: "shieldCheck" },
-          { id: "secrets", label: "\u63D2\u4EF6\u5BC6\u94A5\u5E93", icon: "key" }
-        ]
-      },
-      {
-        title: "\u6269\u5C55\u4E0E\u89C2\u6D4B",
-        items: [
-          { id: "tools", label: "API \u63A5\u53E3\u5DE5\u4F5C\u53F0", icon: "code", badge: enabledToolsCount > 0 ? String(enabledToolsCount) : "" },
-          { id: "panels", label: "\u58F0\u660E\u5F0F\u6269\u5C55\u9762\u677F", icon: "layoutPanel", badge: String(panelsCount) },
-          { id: "audit", label: "\u5B9E\u65F6\u5BA1\u8BA1\u901A\u9053", icon: "activity" }
-        ]
-      }
-    ];
+    const pending = state.snapshot?.approvals?.pendingCount;
+    const cacheStatus = state.fencingData?.cache?.status;
+    const session = state.auth?.previewMode ? "\u672C\u5730\u9884\u89C8" : state.auth?.authMethod === "passkey" ? "PassKey \u4F1A\u8BDD" : "\u5BC6\u7801\u4F1A\u8BDD";
     return el("aside", {
+      id: "lw-navigation",
       class: `lw-sidebar ${state.mobileNavOpen ? "open" : ""}`,
-      "aria-label": "\u63A7\u5236\u53F0\u4FA7\u8FB9\u5BFC\u822A"
+      "aria-label": "\u63A7\u5236\u53F0\u5BFC\u822A"
     }, [
-      el("nav", { class: "lw-sidebar-nav" }, groups.map((group) => el("div", { class: "lw-nav-group" }, [
-        el("div", { class: "lw-nav-group-title", text: group.title }),
-        ...group.items.map((item) => el("button", {
-          type: "button",
-          class: `lw-nav-item ${state.page === item.id ? "active" : ""}`,
-          "data-nav-id": item.id,
-          "aria-current": state.page === item.id ? "page" : "false",
-          onClick: () => navigate(item.id)
-        }, [
-          el("span", { class: "lw-nav-left" }, [
+      el("div", { class: "lw-sidebar-head" }, [
+        brand(),
+        chromeButton("lw-menu-close", "close", "\u5173\u95ED\u5BFC\u822A", () => setDrawer(false), { class: "lw-chrome-button lw-menu-btn" })
+      ]),
+      el("nav", { class: "lw-sidebar-nav", "aria-label": "\u9875\u9762" }, NAV_GROUPS.map(
+        (group) => el("div", { class: "lw-nav-group" }, [
+          el("div", { class: "lw-nav-group-title", text: group.title }),
+          ...group.pages.map((item) => el("button", {
+            type: "button",
+            class: `lw-nav-item ${state.page === item.id ? "active" : ""}`,
+            "data-nav-id": item.id,
+            "aria-current": state.page === item.id ? "page" : null,
+            onClick: () => navigate(item.id)
+          }, [
             makeIcon(item.icon),
-            el("span", { text: item.label })
-          ]),
-          item.badge ? el("span", { class: `lw-nav-badge ${item.warn ? "lw-nav-badge-warn" : ""}`, text: item.badge }) : null
-        ]))
-      ]))),
+            el("span", { text: item.label }),
+            item.id === "approvals" && pending > 0 ? el("span", { class: "lw-nav-badge", text: String(pending) }) : null,
+            item.id === "fencing" && cacheStatus && cacheStatus !== "fresh" ? el("span", { class: "lw-nav-badge", "aria-label": "\u56F4\u680F\u7F13\u5B58\u9700\u8981\u68C0\u67E5", title: "\u56F4\u680F\u7F13\u5B58\u9700\u8981\u68C0\u67E5", text: "!" }) : null
+          ]))
+        ])
+      )),
       el("div", { class: "lw-sidebar-footer" }, [
-        el("div", { class: "lw-row lw-between" }, [
-          el("span", { class: "lw-sidebar-meta", text: "KernelGuard" }),
-          el("span", { class: "lw-pill lw-pill-ok", text: "\u5DF2\u9501\u5B9A" })
-        ]),
-        el("div", { class: "lw-sidebar-meta", text: `\u4F1A\u8BDD\u7B56\u7565\uFF1A${persistence === "tab" ? "\u6807\u7B7E\u9875\u9694\u79BB" : "\u6D4F\u89C8\u5668\u4F1A\u8BDD"}` })
+        makeIcon("lock"),
+        el("div", {}, [
+          el("strong", { text: session }),
+          el("span", { text: state.auth?.sessionPersistence === "browser" ? "\u6D4F\u89C8\u5668\u4F1A\u8BDD" : "\u6807\u7B7E\u9875\u9694\u79BB" })
+        ])
       ])
     ]);
   }
+  drawerViewport.addEventListener("change", () => {
+    if (state.mobileNavOpen && !drawerViewport.matches) {
+      state.mobileNavOpen = false;
+      render();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (!state.mobileNavOpen) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setDrawer(false);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const buttons = root.querySelectorAll(".lw-sidebar button");
+    const first = buttons[0], last = buttons[buttons.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last?.focus();
+    }
+    if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first?.focus();
+    }
+  });
   function renderAuthGate() {
     const auth = state.auth || {};
     const needPasskey = Boolean(
@@ -1642,7 +1662,7 @@
       ])
     ]);
     return el("div", { class: "lw-stack-md" }, [
-      makePageHeader("\u5F85\u5BA1\u5BA1\u6279\u961F\u5217", "\u5BF9\u654F\u611F\u5DE5\u5177\u8C03\u7528\u6838\u5BF9\u5B8C\u6574\u672A\u8131\u654F\u53C2\u6570\u4E0E policyDigest\uFF0C\u6279\u51C6\u540E\u4EC5\u5355\u6B21\u6D88\u8D39\u5E76\u767B\u8BB0 24h \u9632\u91CD\u653E\u8D26\u672C\u3002"),
+      makePageHeader("\u5BA1\u6279\u961F\u5217", "\u6838\u5BF9\u5DE5\u5177\u4E0E\u8C03\u7528\u53C2\u6570\u540E\uFF0C\u53EF\u6279\u51C6\u4E00\u6B21\u6267\u884C\u6216\u62D2\u7EDD\u8BF7\u6C42\u3002"),
       splitLayout
     ]);
   }
@@ -1913,7 +1933,7 @@
       ])
     ]);
     return el("div", { class: "lw-stack-md" }, [
-      makePageHeader("\u80FD\u529B\u5F00\u5173\u4E0E\u5BBF\u4E3B\u670D\u52A1", "\u5B9E\u65F6\u539F\u5B50\u4FEE\u6539\u5DE5\u4F5C\u533A\u5916 0600 \u7B56\u7565\u5F00\u5173\u4E0E\u6D4F\u89C8\u5668\u4F1A\u8BDD\u6301\u4E45\u5316\u59FF\u6001\u3002"),
+      makePageHeader("\u80FD\u529B\u4E0E\u670D\u52A1", "\u7BA1\u7406\u5DE5\u4F5C\u533A\u8BFB\u5199\u3001\u547D\u4EE4\u6267\u884C\u548C\u5BBF\u4E3B\u670D\u52A1\u3002"),
       splitLayout
     ]);
   }
@@ -3133,7 +3153,7 @@
       ])
     ]);
     return el("div", { class: "lw-stack-md" }, [
-      makePageHeader("LLM \u591A\u6A21\u6001\u5185\u5BB9\u5B89\u5168\u5BA1\u67E5\u7B56\u7565", "\u70ED\u66F4\u65B0 <stateDir>/moderation/config.json\uFF080600\uFF09\uFF0C\u4F4D\u4E8E\u79BB\u7EBF antileak \u62A4\u680F\u4E4B\u540E\u6309\u7B56\u7565\u6267\u884C\u3002"),
+      makePageHeader("\u5185\u5BB9\u5BA1\u67E5", "\u914D\u7F6E\u672C\u5730\u4E0E\u4E91\u7AEF\u6A21\u578B\u7684\u5BA1\u67E5\u987A\u5E8F\u548C\u5F02\u5E38\u5904\u7406\u65B9\u5F0F\u3002"),
       el("datalist", { id: datalistId }, [...modelChoices].map((name) => el("option", { value: name }))),
       tabBar,
       state.modTab === "ollama" ? renderOllamaManagerCard() : routingSplit
@@ -3333,7 +3353,7 @@
       ])
     ]);
     return el("div", { class: "lw-stack-md" }, [
-      makePageHeader("\u6269\u5C55\u63D2\u4EF6\u5BC6\u94A5\u5E93\uFF08\u53EA\u5199\u9694\u79BB\uFF09", "\u6309 KernelGuard \u7ED1\u5B9A unitId \u5206\u4ED3\u52A0\u5BC6\u843D\u76D8\uFF0C\u524D\u7AEF\u4E0E\u5DE5\u5177\u65E5\u5FD7\u6C38\u8FDC\u65E0\u6CD5\u8BFB\u53D6\u660E\u6587\u3002"),
+      makePageHeader("\u63D2\u4EF6\u5BC6\u94A5", "\u6309\u63D2\u4EF6\u4FDD\u5B58\u51ED\u636E\uFF0C\u4FDD\u5B58\u540E\u53EF\u67E5\u770B\u952E\u540D\u6216\u66F4\u65B0\u5BC6\u94A5\u3002"),
       split
     ]);
   }
@@ -3403,7 +3423,7 @@
   function renderPanelsPage() {
     const panels = state.snapshot?.panels || [];
     return el("div", { class: "lw-stack-md" }, [
-      makePageHeader("\u58F0\u660E\u5F0F\u6269\u5C55\u9762\u677F\uFF08console:panel@1\uFF09", "\u7531\u8FDB\u7A0B\u5916\u63D2\u4EF6\u6309\u7EAF JSON Schema \u58F0\u660E\u5E76\u7531\u4E3B\u673A\u8131\u654F\u6E05\u6D17\u6E32\u67D3\uFF0C\u96F6\u53EF\u6267\u884C\u811A\u672C\u6CE8\u5165\u3002"),
+      makePageHeader("\u6269\u5C55\u9762\u677F", "\u67E5\u770B\u5DF2\u5B89\u88C5\u63D2\u4EF6\u63D0\u4F9B\u7684\u9762\u677F\u548C\u64CD\u4F5C\u3002"),
       makeStatStrip([
         { icon: "layoutPanel", label: "\u5DF2\u6302\u8F7D\u6269\u5C55\u9762\u677F", value: `${panels.length} \u4E2A`, tone: panels.length > 0 ? "ok" : "" },
         { icon: "shieldCheck", label: "\u811A\u672C\u4E0E HTML", value: "\u4E25\u683C\u96F6\u6267\u884C\u6CE8\u5165" },
@@ -3586,7 +3606,7 @@
       }
     });
     return el("div", { class: "lw-stack-md" }, [
-      makePageHeader("\u5B9E\u65F6\u5BA1\u8BA1\u901A\u9053", "\u7ECF\u7531\u8FDB\u7A0B\u5185\u901A\u9053\u4E0E\u79C1\u6709 0600 control.sock \u63A8\u6D41\u7684\u5143\u6570\u636E\u4E0E\u5DE5\u5177\u62E6\u622A\u5386\u53F2\uFF1B\u70B9\u51FB\u4EFB\u610F\u8BB0\u5F55\u884C\u53EF\u5C55\u5F00\u8BE6\u7EC6 Trace \u4E0E Transport JSON\u3002"),
+      makePageHeader("\u5B9E\u65F6\u5BA1\u8BA1", "\u67E5\u770B\u6700\u8FD1\u7684\u5DE5\u5177\u8C03\u7528\u4E0E\u5185\u6838\u4E8B\u4EF6\uFF0C\u5C55\u5F00\u8BB0\u5F55\u53EF\u6838\u5BF9\u8BE6\u60C5\u3002"),
       makeStatStrip([
         { icon: "activity", label: "SSE \u5B9E\u65F6\u901A\u9053", value: sseOk ? "\u5728\u7EBF\u63A8\u9001\u4E2D" : state.sseStatus, tone: sseOk ? "ok" : "warn" },
         { icon: "terminal", label: "\u5185\u6838\u63A7\u5236\u4E8B\u4EF6", value: `${state.liveKernelEvents.length} \u6761` },
@@ -4329,7 +4349,7 @@ ${sampleBodyStr}` : curlSnippet })
       ];
     }
     return el("div", { class: "lw-stack-md" }, [
-      makePageHeader("API \u63A5\u53E3\u5DE5\u4F5C\u53F0\uFF08APIFox \u53CC\u680F\u5951\u7EA6\u89C6\u56FE\uFF09", "\u5DE6\u8FB9\u68C0\u7D22\u6D4F\u89C8\uFF0C\u53F3\u8FB9\u76F4\u63A5\u8C03\u8BD5\u53C2\u6570\u8D1F\u8F7D\u3001\u5355\u5DE5\u5177\u7194\u65AD\u5F00\u5173\u6216\u63A2\u6D4B\u63A7\u5236\u53F0\u63A5\u53E3\uFF1B\u8986\u76D6\u5185\u7F6E\u6C99\u7BB1\u3001\u7B2C\u4E09\u65B9 MCP \u4E0E\u63A7\u5236\u9762 HTTP API\u3002"),
+      makePageHeader("API \u5DE5\u4F5C\u53F0", "\u68C0\u7D22\u5DE5\u5177\u548C\u63A7\u5236\u53F0\u63A5\u53E3\uFF0C\u67E5\u770B\u53C2\u6570\u3001\u6743\u9650\u4E0E\u8C03\u8BD5\u7ED3\u679C\u3002"),
       makeStatStrip([
         { icon: "code", label: "MCP \u5DE5\u5177\u603B\u8BA1", value: `${allTools.length} \u9879` },
         { icon: "lock", label: "Docker \u6C99\u7BB1\u63A5\u53E3", value: `${sandboxCount} \u9879`, tone: "ok" },
@@ -5348,7 +5368,7 @@ ${sampleBodyStr}` : curlSnippet })
       ])
     ]);
     return el("div", { class: "lw-stack-md" }, [
-      makePageHeader("Agent \u5B89\u5168\u56F4\u680F", "\u96C6\u4E2D\u6CBB\u7406 R1\u2013R7 \u79BB\u7EBF\u9632\u6CC4\u6F0F\u7B56\u7565\u4E0E\u7B2C\u4E09\u65B9\u8FDB\u7A0B\u5916 MCP \u5DE5\u5177\u56F4\u680F\uFF0C\u4E25\u683C\u4FDD\u6301 fail-closed \u8FB9\u754C\u4E0E\u5199\u540E\u4E0D\u53EF\u8BFB\u56DE\u3002"),
+      makePageHeader("\u5B89\u5168\u56F4\u680F", "\u7BA1\u7406\u79BB\u7EBF\u9632\u6CC4\u6F0F\u89C4\u5219\u548C\u7B2C\u4E09\u65B9 MCP \u5DE5\u5177\u7684\u8BBF\u95EE\u7B56\u7565\u3002"),
       tabBar,
       activeTab === "mcp" ? renderFencingMcpTab() : renderFencingAntileakTab()
     ]);
@@ -5422,9 +5442,13 @@ ${sampleBodyStr}` : curlSnippet })
     const prevPre = root.querySelector(".lw-modal .lw-pre");
     const prevScrollTop = prevPre ? prevPre.scrollTop : 0;
     const prevScrollLeft = prevPre ? prevPre.scrollLeft : 0;
+    const navFocus = document.activeElement?.closest(".lw-nav-item")?.dataset.navId;
+    const chromeFocus = document.activeElement?.closest(".lw-chrome-button")?.id;
+    const sidebarScroll = root.querySelector(".lw-sidebar")?.scrollTop;
     clearNode(root);
-    const children = [renderTopbar()];
+    const children = [];
     if (!state.auth?.authenticated) {
+      children.push(renderTopbar());
       const main = el("main", { class: "lw-shell" });
       if (state.error) main.append(el("div", { class: "lw-banner lw-banner-err", role: "alert", text: state.error }));
       if (state.notice) main.append(el("div", { class: "lw-banner lw-banner-ok", role: "status", text: state.notice }));
@@ -5437,20 +5461,24 @@ ${sampleBodyStr}` : curlSnippet })
       contentInner.append(renderActivePage());
       const backdrop = el("div", {
         class: `lw-sidebar-backdrop ${state.mobileNavOpen ? "open" : ""}`,
-        onClick: () => {
-          state.mobileNavOpen = false;
-          render();
-        }
+        onClick: () => setDrawer(false)
       });
       children.push(el("div", { class: "lw-app-frame" }, [
         renderSidebar(),
         backdrop,
-        el("main", { class: "lw-content" }, [contentInner])
+        el("div", { class: "lw-work-area", inert: state.mobileNavOpen ? "" : null }, [
+          renderTopbar(),
+          el("main", { id: "lw-main", class: "lw-content", tabindex: "-1" }, [contentInner])
+        ])
       ]));
     }
     const modal = renderReviewModal();
     if (modal) children.push(modal);
     root.append(...children);
+    const sidebar = root.querySelector(".lw-sidebar");
+    if (sidebar && sidebarScroll) sidebar.scrollTop = sidebarScroll;
+    if (navFocus) sidebar?.querySelector(`[data-nav-id="${CSS.escape(navFocus)}"]`)?.focus({ preventScroll: true });
+    if (chromeFocus) document.getElementById(chromeFocus)?.focus({ preventScroll: true });
     if (modal && (prevScrollTop > 0 || prevScrollLeft > 0)) {
       const nextPre = root.querySelector(".lw-modal .lw-pre");
       if (nextPre) {
