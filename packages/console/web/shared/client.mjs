@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Safe zero-dependency browser primitives shared by Trust Origin and Console Origin.
+// Safe zero-dependency browser primitives for LoomWard Console.
 
 export function readMeta(name) {
   return document.querySelector(`meta[name="${name}"]`)?.getAttribute('content') || '';
@@ -19,6 +19,23 @@ export function el(tag, attrs = {}, children = []) {
   for (const child of list) {
     if (child === null || child === undefined || child === false) continue;
     node.append(typeof child === 'string' ? document.createTextNode(child) : child);
+  }
+  return node;
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+export function svgEl(tag, attrs = {}, children = []) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === 'class') node.setAttribute('class', String(v));
+    else node.setAttribute(k, String(v));
+  }
+  const list = Array.isArray(children) ? children : [children];
+  for (const child of list) {
+    if (child === null || child === undefined || child === false) continue;
+    node.append(child);
   }
   return node;
 }

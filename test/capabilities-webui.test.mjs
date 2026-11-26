@@ -2066,7 +2066,7 @@ test('WebUI Round 2 regressions: H1 CSRF re-mint, H2 concurrent burst lockout, H
     systemdProbe: async () => ({ supported: false, installed: false, enabled: false, active: false, linger: false }),
     serviceController: async () => {},
     mcpProber: async (_srv, { signal }) => {
-      probeStartedResolve();
+      probeStartedResolve(signal);
       await new Promise(resolve => {
         if (signal.aborted) {
           probeSignalAborted = true;
@@ -2137,10 +2137,11 @@ test('WebUI Round 2 regressions: H1 CSRF re-mint, H2 concurrent burst lockout, H
     });
     req.on('error', () => {});
     req.end(JSON.stringify({ id: 'slow_r2' }));
-    probeHooks.started.then(() => {
+    probeHooks.started.then(async signal => {
+      const aborted = once(signal, 'abort', { signal: AbortSignal.timeout(5000) });
       req.destroy();
-      setTimeout(resolve, 150);
-    }, reject);
+      await aborted;
+    }).then(resolve, reject);
   });
   assert.equal(probeSignalAborted, true, 'Destroying client socket after POST body must abort in-flight probe');
 

@@ -8,7 +8,7 @@ export const contract = validateContractDecl({
   kind: 'root-plugin',
   version: '3.0.0-alpha.0',
   executionBoundary: 'in-process-root',
-  provides: ['console:loopback', 'console:trust-origin'],
+  provides: ['console:loopback'],
   consumes: ['approval:channel@1', 'console:panel@1'],
   archiveSource: 'archive/agentdock-worker-remote',
 });

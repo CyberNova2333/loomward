@@ -4,7 +4,7 @@
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
-  "description": "Dual-origin loopback WebUI (Console Origin 18797 + isolated Trust Origin 18798 with PassKey/WebAuthn, exact approval, and declarative console:panel@1) for LoomWard",
+  "description": "Single-origin loopback WebUI console (127.0.0.1:18797 with PassKey/WebAuthn, exact approval, kill switches, secrets/moderation controls, and declarative console:panel@1) for LoomWard",
   "exports": {
     ".": "./src/index.mjs",
     "./contract": "./src/contract.mjs",
@@ -18,7 +18,7 @@
   },
   "scripts": {
     "build": "node scripts/build-web.mjs",
-    "check": "node --check src/index.mjs && node --check src/contract.mjs && node --check src/http-security.mjs && node --check src/session-broker.mjs && node --check src/control-channel.mjs && node --check src/panel-registry.mjs && node --check src/html.mjs && node --check src/trust-server.mjs && node --check src/console-server.mjs && node --check src/server.mjs && node --check scripts/build-web.mjs",
+    "check": "node --check src/index.mjs && node --check src/contract.mjs && node --check src/http-security.mjs && node --check src/session-broker.mjs && node --check src/control-channel.mjs && node --check src/panel-registry.mjs && node --check src/html.mjs && node --check src/unified-server.mjs && node --check src/server.mjs && node --check scripts/build-web.mjs",
     "test": "node --test test/*.test.mjs"
   }
 }

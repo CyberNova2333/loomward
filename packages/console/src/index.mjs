@@ -3,15 +3,14 @@
 export { contract } from './contract.mjs';
 export { createControlChannel, connectControlSocket } from './control-channel.mjs';
 export { createConsolePanelCollector } from './panel-registry.mjs';
-export { createDualOriginSessionBroker } from './session-broker.mjs';
+export { createConsoleSessionBroker } from './session-broker.mjs';
 export {
   DEFAULT_CONSOLE_PORT,
-  DEFAULT_TRUST_PORT,
-  startDualOriginConsole,
+  startUnifiedConsole,
 } from './server.mjs';
 
 import path from 'node:path';
-import { startDualOriginConsole } from './server.mjs';
+import { startUnifiedConsole } from './server.mjs';
 import { createControlChannel } from './control-channel.mjs';
 import { createConsolePanelCollector } from './panel-registry.mjs';
 
@@ -32,7 +31,7 @@ export async function apply(ctx, config = {}) {
 
   let instance = null;
   if (config.enabled === true && config.stateDir) {
-    instance = await startDualOriginConsole({
+    instance = await startUnifiedConsole({
       ...config,
       panelSlot,
       controlChannel,
@@ -49,17 +48,11 @@ export async function apply(ctx, config = {}) {
   ctx.provide('console:loopback', Object.freeze({
     status: instance ? 'listening' : 'standby',
     legacyEntry: 'local/webui.mjs',
-    url: instance?.console?.url ?? null,
-    port: instance?.console?.port ?? null,
+    url: instance?.url ?? null,
+    port: instance?.port ?? null,
     controlChannel,
     panelCollector,
     publishEvent: event => controlChannel.publish(event),
-  }));
-
-  ctx.provide('console:trust-origin', Object.freeze({
-    status: instance ? 'listening' : 'standby',
-    url: instance?.trust?.url ?? null,
-    port: instance?.trust?.port ?? null,
     close: async () => {
       if (instance) await instance.close();
     },

@@ -474,31 +474,43 @@ function collectTelemetryAndEvents(stateDir, pendingApprovals) {
         updateRecency(st, time, 'blocked', null);
       }
 
-      const tone = event === 'connected' ? 'ok'
-        : event === 'approval_granted' ? 'ok'
-        : event === 'mcp_server_probed' && typeof raw.outcome === 'string' && raw.outcome.startsWith('ok') ? 'ok'
-        : event === 'capability_changed' ? 'info'
-        : event === 'webui_auth' || event === 'service_action' ? 'info'
-        : event === 'mcp_server_updated' || event === 'mcp_server_imported' || event === 'mcp_server_toggled' || event === 'mcp_server_deleted' ? 'info'
-        : event === 'approval_required' ? 'info'
-        : event === 'capability_blocked' ? 'err'
-        : event === 'approval_rejected' ? 'err'
-        : 'err';
-      const label = event === 'connected' ? '已连接'
-        : event === 'disconnected' ? '已断开'
-        : event === 'capability_changed' ? '策略变更'
-        : event === 'capability_blocked' ? '策略拦截'
-        : event === 'approval_required' ? '等待批准'
-        : event === 'approval_granted' ? '已批准一次'
-        : event === 'approval_rejected' ? '已拒绝移除'
-        : event === 'webui_auth' ? '安全认证'
-        : event === 'service_action' ? '服务操作'
-        : event === 'mcp_server_updated' ? 'MCP 保存'
-        : event === 'mcp_server_imported' ? 'MCP 导入'
-        : event === 'mcp_server_toggled' ? 'MCP 开关'
-        : event === 'mcp_server_probed' ? 'MCP 探测'
-        : event === 'mcp_server_deleted' ? 'MCP 移除'
-        : event;
+      const CONNECTOR_EVENT_META = {
+        connected: { tone: 'ok', label: '已连接' },
+        disconnected: { tone: 'err', label: '已断开' },
+        approval_required: { tone: 'info', label: '等待批准' },
+        approval_granted: { tone: 'ok', label: '已批准一次' },
+        approval_rejected: { tone: 'err', label: '已拒绝移除' },
+        capability_changed: { tone: 'info', label: '策略变更' },
+        capability_blocked: { tone: 'err', label: '策略拦截' },
+        webui_auth: { tone: 'info', label: '安全认证' },
+        service_action: { tone: 'info', label: '服务操作' },
+        mcp_server_updated: { tone: 'info', label: 'MCP 保存' },
+        mcp_server_imported: { tone: 'info', label: 'MCP 导入' },
+        mcp_server_toggled: { tone: 'info', label: 'MCP 开关' },
+        mcp_server_probed: { tone: 'info', label: 'MCP 探测' },
+        mcp_server_deleted: { tone: 'info', label: 'MCP 移除' },
+        plugin_secret_saved: { tone: 'ok', label: '写入插件密钥' },
+        plugin_secret_deleted: { tone: 'warn', label: '删除插件密钥' },
+        moderation_config_saved: { tone: 'ok', label: '更新审查策略' },
+        moderation_ollama_install: { tone: 'info', label: '安装 Ollama' },
+        moderation_ollama_start: { tone: 'ok', label: '启动 Ollama' },
+        moderation_ollama_pull: { tone: 'info', label: '拉取 Ollama 模型' },
+        fencing_policy_saved: { tone: 'ok', label: '更新围栏策略' },
+        fencing_dry_run: { tone: 'info', label: '围栏离线测试' },
+        fencing_cache_refreshed: { tone: 'info', label: '刷新防泄漏缓存' },
+        fencing_doctor_checked: { tone: 'info', label: '围栏自检' },
+      };
+      const evMeta = CONNECTOR_EVENT_META[event] || { tone: 'info', label: event };
+      const tone = event === 'mcp_server_probed' && typeof raw.outcome === 'string' && raw.outcome.startsWith('ok')
+        ? 'ok'
+        : event === 'fencing_dry_run'
+          ? (raw.outcome === 'pass' ? 'ok' : raw.outcome === 'violation' ? 'err' : 'warn')
+          : (event === 'fencing_cache_refreshed' || event === 'fencing_doctor_checked') && typeof raw.outcome === 'string'
+            ? (raw.outcome === 'ok' ? 'ok' : 'warn')
+            : event === 'webui_auth' && typeof raw.outcome === 'string' && raw.outcome.endsWith('_failed')
+              ? 'warn'
+              : evMeta.tone;
+      const label = evMeta.label;
 
       const meta = {};
       const detailParts = [];

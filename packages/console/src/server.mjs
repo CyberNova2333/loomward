@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // This file is part of LoomWard (织盾) and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
-// Orchestrates physical Dual-Origin loopback servers:
-//   - Trust Origin   (default 127.0.0.1:18798): Ring 2 security boundary, zero extension code/panels
-//   - Console Origin (default 127.0.0.1:18797): Ring 3 read-only telemetry, SSE, and declarative console:panel@1 host
+// Orchestrates the Single-Origin loopback console server (default 127.0.0.1:18797):
+// unifies authentication, two-step approvals, capability switches, moderation & secrets config,
+// SSE live telemetry, tool catalog, and strictly read-only declarative console:panel@1 views.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,17 +11,17 @@ import {
   loadWorkspaceRootsFromStateConfig,
 } from '../../../local/capabilities.mjs';
 import { mcpServersFilePath } from '../../../local/mcp-registry.mjs';
+import { moderationConfigFilePath } from '../../../local/moderation-config.mjs';
+import { createOllamaController } from '../../../local/ollama.mjs';
 import { detectHostPasskeySupport, readWebUiAuthSync } from '../../../local/webui-auth.mjs';
 import { collectStatusSnapshot, isLoopbackHost } from '../../../local/webui.mjs';
 import { readTrustedJsonFile, validateStateDir } from './http-security.mjs';
-import { createDualOriginSessionBroker } from './session-broker.mjs';
+import { createConsoleSessionBroker } from './session-broker.mjs';
 import { createControlChannel } from './control-channel.mjs';
 import { createConsolePanelCollector } from './panel-registry.mjs';
-import { createTrustOriginServer } from './trust-server.mjs';
-import { createConsoleOriginServer } from './console-server.mjs';
+import { createUnifiedConsoleServer } from './unified-server.mjs';
 
 export const DEFAULT_CONSOLE_PORT = 18797;
-export const DEFAULT_TRUST_PORT = 18798;
 
 function sha256OfSnapshot(snap, panels) {
   const normalizedPanels = Array.isArray(panels)
@@ -36,12 +36,12 @@ function sha256OfSnapshot(snap, panels) {
   return crypto.createHash('sha256').update(JSON.stringify(comparable)).digest('hex');
 }
 
-export async function startDualOriginConsole({
+export async function startUnifiedConsole({
   stateDir,
   runtimeRoot = path.resolve(import.meta.dirname, '../../..'),
   host = '127.0.0.1',
-  consolePort = DEFAULT_CONSOLE_PORT,
-  trustPort = DEFAULT_TRUST_PORT,
+  consolePort,
+  port,
   requirePrivateState = true,
   pollIntervalMs = 5000,
   enableControlSocket = true,
@@ -61,13 +61,17 @@ export async function startDualOriginConsole({
   },
   getKernelSummary = () => ({ roots: [], units: [], pendingTrustDecisions: [] }),
   trustDecider = null,
+  pluginSecretsAdmin = null,
+  getPluginSecretsAdmin = null,
+  ollamaController = null,
+  ollamaHooks = null,
+  previewAutoSession = false,
 } = {}) {
   if (!isLoopbackHost(host)) {
-    throw new Error('LoomWard Dual-Origin Console must bind strictly to a loopback interface (127.0.0.1, localhost, or ::1).');
+    throw new Error('LoomWard Console must bind strictly to a loopback interface (127.0.0.1, localhost, or ::1).');
   }
-  if (consolePort !== 0 && trustPort !== 0 && consolePort === trustPort) {
-    throw new Error('Trust Origin and Console Origin must bind to distinct ports for physical origin isolation.');
-  }
+  const previewModeEnabled = previewAutoSession === true;
+  const listenPort = consolePort !== undefined ? consolePort : (port !== undefined ? port : DEFAULT_CONSOLE_PORT);
 
   const resolvedState = validateStateDir(stateDir, requirePrivateState);
   const resolvedRuntime = path.resolve(runtimeRoot);
@@ -79,6 +83,7 @@ export async function startDualOriginConsole({
     path.join(resolvedState, 'capabilities.json'),
     path.join(resolvedState, 'webui-auth.json'),
     mcpServersFilePath(resolvedState),
+    moderationConfigFilePath(resolvedState),
   ]) {
     if (fs.lstatSync(extraFile, { throwIfNoEntry: false })) {
       assertConfigOutsideWorkspace(extraFile, startupRoots);
@@ -91,21 +96,20 @@ export async function startDualOriginConsole({
   });
   const panelCollector = createConsolePanelCollector({ panelSlot, staticPanels });
 
-  let trustServer = null;
   let consoleServer = null;
   let lastSnapshot = null;
+  let lastPanels = null;
   let lastDigest = '';
   let refreshing = null;
   let queuedRefresh = null;
 
-  const broker = createDualOriginSessionBroker({
-    onSessionsRevoked({ trustSid, consoleSids, all }) {
+  const broker = createConsoleSessionBroker({
+    allowPreviewSession: previewModeEnabled,
+    onSessionsRevoked({ sids, all }) {
       if (all) {
-        trustServer?.dropStreamsForSid(null);
         consoleServer?.dropStreamsForSids([], true);
-      } else {
-        if (trustSid) trustServer?.dropStreamsForSid(trustSid);
-        if (consoleSids?.length) consoleServer?.dropStreamsForSids(consoleSids, false);
+      } else if (sids?.length) {
+        consoleServer?.dropStreamsForSids(sids, false);
       }
     },
   });
@@ -128,10 +132,10 @@ export async function startDualOriginConsole({
       const cfg = readTrustedJsonFile(configPath, requirePrivateState);
       if (typeof cfg?.origin === 'string') origin = cfg.origin;
     } catch {}
-    const ports = [trustServer?.port, consoleServer?.port].filter(p => Number.isInteger(p) && p > 0);
     const out = origin ? [origin] : [];
-    for (const p of ports) {
-      out.push(`http://127.0.0.1:${p}`, `http://localhost:${p}`, `http://[::1]:${p}`);
+    const activePort = consoleServer?.port;
+    if (Number.isInteger(activePort) && activePort > 0) {
+      out.push(`http://127.0.0.1:${activePort}`, `http://localhost:${activePort}`, `http://[::1]:${activePort}`);
     }
     return out;
   }
@@ -153,7 +157,7 @@ export async function startDualOriginConsole({
       return queuedRefresh.promise;
     }
 
-    const needConsolePanels = Boolean(broadcast && consoleServer?.hasSseClients());
+    const collectPanels = Boolean(broadcast && consoleServer?.hasSseClients());
     refreshing = Promise.all([
       collectStatusSnapshot({
         stateDir: resolvedState,
@@ -165,21 +169,20 @@ export async function startDualOriginConsole({
         ...(systemdProbe ? { systemdProbe } : {}),
         blockedOrigins: getBlockedOrigins(),
       }),
-      needConsolePanels
-        ? panelCollector.collectAll({ originRole: 'console' })
-        : Promise.resolve(null),
+      collectPanels
+        ? panelCollector.collectAll({ originRole: 'unified' })
+        : Promise.resolve(lastPanels),
     ])
       .then(([snap, panels]) => {
         lastSnapshot = snap;
-        const digestHash = sha256OfSnapshot(snap, panels);
-        const anySse = Boolean(trustServer?.hasSseClients() || consoleServer?.hasSseClients());
+        if (Array.isArray(panels)) lastPanels = panels;
+        const effectivePanels = panels ?? lastPanels ?? [];
+        const digestHash = sha256OfSnapshot(snap, effectivePanels);
+        const anySse = Boolean(consoleServer?.hasSseClients());
         if (broadcast && (force || digestHash !== lastDigest)) {
           lastDigest = digestHash;
           const auth = loadCurrentAuthRecord();
-          trustServer?.broadcastSnapshot(snap, auth);
-          if (panels && consoleServer?.hasSseClients()) {
-            consoleServer.broadcastSnapshot(snap, panels, auth);
-          }
+          consoleServer?.broadcastSnapshot(snap, effectivePanels, auth);
         } else if (!anySse && (force || digestHash !== lastDigest)) {
           lastDigest = digestHash;
         }
@@ -203,11 +206,11 @@ export async function startDualOriginConsole({
       const auth = loadCurrentAuthRecord();
       consoleServer?.broadcastChannelEvent(event, auth);
     } catch {}
-    if (trustServer?.hasSseClients() || consoleServer?.hasSseClients()) {
+    if (consoleServer?.hasSseClients()) {
       if (!channelRefreshTimer) {
         channelRefreshTimer = setTimeout(() => {
           channelRefreshTimer = null;
-          if (trustServer?.hasSseClients() || consoleServer?.hasSseClients()) {
+          if (consoleServer?.hasSseClients()) {
             void refreshSnapshot({ force: true }).catch(() => {});
           }
         }, 40);
@@ -220,56 +223,48 @@ export async function startDualOriginConsole({
     await controlChannel.startSocketServer(controlSocketPath || path.join(resolvedState, 'control.sock')).catch(() => null);
   }
 
+  const ollama = ollamaController ?? createOllamaController({
+    getBlockedOrigins,
+    controlChannel,
+    ...(ollamaHooks && typeof ollamaHooks === 'object' ? ollamaHooks : {}),
+  });
+
   try {
-    trustServer = await createTrustOriginServer({
+    consoleServer = await createUnifiedConsoleServer({
       host,
-      port: trustPort,
+      port: listenPort,
       stateDir: resolvedState,
       requirePrivateState,
       broker,
       controlChannel,
+      panelCollector,
       loadCurrentWorkspaceRoots,
       loadCurrentAuthRecord,
       refreshSnapshot,
       getLastSnapshot: () => lastSnapshot,
-      getConsoleOrigin: () => consoleServer?.url || '',
       getBlockedOrigins,
       passkeyDetector,
       mcpProber,
       serviceController,
       getKernelSummary,
-      trustDecider,
-    });
-  } catch (err) {
-    unsubChannel();
-    if (ownsChannel) await controlChannel.close();
-    throw err;
-  }
-
-  try {
-    consoleServer = await createConsoleOriginServer({
-      host,
-      port: consolePort,
-      broker,
-      panelCollector,
-      loadCurrentAuthRecord,
-      refreshSnapshot,
-      getLastSnapshot: () => lastSnapshot,
-      getTrustOrigin: () => trustServer?.url || '',
-      getKernelSummary,
       getRecentChannelEvents: () => controlChannel.recent(),
+      trustDecider,
+      getPluginSecretsAdmin: () => (
+        typeof getPluginSecretsAdmin === 'function' ? getPluginSecretsAdmin() : pluginSecretsAdmin
+      ),
+      ollamaController: ollama,
+      previewAutoSession: previewModeEnabled,
     });
   } catch (err) {
+    ollama.close?.();
     unsubChannel();
-    await trustServer.close();
     if (ownsChannel) await controlChannel.close();
     throw err;
   }
 
-  // Fallback low-frequency refresh only when clients are connected and external state files changed out-of-band.
   const fallbackTimer = pollIntervalMs > 0
     ? setInterval(() => {
-        if (trustServer.hasSseClients() || consoleServer.hasSseClients()) {
+        if (consoleServer.hasSseClients()) {
           void refreshSnapshot({ force: false }).catch(() => {});
         }
       }, pollIntervalMs)
@@ -278,7 +273,8 @@ export async function startDualOriginConsole({
 
   return Object.freeze({
     host,
-    trust: Object.freeze({ port: trustServer.port, url: trustServer.url }),
+    port: consoleServer.port,
+    url: consoleServer.url,
     console: Object.freeze({ port: consoleServer.port, url: consoleServer.url }),
     controlChannel,
     controlSocketPath: controlChannel.getSocketPath(),
@@ -288,8 +284,9 @@ export async function startDualOriginConsole({
       if (fallbackTimer) clearInterval(fallbackTimer);
       if (channelRefreshTimer) clearTimeout(channelRefreshTimer);
       unsubChannel();
+      ollama.close?.();
       broker.clearAll();
-      await Promise.all([trustServer.close(), consoleServer.close()]);
+      await consoleServer.close();
       if (ownsChannel) await controlChannel.close();
     },
   });

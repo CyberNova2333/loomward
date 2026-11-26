@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // This file is part of LoomWard (织盾) and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
-// Offline zero-CDN asset builder for @loomward/console (Trust Origin + Console Origin).
+// Offline zero-CDN asset builder for @loomward/console.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import esbuild from 'esbuild';
@@ -12,22 +12,6 @@ const DIST_DIR = path.join(PKG_ROOT, 'dist');
 async function build() {
   await fs.mkdir(DIST_DIR, { recursive: true });
   await Promise.all([
-    esbuild.build({
-      entryPoints: [path.join(WEB_DIR, 'trust', 'main.mjs')],
-      bundle: true,
-      format: 'iife',
-      platform: 'browser',
-      target: ['es2022'],
-      minify: false,
-      legalComments: 'none',
-      outfile: path.join(DIST_DIR, 'trust.js'),
-    }),
-    esbuild.build({
-      entryPoints: [path.join(WEB_DIR, 'trust', 'trust.css')],
-      bundle: true,
-      minify: false,
-      outfile: path.join(DIST_DIR, 'trust.css'),
-    }),
     esbuild.build({
       entryPoints: [path.join(WEB_DIR, 'console', 'main.mjs')],
       bundle: true,
