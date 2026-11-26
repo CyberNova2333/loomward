@@ -33,7 +33,7 @@ Clear-NodeOverrides
 $inspectedJson=(& $docker --context $Context context inspect $Context | Out-String)
 if($LASTEXITCODE -ne 0){throw 'Cannot inspect Docker context.'}
 $endpoint=(($inspectedJson | ConvertFrom-Json)[0].Endpoints.docker.Host)
-if(-not($endpoint -like 'npipe://*' -or $endpoint -like 'unix:///*')){throw 'Only a local Docker engine is permitted.'}
+if($endpoint -match '[\\\x00-\x1f\x7f]' -or -not($endpoint -cmatch '^npipe:////\./pipe/[^/]+$' -or $endpoint -cmatch '^unix:///[^/].*$')){throw 'Only a local Docker engine is permitted.'}
 $imageId=(& $docker --context $Context image inspect $Image --format '{{.Id}}').Trim()
 if($LASTEXITCODE -ne 0 -or $imageId -notmatch '^sha256:[a-f0-9]{64}$'){throw 'Build and verify the development image first.'}
 $release='runtime-'+[DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')+'-'+[Guid]::NewGuid().ToString('N').Substring(0,8)
@@ -68,6 +68,7 @@ foreach($file in @('package.json','pnpm-lock.yaml','pnpm-workspace.yaml')){
 Push-Location $destination
 try {
   & $node $pnpm install --frozen-lockfile --prod --ignore-scripts
+  if($LASTEXITCODE -eq -1073741515){throw 'pnpm could not load a Windows DLL. Check the Microsoft Visual C++ x64 Redistributable.'}
   if($LASTEXITCODE -ne 0){throw 'Protected runtime dependency installation failed.'}
 } finally {Pop-Location}
 $rpmManifestHash=$null

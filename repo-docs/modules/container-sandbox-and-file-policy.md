@@ -71,6 +71,8 @@
 node --test test/sandbox-recovery.test.mjs test/file-hardening.test.mjs test/tools.test.mjs test/unicode-policy.test.mjs test/container-input.test.mjs
 ```
 
+安装器和沙箱启动时都会检查 Docker context 的端点。macOS、Linux 使用本机 Unix 套接字，Windows 也可使用本机命名管道，例如 `npipe:////./pipe/docker_engine`。用 `AGENTDOCK_TEST_DOCKER` 和 `AGENTDOCK_TEST_CONTEXT` 可以让集成测试使用相同的引擎。
+
 如需运行真实容器端到端回归，须在装有目标开发镜像的 Docker 环境设置 `AGENTDOCK_DOCKER_TEST=1`，并用 `AGENTDOCK_TEST_IMAGE` 指定本地测试镜像的名称或摘要，然后运行 [真实 Docker 回归](../../test/sandbox.test.mjs)。其余目录与脚本位置见[代码地图](../code-map.md)，完整请求串联见[一次真实操作的阶段交接](../walkthroughs/one-real-run.md)。
 
 证据状态：除特别标注外，本页基于当前源码已确认。

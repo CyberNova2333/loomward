@@ -12,6 +12,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { beneath } from '../local/file-safety.mjs';
 import { defaultDockerContext } from '../local/sandbox.mjs';
+import { isLocalDockerEndpoint } from '../local/docker-query.mjs';
 import { proxyCandidates } from '../local/connector.mjs';
 import {
   assertConfigOutsideWorkspace,
@@ -178,8 +179,8 @@ function inspectDockerInstallation(dockerPath, context, image) {
   });
   const inspected = JSON.parse(contextJson)[0];
   const endpoint = inspected?.Endpoints?.docker?.Host || '';
-  if (!endpoint.startsWith('unix:///')) {
-    throw new Error(`Docker context '${validContext}' must use a local unix:/// socket (got '${endpoint || 'empty'}').`);
+  if (!isLocalDockerEndpoint(endpoint)) {
+    throw new Error(`Docker context '${validContext}' must use a local unix:/// socket.`);
   }
   const imageId = execFileSync(dockerPath, ['--context', validContext, 'image', 'inspect', image, '--format', '{{.Id}}'], {
     encoding: 'utf8',

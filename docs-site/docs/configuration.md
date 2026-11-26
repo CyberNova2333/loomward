@@ -58,6 +58,8 @@ AgentDock Bridge 将配置明确划分为**云端网关**与**本机受保护状
 | `sandbox.dockerPath` / `sandbox.context` | `Install-Hardened.ps1` / `host-cli.mjs install` | 本机 `docker` 绝对路径（要求 `nlink === 1`）与上下文名（Win/macOS 默认 `desktop-linux`，Linux 默认 `default`） |
 | `sandbox.allowOutbound` | 安装时默认 `true`（可用 `-AllowOutbound:$false` / `--allow-outbound false` 关闭） | 是否允许单次命令在获批参数 `network: "outbound"` 时切到 Docker `bridge` 网络 |
 
+Windows x64 使用项目锁定的 pnpm 12。如安装返回 `0xC0000135`，请检查本机的 Visual C++ v14 x64 运行库，安装后用同一 Windows 用户重试。[微软运行库下载说明](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist)
+
 ## 3. 环境变量与开发/测试脚本
 
 ### 环境变量表

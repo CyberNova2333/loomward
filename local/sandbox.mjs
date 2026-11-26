@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { TOOL_DEFINITIONS } from './tools.mjs';
 import { beneath } from './file-safety.mjs';
 import { createWindowsReplacementGuard } from './windows-acl.mjs';
-import { queryDockerState } from './docker-query.mjs';
+import { isLocalDockerEndpoint, queryDockerState } from './docker-query.mjs';
 import { readCapabilitiesSync, isToolEnabled, filterToolsByCapabilities } from './capabilities.mjs';
 
 const exec = promisify(execFile);
@@ -86,7 +86,7 @@ export async function createSandboxRuntime(config) {
   const docker = async (args, timeout = 15000) => exec(dockerPath, ['--context', context, ...args], { windowsHide: true, env: dockerEnv, timeout, maxBuffer: 1024 * 1024 });
   const inspected = JSON.parse((await queryDockerState(docker, ['context', 'inspect', context])).stdout)[0];
   const endpoint = inspected?.Endpoints?.docker?.Host || '';
-  if (!(endpoint.startsWith('npipe://') || endpoint.startsWith('unix:///'))) throw new Error('Only a local Docker engine is permitted.');
+  if (!isLocalDockerEndpoint(endpoint)) throw new Error('Only a local Docker engine is permitted.');
   await queryDockerState(docker, ['image', 'inspect', image, '--format', '{{.Id}}']);
   let closed = false;
   let cleanupFailed = false;

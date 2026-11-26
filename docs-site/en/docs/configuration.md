@@ -43,6 +43,8 @@ On Windows, NTFS ACLs restrict FullControl to the current user SID and `SYSTEM` 
 | `requireLocalApproval` | `true` | Required by `Manage.ps1` and `host-cli.mjs` before connector start |
 | `sandbox.enabled` / `image` / `dockerPath` / `context` / `allowOutbound` | `Install-Hardened.ps1` / `host-cli.mjs install` | Pinned `sha256:<64-hex>` image, `nlink === 1` `docker`, `desktop-linux` (Win/macOS) or `default` (Linux) context, outbound toggle (`true` by default) |
 
+The Windows x64 installer uses the pinned pnpm 12 binary. If it exits with `0xC0000135`, check the Visual C++ v14 x64 runtime and retry as the same Windows user. [Microsoft runtime downloads](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist)
+
 ## 3. Environment Variables, npm/pnpm & Host Scripts
 
 | Variable / Script | Scope & Notes |
