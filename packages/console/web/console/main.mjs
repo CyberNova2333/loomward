@@ -937,10 +937,15 @@ drawerViewport.addEventListener('change', () => {
   if (state.mobileNavOpen && !drawerViewport.matches) { state.mobileNavOpen = false; render(); }
 });
 document.addEventListener('keydown', event => {
-  if (!state.mobileNavOpen) return;
-  if (event.key === 'Escape') { event.preventDefault(); setDrawer(false); return; }
+  if (!state.reviewModal && !state.mobileNavOpen) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    if (state.reviewModal) { state.reviewModal = null; render(); }
+    else setDrawer(false);
+    return;
+  }
   if (event.key !== 'Tab') return;
-  const buttons = root.querySelectorAll('.lw-sidebar button');
+  const buttons = root.querySelectorAll(state.reviewModal ? '.lw-modal [tabindex="0"], .lw-modal button:not(:disabled)' : '.lw-sidebar button');
   const first = buttons[0], last = buttons[buttons.length - 1];
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
   if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
@@ -1282,7 +1287,7 @@ function renderApprovalsPage() {
                   iconName: 'eye',
                   className: 'lw-btn lw-btn-trust lw-btn-sm',
                   disabled: state.busy || leftSec <= 0,
-                  attrs: { 'data-countdown-disable-expires': item.expiresAt },
+                  attrs: { 'data-countdown-disable-expires': item.expiresAt, 'data-review-id': item.id },
                   onClick: () => runMutation(async () => {
                     const review = await client.api('/api/approvals/review', { method: 'POST', body: { id: item.id } });
                     state.reviewModal = { ...review, tool: item.tool, expiresAt: item.expiresAt };
@@ -5058,10 +5063,10 @@ function renderReviewModal() {
   if (!modal) return null;
   const leftSec = Math.max(0, Math.ceil((Date.parse(modal.expiresAt) - Date.now()) / 1000));
   const boundary = classifyToolBoundary(modal.tool, modal.tool?.startsWith('mcp__'));
-  return el('div', { class: 'lw-modal-backdrop', role: 'dialog', 'aria-modal': 'true' }, [
+  return el('div', { class: 'lw-modal-backdrop', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'lw-review-title', 'data-request-id': modal.id }, [
     el('div', { class: 'lw-modal' }, [
       el('div', { class: 'lw-row lw-between' }, [
-        el('h3', { text: `精确参数复核 · ${modal.tool}` }),
+        el('h3', { id: 'lw-review-title', text: `精确参数复核 · ${modal.tool}` }),
         el('span', {
           class: `lw-pill ${leftSec <= 20 ? 'lw-pill-err' : 'lw-pill-warn'}`,
           'data-countdown-expires': modal.expiresAt,
@@ -5076,12 +5081,12 @@ function renderReviewModal() {
         { icon: 'clock', label: '过期策略', value: '超时自动作废' },
       ]),
       el('div', { class: 'lw-muted lw-mono', text: `policyDigest: ${modal.digest}` }),
-      el('pre', { class: 'lw-pre', text: modal.requestText }),
+      el('pre', { class: 'lw-pre', id: 'lw-review-request', tabindex: '0', 'aria-label': '完整请求参数', text: modal.requestText }),
       el('div', { class: 'lw-row lw-end' }, [
         el('button', {
           type: 'button',
           class: 'lw-btn',
-          text: '取消',
+          id: 'lw-review-cancel', text: '取消',
           onClick: () => { state.reviewModal = null; render(); },
         }),
         el('button', {
@@ -5089,7 +5094,7 @@ function renderReviewModal() {
           class: 'lw-btn lw-btn-trust',
           disabled: state.busy || leftSec <= 0,
           'data-countdown-disable-expires': modal.expiresAt,
-          text: '确认批准一次',
+          id: 'lw-review-confirm', text: '确认批准一次',
           onClick: () => runMutation(async () => {
             const res = await client.api('/api/approvals/approve', {
               method: 'POST',
@@ -5118,6 +5123,8 @@ function renderActivePage() {
 }
 
 function render() {
+  const prevRequestId = root.querySelector('.lw-modal-backdrop')?.dataset.requestId;
+  const reviewFocus = document.activeElement?.closest('.lw-modal [id]')?.id;
   const prevPre = root.querySelector('.lw-modal .lw-pre');
   const prevScrollTop = prevPre ? prevPre.scrollTop : 0;
   const prevScrollLeft = prevPre ? prevPre.scrollLeft : 0;
@@ -5146,7 +5153,7 @@ function render() {
       onClick: () => setDrawer(false),
     });
 
-    children.push(el('div', { class: 'lw-app-frame' }, [
+    children.push(el('div', { class: 'lw-app-frame', inert: Boolean(state.reviewModal) }, [
       renderSidebar(),
       backdrop,
       el('div', { class: 'lw-work-area', inert: state.mobileNavOpen ? '' : null }, [
@@ -5163,6 +5170,14 @@ function render() {
   if (sidebar && sidebarScroll) sidebar.scrollTop = sidebarScroll;
   if (navFocus) sidebar?.querySelector(`[data-nav-id="${CSS.escape(navFocus)}"]`)?.focus({ preventScroll: true });
   if (chromeFocus) document.getElementById(chromeFocus)?.focus({ preventScroll: true });
+
+  if (modal) {
+    const target = reviewFocus && document.getElementById(reviewFocus);
+    (target && !target.disabled ? target : document.getElementById('lw-review-cancel'))?.focus({ preventScroll: true });
+  } else if (prevRequestId) {
+    const trigger = root.querySelector(`[data-review-id="${CSS.escape(prevRequestId)}"]:not(:disabled)`);
+    (trigger || root.querySelector('.lw-page-head h1'))?.focus({ preventScroll: true });
+  }
 
   if (modal && (prevScrollTop > 0 || prevScrollLeft > 0)) {
     const nextPre = root.querySelector('.lw-modal .lw-pre');
