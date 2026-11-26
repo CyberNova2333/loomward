@@ -22,6 +22,13 @@ import {
 } from '../local/capabilities.mjs';
 import { mcpServersFilePath } from '../local/mcp-registry.mjs';
 import {
+  installOllamaBinary,
+  ollamaStreamPull,
+  probeOllamaStatus,
+  startOllamaDaemon,
+  testOllamaModelInference,
+} from '../local/ollama.mjs';
+import {
   issueSetupTicketSync,
   publicWebUiAuthSummary,
   readWebUiAuthSync,
@@ -1280,8 +1287,43 @@ async function main() {
       console.log(JSON.stringify(outcome));
       break;
     }
+    case 'ollama': {
+      const action = positionals[0] || 'status';
+      const endpoint = flags.endpoint || undefined;
+      const allowPrivateNetwork = flags['allow-private'] === true || flags['allow-private'] === 'true';
+      if (action === 'status') {
+        const res = await probeOllamaStatus({ endpoint, allowPrivateNetwork });
+        console.log(JSON.stringify(res, null, 2));
+      } else if (action === 'install') {
+        const res = await installOllamaBinary();
+        console.log(JSON.stringify(res, null, 2));
+      } else if (action === 'start') {
+        const res = await startOllamaDaemon({ endpoint });
+        console.log(JSON.stringify(res, null, 2));
+      } else if (action === 'pull') {
+        const model = positionals[1] || flags.model;
+        if (!model) throw new Error('Usage: node scripts/host-cli.mjs ollama pull <model-tag>');
+        const status = await probeOllamaStatus({ endpoint, allowPrivateNetwork });
+        const out = await ollamaStreamPull(status.endpoint, model, {
+          allowPrivateNetwork,
+          onProgress: ev => {
+            if (ev.percent !== null) process.stderr.write(`\r${ev.status}: ${ev.percent}%`);
+          },
+        });
+        process.stderr.write('\n');
+        console.log(JSON.stringify(out, null, 2));
+      } else if (action === 'test') {
+        const model = positionals[1] || flags.model;
+        if (!model) throw new Error('Usage: node scripts/host-cli.mjs ollama test <model-tag>');
+        const out = await testOllamaModelInference({ endpoint, model, allowPrivateNetwork });
+        console.log(JSON.stringify(out, null, 2));
+      } else {
+        throw new Error('Usage: node scripts/host-cli.mjs ollama <status|install|start|pull|test> [--endpoint URL] [--model TAG] [--allow-private]');
+      }
+      break;
+    }
     default: {
-      console.error('Usage: node scripts/host-cli.mjs <setup|install|start|stop|status|webui|webui-auth|service|approve|password|upload-secrets|rotate-secrets> [options]');
+      console.error('Usage: node scripts/host-cli.mjs <setup|install|start|stop|status|webui|webui-auth|service|approve|password|upload-secrets|rotate-secrets|ollama> [options]');
       process.exitCode = 1;
     }
   }

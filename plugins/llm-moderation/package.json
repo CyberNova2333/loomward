@@ -1,0 +1,23 @@
+{
+  "name": "@loomward/plugin-llm-moderation",
+  "version": "3.0.0-alpha.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "description": "Out-of-process multimodal LLM content moderation plugin with Local Guard, Canary Inducement Probe, Cloud Safety APIs, and native holdback streaming",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./contract": "./src/contract.mjs",
+    "./config-store": "./src/config-store.mjs",
+    "./correlation": "./src/correlation.mjs",
+    "./stream-session": "./src/stream-session.mjs",
+    "./service-manager": "./src/service-manager.mjs"
+  },
+  "dependencies": {
+    "@loomward/shared": "workspace:*"
+  },
+  "scripts": {
+    "check": "node --check src/index.mjs && node --check src/contract.mjs && node --check src/config-store.mjs && node --check src/correlation.mjs && node --check src/stream-session.mjs && node --check src/service-manager.mjs && python3 -B -m py_compile engine/*.py engine/backends/*.py",
+    "test": "node --test test/*.test.mjs"
+  }
+}

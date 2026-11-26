@@ -251,6 +251,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/shared
 
+  plugins/llm-moderation:
+    dependencies:
+      '@loomward/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+
   plugins/mcp-hub:
     dependencies:
       '@loomward/shared':
