@@ -44,7 +44,7 @@ async function startSampleMockModelServer() {
 }
 
 const { consolePort } = parsePreviewArgs();
-const base = await fs.mkdtemp(path.join(os.tmpdir(), 'loomward-preview-'));
+const base = await fs.mkdtemp(path.join(os.homedir(), '.loomward-preview-'));
 await fs.chmod(base, 0o700);
 const stateDir = path.join(base, 'state');
 const workspace = path.join(base, 'workspace');
