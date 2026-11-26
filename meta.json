@@ -20,11 +20,13 @@
   "techStack": [
     "Cordis",
     "Node.js 24",
+    "Python",
     "Cloudflare Workers",
     "Durable Objects",
     "MCP",
     "Docker",
     "WebAuthn",
+    "Ollama",
     "PowerShell"
   ],
   "tags": [
@@ -36,19 +38,19 @@
     "cloudflare-workers"
   ],
   "summary": {
-    "zh": "基于 Cordis 4 微内核与 pnpm monorepo 构建的个人综合 Agent 管控平台，融合 Cloudflare OAuth 2.1 远程中继、本机逐参人工审批、只读 Linux Docker 沙箱、第三方 MCP 聚合、防泄漏护栏与人机决策台账。",
-    "en": "Cordis 4 monorepo local Agent control plane unifying Cloudflare OAuth 2.1 remote MCP relay, exact local approval, read-only Linux Docker sandboxes, third-party MCP aggregation, anti-leak guardrails, and a decision ledger."
+    "zh": "基于 Cordis 4 微内核与 pnpm monorepo 构建的个人综合 Agent 管控平台，融合 Cloudflare OAuth 2.1 远程中继、原生流式安全审查、本机逐参人工审批、只读 Linux Docker 沙箱、第三方 MCP 聚合、防泄漏与多模态 LLM 内容审查及人机决策台账。",
+    "en": "Cordis 4 monorepo local Agent control plane unifying Cloudflare OAuth 2.1 remote MCP relay, native streaming moderation, exact local approval, read-only Linux Docker sandboxes, third-party MCP aggregation, anti-leak & multimodal LLM content moderation, and a decision ledger."
   },
   "highlights": {
     "zh": [
-      "以 Cordis 4 + 冻结根插件清单（RPM）+ KernelGuard + PolicyTree 为安全微内核，机械守卫包间分层，锁定 tool:invoke@1 单调阻断与不可替换不变量，全部扩展运行于进程外边界",
-      "物理拆分 Ring 2 独立信任面（18798 PassKey/强密码、逐参两步审批、能力熔断）与 Ring 3 只读控制台（18797 观测/SSE 与零 JS 注入声明式 console:panel@1），并预留零耦合 ContentInspect v1 审查契约",
-      "整合远程桥接、R1–R7 离线防泄漏护栏（@loomward/plugin-antileak）与人机决策台账（@loomward/plugin-decisions），并通过 @loomward/plugin-adapters 无侵入对接独立仓 CloudForge 与 ModelBridge"
+      "以 Cordis 4 + 冻结根插件清单（RPM）+ KernelGuard + PolicyTree 为安全微内核，机械守卫包间分层，锁定 tool:invoke@1 与 tool:stream@1 单调阻断不变量及按 caller 隔离的 plugin:secrets@1 密钥绑定",
+      "提供单源统一回环安全控制台（默认 127.0.0.1:18797：PassKey/强密码、逐参两步审批、能力总熔断、只写插件密钥托管、Ollama 本地运行时管理与安全策略配置、SSE 实时审计与零 JS 注入声明式 console:panel@1），承载 ContentInspect v2 独立/合并/原生流式审查协议",
+      "整合远程桥接、R1–R7 离线防泄漏护栏（@loomward/plugin-antileak）、多模态 LLM 内容审查（@loomward/plugin-llm-moderation：原生 Ollama Guard + 防诱导金丝雀探针 + 四大云端审核 API + 分块暂留流控）与人机决策台账（@loomward/plugin-decisions），并通过 @loomward/plugin-adapters 对接 CloudForge 与 ModelBridge"
     ],
     "en": [
-      "Powered by a Cordis 4 microkernel with frozen Root Plugin Manifests (RPM), KernelGuard, PolicyTree, mechanical layering checks, monotonic tool:invoke@1 safety latches, and strict out-of-process extension boundaries",
-      "Physically separates Ring 2 Trust Origin (18798 PassKey/password, two-step approval, kill switches) from Ring 3 read-only Console Origin (18797 telemetry/SSE + zero-JS declarative console:panel@1) alongside a zero-coupling ContentInspect v1 contract",
-      "Consolidates remote bridge, offline R1–R7 anti-leak guardrails (@loomward/plugin-antileak), and decision ledger (@loomward/plugin-decisions) while integrating standalone CloudForge and ModelBridge via @loomward/plugin-adapters"
+      "Powered by a Cordis 4 microkernel with frozen Root Plugin Manifests (RPM), KernelGuard, PolicyTree, mechanical layering checks, monotonic tool:invoke@1 / tool:stream@1 safety latches, and caller-bound plugin:secrets@1 namespaces",
+      "Delivers a single-origin unified loopback console (127.0.0.1:18797: PassKey/password auth, two-step exact approval, kill switches, write-only plugin secret vault, moderation policy controls, live SSE telemetry, and zero-JS declarative console:panel@1) alongside ContentInspect v2",
+      "Unifies remote bridge, offline R1–R7 anti-leak guardrails (@loomward/plugin-antileak), multimodal LLM content moderation (@loomward/plugin-llm-moderation with Local Guard, Canary Inducement Probe, 4 cloud safety APIs, and holdback streaming), decision ledger (@loomward/plugin-decisions), and CloudForge/ModelBridge adapters"
     ]
   },
   "quickStart": [
@@ -60,12 +62,12 @@
     "stage": "持续演进",
     "stageEn": "Active Evolution",
     "milestone": {
-      "zh": "已完成四阶段 Cordis 4 monorepo 重构：微内核守卫与冻结 RPM、双源物理隔离控制台、进程外防泄漏护栏与决策台账插件、独立仓 CloudForge/ModelBridge 适配及终轮对抗安全加固。",
-      "en": "Completed all 4 phases of the Cordis 4 monorepo architecture: KernelGuard & frozen RPM, physical Dual-Origin Console, out-of-process antileak & decisions plugins, standalone CloudForge/ModelBridge adapters, and adversarial security hardening."
+      "zh": "已完成 Cordis 4 微内核平台重构、十轮对抗性安全审查收敛、多模态 LLM 内容审查插件（Local Guard + 金丝雀防诱导探针 + 云端 API + 原生 Holdback 流式审查）及单源统一安全控制台整合。",
+      "en": "Completed the Cordis 4 microkernel monorepo architecture, 10 rounds of adversarial security hardening, the multimodal LLM content moderation plugin (Local Guard + Canary Probe + Cloud APIs + native holdback streaming), and the single-origin unified console."
     }
   },
   "additionalTermsConsent": {
     "CyberNova": true
   },
-  "updatedAt": "2026-11-23"
+  "updatedAt": "2026-11-25"
 }

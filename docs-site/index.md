@@ -2,6 +2,9 @@
 layout: home
 
 hero:
+  image:
+    src: /brand/icon-256.png
+    alt: LoomWard · 织盾
   name: AgentDock Bridge
   text: 单人远程 MCP 桥接网关
   tagline: 通过 Cloudflare Workers OAuth 2.1 + PKCE 鉴权与中继，在 Windows、macOS 或 Linux 受保护连接器执行人工精确批准，并把操作隔离在只读 Linux Docker 沙箱中。

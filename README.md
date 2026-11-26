@@ -1,4 +1,12 @@
+<p align="center">
+  <img src="assets/loomward-brand.png" alt="LoomWard · 织盾" width="112" />
+</p>
+
 <h1 align="center">LoomWard · 织盾</h1>
+
+<p align="center">
+  <img src="assets/loomward-logo.svg" alt="LoomWard · 织盾 — Cordis 4 Local Agent Security Platform" width="460" />
+</p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg" alt="License: AGPL-3.0-only" /></a>
@@ -28,7 +36,7 @@
 | `packages/cloud-relay` | `@loomward/cloud-relay` | Cloudflare Workers OAuth 2.1 + `BridgeRelay` 边缘中继根包（承接 `cloud/`） |
 | `packages/sandbox` | `@loomward/sandbox` | 只读 Linux Docker 沙箱、`file-worker` 与 Windows ACL 守卫根包（承接 `container/` 与沙箱模块） |
 | `packages/host` | `@loomward/host` | 跨平台受保护宿主运行时、凭据保管库、统一 `ToolDispatchPipeline`、审批状态机与 24h 防重放账本（承接 `local/` 与 `scripts/`） |
-| `packages/console` | `@loomward/console` | 双源物理隔离回环控制台（Ring 2 Trust Origin `18798` 零扩展面板 + Ring 3 Console Origin `18797` 只读观测/SSE + `0600` `control.sock` 与离线 `esbuild` 构建前端） |
+| `packages/console` | `@loomward/console` | 单源统一回环安全控制台（默认 `127.0.0.1:18797`：PassKey/强密码鉴权、两步逐参审批、能力总开关、只写插件密钥、审核策略配置、SSE 实时观测、`0600` `control.sock` 与离线 `esbuild` 前端） |
 | `plugins/antileak` | `@loomward/plugin-antileak` | 进程外 R1–R7 离线防泄漏护栏插件（整合自 `archive/claude-code-antileak-hooks`，`ContentInspect v1` 前置 fail-closed 阻断 + 只读健康面板） |
 | `plugins/decisions` | `@loomward/plugin-decisions` | 进程外人机决策台账与上下文导出插件（整合自 `archive/agent-decisions-dashboard`，回环 Python+SQLite 服务、CAS 乐观锁与幂等写入） |
 | `plugins/mcp-hub` | `@loomward/plugin-mcp-hub` | 进程外 `stdio` / `Streamable HTTP` 第三方 MCP 聚合器（承接 `local/mcp-*.mjs`） |

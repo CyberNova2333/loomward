@@ -92,6 +92,9 @@
 | --- | --- | --- | --- | --- | --- |
 | `A-01`；IBM Plex Sans（文档站自托管字体） | `docs-site/.vitepress/theme/fonts/ibm-plex-sans-latin-*.woff2`；来源：IBM Plex Sans | IBM Corp.（见同目录 `IBM-Plex-Sans-LICENSE.txt`） | SIL Open Font License 1.1（`docs-site/.vitepress/theme/fonts/IBM-Plex-Sans-LICENSE.txt`） | 否（非项目标识）；随 `docs-site` 构建静态分发；可由下游自由替换 | 按 SIL OFL 1.1 随文档站构建与浏览分发；未修改字形 |
 | `A-02`；JetBrains Mono（文档站自托管字体） | `docs-site/.vitepress/theme/fonts/jetbrains-mono-latin-500-normal.woff2`；来源：JetBrains Mono | The JetBrains Mono Project Authors（见同目录 `LICENSE-jetbrains-mono.txt`） | SIL Open Font License 1.1（`docs-site/.vitepress/theme/fonts/LICENSE-jetbrains-mono.txt`） | 否（非项目标识）；随 `docs-site` 构建静态分发；可由下游自由替换 | 按 SIL OFL 1.1 随文档站代码块渲染使用；未修改字形 |
+| `A-03`；LoomWard Woven Shield 主图形徽标（PNG 母版及文档站派生尺寸） | `assets/loomward-brand.png` 及派生 `docs-site/public/brand/{icon,icon-256,icon-32}.png`；基于 AI 辅助草图去底与抗锯齿重构 | CyberNova2333（项目原创提示词与后期重构定稿；`assets/README.md`） | 暂按项目主许可证 GNU AGPLv3 及附加条款第八条管理；后续如需独立标识条款将同步更新本表 | 是（项目主标识）；随源码与 `docs-site` 静态分发；下游戏分支应遵循反冒充约束按附加条款第八条替换或声明区别 | 深海黑曜石与钴蓝/亮青交织盾徽；仅作本项目官方标识与文档/控制台展示 |
+| `A-04`；LoomWard 矢量盾徽图标 | `assets/loomward-icon.svg`、`docs-site/public/brand/loomward-icon.svg`、`packages/console/` 同源 SVG；本项目原创绘制 | CyberNova2333 | GNU AGPLv3 及附加条款第八条 | 是（项目标识）；随 `docs-site`、Console 与仓库资产分发；改作或衍生分发须依第八条去标或区别署名 | 面向高分屏与控制台顶栏的矢量几何版本 |
+| `A-05`；LoomWard 横幅徽标锁合（SVG Wordmark） | `assets/loomward-logo.svg`；本项目原创排版 | CyberNova2333 | GNU AGPLv3 及附加条款第八条 | 是（项目标识）；用于 `README.md` / `README.en.md` 项目页头展示 | 与 `loomward-icon.svg` 同源色板；未引入第三方付费字体 |
 
 ### 4.2 字体与其他资产的专门条件记录
 
@@ -104,7 +107,7 @@
 
 ### 4.3 项目标识与既有许可边界
 
-本仓库目前不含独立二进制图形 Logo 文件，项目名称 `LoomWard · 织盾`（前称 `AgentDock Bridge`）依附加条款第五条与第八条规范真实来源陈述与反冒充边界，不主张注册商标权。
+本仓库随附独立项目图形标识资产（`A-03` 至 `A-05`，详见 `assets/README.md`），项目名称 `LoomWard · 织盾`（前称 `AgentDock Bridge`）及上述图形徽标依附加条款第五条与第八条规范真实来源陈述与反冒充边界，不主张注册商标权。
 
 引用附加条款第八条（含第 8.2 款）时，完整保留资产独立性、实际权利人授权、可替换性、许可相容性及不追溯收回既有版本有效授权（第 7.8、9.3 款）等全部前提条件，不单独摘录或扩大限制。
 

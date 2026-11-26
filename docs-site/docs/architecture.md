@@ -70,13 +70,13 @@ Linux Container (node:24-trixie-slim, --read-only, 非特权 UID, --network none
 - **背景问题（R4-02 / 第五轮修复）**：深层嵌套 JSON 会因 `JSON.stringify(..., 2)` 在落盘后膨胀超出读取上限；外部宿主共享 Node 目录、PowerShell `PSModulePath` / 动态链接器继承及覆盖头部的 CSP 均带来隐蔽风险。
 - **架构决策**：`approval-store.mjs` 在开临时文件前按紧凑序列化检测 `1,200,000` 字节上限；`showConsent` 合并保留而非覆盖基础零脚本 CSP；`Install-NodeRuntime.ps1` / `local/node-toolchains.mjs`、`Manage.ps1` / `host-cli.mjs` 与 `connector.mjs` 将运行目录与官方 Node `24.22.1` 隔离到用户私有目录并检查完整祖先路径权限、SHA-256 及最小子进程环境；`local/windows-acl.mjs` 前置拦截会丢弃显式 NTFS DACL 的替换请求。
 
-### ADR-05：Cordis 4 微内核守卫、双源物理隔离控制台与低耦合进程外扩展契约
+### ADR-05：Cordis 4 微内核守卫、单源统一回环控制台与低耦合进程外扩展契约
 
-- **背景问题**：随着平台整合防泄漏护栏、人机决策台账、第三方 MCP 聚合及未来可独立剥离交付的外部 LLM 内容审核插件，若在单进程 Node.js 中共享宿主上下文或在审批信任面注入扩展前端脚本，将带来凭据泄漏、审批绕过与强耦合风险。
+- **背景问题**：随着平台整合防泄漏护栏、人机决策台账、第三方 MCP 聚合与多模态 LLM 内容审核插件，既需要避免扩展插件在服务端接触宿主核心凭据或前端 DOM，同时作为本机/服务器单源部署控制面也应统一鉴权入口并避免跨端口弹窗。
 - **架构决策**：
-  - `@loomward/kernel` 通过冻结根插件清单（`rpm.json`，由跨平台 `scripts/generate-rpm.mjs` 写入受保护发布目录）、`KernelGuard` 闭锁 `vault:backend@1`、机械分层守卫（`pnpm run layering`）及 `tool:invoke@1` 的 `allowReplace: false` 与单调 `blocked`/`forceApproval` 锁存，确保任何扩展插件都无法接触主进程凭据或绕过精确审批与 24h 账本。
-  - `@loomward/console` 物理拆分 **Ring 2 Trust Origin（`127.0.0.1:18798`，零扩展代码/面板，承接认证、两步审批与熔断开关）** 与 **Ring 3 Console Origin（`127.0.0.1:18797`，只读观测、SSE 与纯 JSON 声明式 `console:panel@1`）**，通过单次 60 秒票据移交、Trust 登出级联吊销与私有 `0600` `control.sock` 解耦。
-  - 所有扩展插件（`plugins/*`）必须声明 `executionBoundary: "out-of-process"`；未来外部 LLM 内容审核模块仅依赖 `@loomward/shared` 的 `ContentInspect v1` 与 `console:panel@1` 即可零侵入接入与独立剥离交付。
+  - `@loomward/kernel` 通过冻结根插件清单（`rpm.json`，由跨平台 `scripts/generate-rpm.mjs` 写入受保护发布目录）、`KernelGuard` 闭锁 `vault:backend@1`、机械分层守卫（`pnpm run layering`）及 `tool:invoke@1` / `tool:stream@1` 的 `allowReplace: false` 与单调 `blocked`/`forceApproval` 锁存，确保任何扩展插件都无法接触主进程凭据或绕过精确审批与 24h 账本。
+  - `@loomward/console` 收敛为**单源统一回环安全控制台（默认 `127.0.0.1:18797`）**，在同一严格同源 CSP / 标签页令牌隔离会话下提供 PassKey/强密码认证、精确逐参两步审批、能力开关、只写插件密钥、多模态审核策略、SSE 实时审计与私有 `0600` `control.sock`，并以零 JS 注入纯 JSON 声明式 `console:panel@1` 渲染扩展面板。
+  - 所有扩展插件（`plugins/*`）必须声明 `executionBoundary: "out-of-process"`；外部内容审核与集成模块仅依赖 `@loomward/shared` 的 `ContentInspect`、`plugin:secrets@1` 与 `console:panel@1` 即可零侵入接入与独立剥离交付。
 
 ### 升级与迁移操作清单
 

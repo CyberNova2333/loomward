@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 160" fill="none" role="img" aria-labelledby="loomward-logo-title">
+  <title id="loomward-logo-title">LoomWard · 织盾</title>
+  <defs>
+    <linearGradient id="lw-logo-bg" x1="20" y1="14" x2="140" y2="146" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#111d35" />
+    </linearGradient>
+    <linearGradient id="lw-logo-cobalt" x1="36" y1="32" x2="124" y2="126" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1d6fd8" />
+      <stop offset="100%" stop-color="#0c5cab" />
+    </linearGradient>
+    <linearGradient id="lw-logo-cyan" x1="124" y1="32" x2="36" y2="126" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#67e8f9" />
+      <stop offset="100%" stop-color="#38bdf8" />
+    </linearGradient>
+    <linearGradient id="lw-text-accent" x1="176" y1="40" x2="540" y2="112" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0c5cab" />
+      <stop offset="55%" stop-color="#0284c7" />
+      <stop offset="100%" stop-color="#38bdf8" />
+    </linearGradient>
+  </defs>
+  <!-- Shield badge container (readable on dark and light GitHub themes) -->
+  <rect x="12" y="12" width="616" height="136" rx="22" fill="#0f172a" stroke="#1e3a5f" stroke-width="1.5" />
+  <!-- Shield emblem -->
+  <g transform="translate(28, 16) scale(1)">
+    <path d="M64 8L108 26V58C108 87.5 89 109.5 64 120C39 109.5 20 87.5 20 58V26L64 8Z" fill="url(#lw-logo-bg)" stroke="#38bdf8" stroke-opacity="0.45" stroke-width="2" />
+    <path d="M64 15L100 30V58C100 83 84 102 64 111.5C44 102 28 83 28 58V30L64 15Z" fill="#091326" />
+    <g stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M35 34L64 46L93 84L64 98L38 84L79 44" stroke="url(#lw-logo-cobalt)" />
+      <path d="M93 34L64 46L35 84L64 98L90 84L49 44" stroke="#091326" stroke-width="14" />
+      <path d="M93 34L64 46L35 84L64 98L90 84L49 44" stroke="url(#lw-logo-cyan)" />
+      <path d="M51 54L77 77" stroke="#091326" stroke-width="14" />
+      <path d="M47 50L81 81" stroke="url(#lw-logo-cobalt)" />
+    </g>
+  </g>
+  <!-- Wordmark -->
+  <text x="172" y="79" fill="#f8fafc" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="44" font-weight="800" letter-spacing="-0.02em">LoomWard <tspan fill="#38bdf8" font-weight="700">· 织盾</tspan></text>
+  <!-- Subtitle bar -->
+  <rect x="174" y="96" width="54" height="3.5" rx="1.75" fill="url(#lw-text-accent)" />
+  <text x="238" y="108" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="14.5" font-weight="600" letter-spacing="0.06em">CORDIS 4 LOCAL AGENT SECURITY PLATFORM</text>
+</svg>

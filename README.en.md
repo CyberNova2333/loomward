@@ -1,4 +1,12 @@
+<p align="center">
+  <img src="assets/loomward-brand.png" alt="LoomWard" width="112" />
+</p>
+
 <h1 align="center">LoomWard</h1>
+
+<p align="center">
+  <img src="assets/loomward-logo.svg" alt="LoomWard — Cordis 4 Local Agent Security Platform" width="460" />
+</p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0--only-blue.svg" alt="License: AGPL-3.0-only" /></a>
@@ -21,7 +29,7 @@ Personal local Agent security and control plane (evolved from `AgentDock Bridge`
 
 Workspace packages live under `packages/*` (core root packages) and `plugins/*` (strictly `out-of-process` extensions), while the existing v2 bridge runtime (`cloud/`, `local/`, `container/`, `scripts/`, `test/`) stays active and regression-tested during incremental migration:
 
-- **Core Packages (`packages/*`)**: `@loomward/shared` (zero-host contracts, declarative `console:panel@1`, zero-coupling `ContentInspect v1`, monotonic safety slots), `@loomward/kernel` (Cordis 4 + `KernelGuard` + frozen RPM + `PolicyTree` + `pnpm run layering`), `@loomward/cloud-relay`, `@loomward/sandbox`, `@loomward/host` (`ToolDispatchPipeline` + daemon), `@loomward/console` (physical Ring 2 Trust Origin `18798` + Ring 3 read-only Console Origin `18797` + `0600` `control.sock` + offline `esbuild` web bundles).
+- **Core Packages (`packages/*`)**: `@loomward/shared` (zero-host contracts, declarative `console:panel@1`, zero-coupling `ContentInspect v1`, monotonic safety slots), `@loomward/kernel` (Cordis 4 + `KernelGuard` + frozen RPM + `PolicyTree` + `pnpm run layering`), `@loomward/cloud-relay`, `@loomward/sandbox`, `@loomward/host` (`ToolDispatchPipeline` + daemon), `@loomward/console` (single-origin unified loopback WebUI `127.0.0.1:18797` + `0600` `control.sock` + offline `esbuild` web bundles).
 - **Platform Plugins (`plugins/*`, strictly `out-of-process`)**: `@loomward/plugin-antileak` (offline R1–R7 fail-closed pre-inspection from `archive/claude-code-antileak-hooks`), `@loomward/plugin-decisions` (loopback Python+SQLite ledger with CAS/idempotency from `archive/agent-decisions-dashboard`), `@loomward/plugin-mcp-hub`, and `@loomward/plugin-adapters` (OAuth 2.1 Streamable HTTP MCP for standalone **CloudForge** + read-only 12s-bounded telemetry for standalone **ModelBridge**, without touching either repo).
 - **Archive Branches**: `archive/agentdock-worker-remote`, `archive/agent-decisions-dashboard`, and `archive/claude-code-antileak-hooks` preserve the complete signed pre-consolidation histories.
 

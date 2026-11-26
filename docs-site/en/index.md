@@ -2,6 +2,9 @@
 layout: home
 
 hero:
+  image:
+    src: /brand/icon-256.png
+    alt: LoomWard
   name: AgentDock Bridge
   text: Personal Remote MCP Bridge
   tagline: Authenticates remote MCP clients via Cloudflare Workers OAuth 2.1 + PKCE, requires exact manual approval on a hardened Windows, macOS, or Linux host, and executes workspace tools in a read-only Linux Docker container.

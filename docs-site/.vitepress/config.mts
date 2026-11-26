@@ -16,6 +16,10 @@ const guidePages: Record<string, string> = {
 
 export default defineConfig({
   cleanUrls: true,
+  head: [
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/brand/loomward-icon.svg' }],
+    ['link', { rel: 'icon', type: 'image/png', sizes: '32x32', href: '/brand/icon-32.png' }],
+  ],
   markdown: {
     config: guideLinks(guidePages),
   },
@@ -115,6 +119,7 @@ export default defineConfig({
     },
   },
   themeConfig: {
+    logo: '/brand/loomward-icon.svg',
     search: { provider: 'local' },
   },
 })

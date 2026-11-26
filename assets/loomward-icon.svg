@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none" role="img" aria-labelledby="loomward-icon-title">
+  <title id="loomward-icon-title">LoomWard Woven Shield Mark</title>
+  <defs>
+    <linearGradient id="lw-shield-bg" x1="16" y1="8" x2="112" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#111d35" />
+    </linearGradient>
+    <linearGradient id="lw-cobalt" x1="28" y1="22" x2="100" y2="104" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1d6fd8" />
+      <stop offset="100%" stop-color="#0c5cab" />
+    </linearGradient>
+    <linearGradient id="lw-cyan" x1="100" y1="22" x2="28" y2="104" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#67e8f9" />
+      <stop offset="100%" stop-color="#38bdf8" />
+    </linearGradient>
+  </defs>
+  <!-- Shield outer frame -->
+  <path d="M64 8L108 26V58C108 87.5 89 109.5 64 120C39 109.5 20 87.5 20 58V26L64 8Z" fill="url(#lw-shield-bg)" stroke="#1e3a5f" stroke-width="2.5" />
+  <path d="M64 15L100 30V58C100 83 84 102 64 111.5C44 102 28 83 28 58V30L64 15Z" fill="#091326" />
+  <!-- Interwoven architectural loom knot (Cobalt + Cyan) -->
+  <g stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Left-to-bottom cobalt arc -->
+    <path d="M35 34L64 46L93 84L64 98L38 84L79 44" stroke="url(#lw-cobalt)" opacity="0.96" />
+    <!-- Crossing shadow separators -->
+    <path d="M93 34L64 46L35 84L64 98L90 84L49 44" stroke="#091326" stroke-width="14" />
+    <!-- Right-to-bottom cyan ribbon (over-under lattice weave) -->
+    <path d="M93 34L64 46L35 84L64 98L90 84L49 44" stroke="url(#lw-cyan)" />
+    <!-- Over-crossing cobalt strand for genuine woven depth -->
+    <path d="M51 54L77 77" stroke="#091326" stroke-width="14" />
+    <path d="M47 50L81 81" stroke="url(#lw-cobalt)" />
+  </g>
+</svg>
