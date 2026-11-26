@@ -560,3 +560,11 @@ Synced through 90dcda7c69c1e8a11b724172d4c27299414fe578
 审批使用隔离临时目录中的一条测试请求。Esc 和默认“取消”均返回原请求；明确选择“确认批准一次”后，检查批准记录摘要与请求一致、焦点返回队列标题。本次只核验界面与批准记录，未启动执行器。[复核操作](modules/local-approval-and-replay.md) · [请求夹具示例](../packages/console/test/unified-console.test.mjs)
 
 Synced through 0ba9bc39f29af71fc6ccd358f3ac80ea1cc0b949
+
+## 2026-11-26 将控制台键盘复验接入虚拟机脚本
+
+同一条 `--suite keyboard` 命令把同一份源码送入两台副本，在已登录的专用桌面运行 Edge 与 Safari。每档视口验证 29 项交互，覆盖窄屏导航、拓扑展开与收起、审批弹窗的双向 Tab 与取消，以及状态推送后的焦点恢复。三档完成后显式批准一次，核对批准记录摘要，并在随后的状态推送后再次检查队列标题焦点。[运行命令与报告字段](walkthroughs/one-real-run.md#在-edge-和-safari-复验键盘操作)
+
+在本机 Windows 11 和 macOS 15.8.3 副本上，Edge 158.0.4370.45 的实测视口为 626、390、320 像素，Safari 18.6 为 650、390、320 像素。从提交 `409ace2` 复跑，两个客体各通过 89 项，联合报告为 `accepted: true`。关闭 Safari 远程自动化后，单端复跑返回退出码 1，报告给出 `SAFARI_AUTOMATION_DISABLED`。[键盘验收场景](../tools/acceptance/keyboard.mjs) · [双端结果汇总](../tools/acceptance/run.py)
+
+Synced through 409ace219eb491405652b814a9df3c226ae64d4b
