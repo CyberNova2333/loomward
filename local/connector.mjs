@@ -4,6 +4,8 @@ import WebSocket from 'ws';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { assertPrivateFile, assertPrivateState } from './host-safety.mjs';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { RequestReceipts, TransientReceipts, StopReceipts } from './receipts.mjs';
@@ -460,16 +462,28 @@ async function main() {
   let reporter;
   let stopPoll;
   try {
-    const config = JSON.parse(await fs.readFile(path.join(stateDir, 'config.json'), 'utf8'));
+    assertPrivateState(stateDir);
+    const configFile = assertPrivateFile(path.join(stateDir, 'config.json'));
+    const config = JSON.parse(await fs.readFile(configFile, 'utf8'));
     reporter = new ConnectorReporter(stateDir, config.origin);
     if (config.sandbox?.enabled !== true || config.requireLocalApproval !== true) {
       throw new Error('Protected startup requires a Docker sandbox and local approval.');
     }
     const secrets = loadSecrets(stateDir, { fields: ['bridgeToken'] });
     delete process.env.AGENTDOCK_BRIDGE_TOKEN;
-    const { startLoomWardDaemon } = await import('../packages/host/src/daemon.mjs');
+    const bundledRoot = path.resolve(import.meta.dirname, '..');
+    const release = path.resolve(config.sourceRoot || bundledRoot);
+    if (release !== bundledRoot) {
+      // The checkout's foreground entry follows the same private release as the installed launchers.
+      if (path.dirname(release) !== stateDir || !/^runtime-\d{8}-\d{6}-[a-f0-9]{8}$/.test(path.basename(release))) {
+        throw new Error('Invalid active release directory.');
+      }
+      assertPrivateState(release);
+    }
+    const { startLoomWardDaemon } = await import(pathToFileURL(path.join(release, 'packages/host/src/daemon.mjs')).href);
     const port = Number.isSafeInteger(config.webuiPort) ? config.webuiPort : 18797;
     const daemon = await startLoomWardDaemon({
+      rootDir: release,
       requireFrozenRpm: true,
       origin: config.origin,
       stateDir,

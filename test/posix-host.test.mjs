@@ -504,6 +504,16 @@ esac
     cwd: installed.runtime, timeout: 60000,
   });
 
+  // The checkout has no frozen RPM. Its foreground command must use the active private release.
+  const stopRequest = path.join(stateDir, 'stop.request');
+  await fs.writeFile(stopRequest, '', { mode: 0o600 });
+  try {
+    await execFile(process.execPath, [path.resolve(import.meta.dirname, '../local/connector.mjs'), stateDir], { timeout: 15000 });
+    assert.equal(JSON.parse(await fs.readFile(path.join(stateDir, 'connector-status.json'))).online, false);
+  } finally {
+    await fs.rm(stopRequest, { force: true });
+  }
+
   t.after(async () => {
     await stopConnector({ stateDir }).catch(() => {});
   });
