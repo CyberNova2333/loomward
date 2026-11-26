@@ -408,3 +408,17 @@ Synced through 7ce1226（含八轮全库代码审查修复工作树改动）
 - 验证范围与边界：本机（Linux x86_64）运行 `node --check scripts/cloudflare-api.mjs scripts/record-hardening.mjs scripts/host-cli.mjs`、`python3 -m py_compile`、`pnpm run build:console`、`pnpm run check`、`pnpm run layering`（10 项全部通过）、`pnpm run test:ci`（209 项测试：193 通过、0 失败、16 按 Windows/Docker 条件跳过）、`validate_repo_docs.py`、`pnpm --dir docs-site run docs:build`、`sync_assets_licenses.py --check --dry-run` 与 `repo_maintenance_guard.py pre-commit`；`pwsh` 本机未安装，Windows `.ps1` 与 `AGENTDOCK_DOCKER_TEST=1` 用例未实机执行。
 
 Synced through b5218a7（含九、十轮全库代码审查修复与零问题收敛工作树改动）
+
+## 2026-11-26 LoomWard 主线跨平台复验
+
+将原验收分支的本机 Docker 端点校验、Windows 运行库诊断、凭据子进程及 OAuth 撤销回归同步到 LoomWard 的安装与运行入口。macOS 的只读挂载用例先解析系统临时目录的真实路径，正式运行时继续拒绝带符号链接的受保护路径。端点和测试参数见[容器沙箱与文件策略](modules/container-sandbox-and-file-policy.md)。
+
+| 测试环境 | 结果 |
+| --- | --- |
+| Windows 11 x64，普通测试用户 | DPAPI、Docker 端点与受保护管理共 14 项通过，Docker/NTFS 另有 4 项通过。安装器生成 RPM 清单，使用私有目录的启动、状态、停止入口验证了监督进程与连接器的生命周期。 |
+| macOS 15.8.3 x64 | 临时钥匙串完成创建、读取及本地轮换，原钥匙串设置已恢复。安装、RPM 清单与受保护启停通过。宿主管理、WebUI 和真实容器等 29 项测试全部通过。 |
+| Linux x86_64 | 以主线和本批补丁运行语法检查、站点构建及真实 Docker 全量回归。210 项中 196 项通过，14 项按环境跳过。加入当时工作区中的并行开发改动后，224 项中 210 项通过，14 项跳过。 |
+
+两台隔离客体均用固定 Node 24.22.1 和各自的 Moby 29.9.2，引擎运行同一镜像 `sha256:ef51fede32df12c340844bf36798c61f0d3220e0a7aab156e3d6e204d31c641e`。测试网关使用客体回环地址，结束时两端按安装标签查询均为零个残留容器。
+
+Synced through 50633e740a8dbc3ed1c5d0d3c03aae8ed97147e7
