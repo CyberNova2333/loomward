@@ -90,7 +90,9 @@ python3 tools/acceptance/run.py --suite keyboard \
   --mac-ssh loomward-test-mac --windows-domain loomward-test-windows --windows-user loomward-test
 ```
 
-可用 `--ssh-config` 指定专用 SSH 配置。要在同一次运行中复验宿主和浏览器，使用 `--suite all --image "$LOOMWARD_TEST_IMAGE"`。省略 `--suite` 时沿用原有的宿主验收。`--only darwin` 和 `--only win32` 可定位单端失败，单端结果见 `guests.<平台>.passed`。
+可用 `--ssh-config` 指定专用 SSH 配置。省略 `--suite` 时沿用原有的宿主验收。`--only darwin` 和 `--only win32` 可定位单端失败，单端结果见 `guests.<平台>.passed`。
+
+要在同一次运行中复验宿主和浏览器，使用 `--suite all --image "$LOOMWARD_TEST_IMAGE"`。冷启动后，在两台副本的专用账户中用配置的 Docker CLI 运行 `docker --context CONTEXT image inspect IMAGE_ID`。将 `CONTEXT` 换成客体配置的上下文，`IMAGE_ID` 换成传给 `--image` 的完整镜像 ID。两端输出中的 `Id` 字段均与该值一致后，即可启动联合验收。Windows 若提示找不到 `docker_engine` 命名管道，等待本地引擎就绪再复查。
 
 每个浏览器先调整桌面窗口至 650 像素，再检查 390 和 320 像素的 CSS 视口。Edge 的最窄两档通过 DevTools 设置视口，Safari 三档都调整原生窗口。各档均用键盘打开、遍历和退出导航，展开拓扑并从节点转入审批队列。用例还在状态推送前后检查焦点，验证 Esc 和默认取消返回同一请求。最后显式确认一次，核对临时批准记录的请求摘要，并检查队列标题在下一次刷新后仍有焦点。[键盘用例](../../tools/acceptance/keyboard.mjs) · [原生浏览器驱动](../../tools/acceptance/native-browser.mjs)
 

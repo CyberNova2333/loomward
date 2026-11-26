@@ -568,3 +568,13 @@ Synced through 0ba9bc39f29af71fc6ccd358f3ac80ea1cc0b949
 在本机 Windows 11 和 macOS 15.8.3 副本上，Edge 158.0.4370.45 的实测视口为 626、390、320 像素，Safari 18.6 为 650、390、320 像素。从提交 `409ace2` 复跑，两个客体各通过 89 项，联合报告为 `accepted: true`。关闭 Safari 远程自动化后，单端复跑返回退出码 1，报告给出 `SAFARI_AUTOMATION_DISABLED`。[键盘验收场景](../tools/acceptance/keyboard.mjs) · [双端结果汇总](../tools/acceptance/run.py)
 
 Synced through 409ace219eb491405652b814a9df3c226ae64d4b
+
+## 2026-11-26 双端联合验收键盘、凭据、受保护启动与 Docker 沙箱
+
+在本机 Windows 11 和 macOS 15.8.3 测试副本上运行 `--suite all`。首轮 Windows 已通过 Edge 键盘和 DPAPI 检查，但本地 Docker 命名管道尚未就绪，安装阶段读取镜像失败。确认两端 Moby 29.9.2 都能读取同一固定镜像后，从同一提交完整复跑。两端各通过全部 11 个检查组，联合命令退出码为 0，报告为 `accepted: true`。[联合验收与镜像核对方法](walkthroughs/one-real-run.md#在-edge-和-safari-复验键盘操作)
+
+Edge 158.0.4370.45 和 Safari 18.6 各通过 89 项键盘检查，包括取消返回请求、批准摘要匹配及刷新后焦点回到队列标题。Windows DPAPI 和 macOS 钥匙串均能读回测试凭据。两端都在升级中断后启动了旧发布，重试后启动了新发布，并验证了私有插件状态。真实容器读到了测试文件，写入只读工作区被拒绝，按本次安装标签查询的残留容器数均为零。[客体断言](../tools/acceptance/guest.mjs) · [键盘用例](../tools/acceptance/keyboard.mjs)
+
+两轮使用源码包 SHA-256 `aa6a7b738cc32a6c0586dc80a749cb66f4161b9108c8c5238bc4b3eee5ed86ab` 和镜像 ID `sha256:ef51fede32df12c340844bf36798c61f0d3220e0a7aab156e3d6e204d31c641e`。
+
+Synced through d779f3cfc11bed49af3f5daec890b5cd9c082e2c
