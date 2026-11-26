@@ -826,7 +826,7 @@ function makeSegmentedChoice({ options, value, savedValue, disabled = false, onS
 
 function makePageHeader(title, desc) {
   return el('div', { class: 'lw-page-head' }, [
-    el('h1', { text: title, tabindex: '-1' }),
+    el('h1', { id: 'lw-page-title', text: title, tabindex: '-1' }),
     desc ? el('p', { class: 'lw-page-desc', text: desc }) : null,
   ]);
 }
@@ -1106,8 +1106,8 @@ function renderOverviewPage() {
     ]);
   }
 
-  function flowNode(title, value, icon, pageId) {
-    return el('button', { class: 'lw-flow-node', type: 'button', onClick: () => navigate(pageId) }, [
+  function flowNode(id, title, value, icon, pageId) {
+    return el('button', { id: 'lw-flow-' + id, class: 'lw-flow-node', type: 'button', onClick: () => navigate(pageId) }, [
       makeIcon(icon), el('strong', { text: title }), el('span', { text: value }),
     ]);
   }
@@ -1162,15 +1162,15 @@ function renderOverviewPage() {
     ]),
     el('div', { id: 'lw-flow-map', class: 'lw-flow-map' + (state.overviewTopologyOpen ? ' is-open' : ''), role: 'group', 'aria-label': '运行拓扑，选择节点查看配置或队列' }, [
       el('div', { class: 'lw-flow-entry' }, [
-        flowNode('云端中继', relay, 'cloud', 'capabilities'),
+        flowNode('relay', '云端中继', relay, 'cloud', 'capabilities'),
         el('span', { class: 'lw-flow-connector', 'aria-hidden': 'true' }, [makeIcon('arrowRight')]),
-        flowNode('本机审批', pending == null ? unknown : pending + ' 项待处理', 'clipboardCheck', 'approvals'),
+        flowNode('approvals', '本机审批', pending == null ? unknown : pending + ' 项待处理', 'clipboardCheck', 'approvals'),
       ]),
       el('div', { class: 'lw-flow-hub' }, [makeIcon('shield'), el('strong', { text: 'LoomWard 宿主' })]),
       el('div', { class: 'lw-flow-branches' }, [
-        flowNode('Docker 沙箱', mount, 'terminal', 'capabilities'),
-        flowNode('内容审查', mod?.enabled === false ? '已关闭' : reviewMode, 'shieldCheck', 'moderation'),
-        flowNode('进程外扩展', units ? units.length + ' 个单元' : unknown, 'layers', 'panels'),
+        flowNode('sandbox', 'Docker 沙箱', mount, 'terminal', 'capabilities'),
+        flowNode('moderation', '内容审查', mod?.enabled === false ? '已关闭' : reviewMode, 'shieldCheck', 'moderation'),
+        flowNode('extensions', '进程外扩展', units ? units.length + ' 个单元' : unknown, 'layers', 'panels'),
       ]),
     ]),
   ]);
@@ -1287,7 +1287,7 @@ function renderApprovalsPage() {
                   iconName: 'eye',
                   className: 'lw-btn lw-btn-trust lw-btn-sm',
                   disabled: state.busy || leftSec <= 0,
-                  attrs: { 'data-countdown-disable-expires': item.expiresAt, 'data-review-id': item.id },
+                  attrs: { id: 'lw-review-' + item.id, 'data-countdown-disable-expires': item.expiresAt, 'data-review-id': item.id },
                   onClick: () => runMutation(async () => {
                     const review = await client.api('/api/approvals/review', { method: 'POST', body: { id: item.id } });
                     state.reviewModal = { ...review, tool: item.tool, expiresAt: item.expiresAt };
@@ -5130,7 +5130,7 @@ function render() {
   const prevScrollLeft = prevPre ? prevPre.scrollLeft : 0;
 
   const navFocus = document.activeElement?.closest('.lw-nav-item')?.dataset.navId;
-  const chromeFocus = document.activeElement?.closest('.lw-chrome-button')?.id;
+  const focusId = document.activeElement?.closest('button[id], #lw-page-title')?.id;
   const sidebarScroll = root.querySelector('.lw-sidebar')?.scrollTop;
   clearNode(root);
   const children = [];
@@ -5169,7 +5169,7 @@ function render() {
   const sidebar = root.querySelector('.lw-sidebar');
   if (sidebar && sidebarScroll) sidebar.scrollTop = sidebarScroll;
   if (navFocus) sidebar?.querySelector(`[data-nav-id="${CSS.escape(navFocus)}"]`)?.focus({ preventScroll: true });
-  if (chromeFocus) document.getElementById(chromeFocus)?.focus({ preventScroll: true });
+  if (!modal && focusId) document.getElementById(focusId)?.focus({ preventScroll: true });
 
   if (modal) {
     const target = reviewFocus && document.getElementById(reviewFocus);

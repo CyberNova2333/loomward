@@ -1000,7 +1000,7 @@
   }
   function makePageHeader(title, desc) {
     return el("div", { class: "lw-page-head" }, [
-      el("h1", { text: title, tabindex: "-1" }),
+      el("h1", { id: "lw-page-title", text: title, tabindex: "-1" }),
       desc ? el("p", { class: "lw-page-desc", text: desc }) : null
     ]);
   }
@@ -1293,8 +1293,8 @@
         el("span", { class: "lw-status-foot" }, [hint, makeIcon("arrowRight")])
       ]);
     }
-    function flowNode(title, value, icon, pageId) {
-      return el("button", { class: "lw-flow-node", type: "button", onClick: () => navigate(pageId) }, [
+    function flowNode(id, title, value, icon, pageId) {
+      return el("button", { id: "lw-flow-" + id, class: "lw-flow-node", type: "button", onClick: () => navigate(pageId) }, [
         makeIcon(icon),
         el("strong", { text: title }),
         el("span", { text: value })
@@ -1349,15 +1349,15 @@
       ]),
       el("div", { id: "lw-flow-map", class: "lw-flow-map" + (state.overviewTopologyOpen ? " is-open" : ""), role: "group", "aria-label": "\u8FD0\u884C\u62D3\u6251\uFF0C\u9009\u62E9\u8282\u70B9\u67E5\u770B\u914D\u7F6E\u6216\u961F\u5217" }, [
         el("div", { class: "lw-flow-entry" }, [
-          flowNode("\u4E91\u7AEF\u4E2D\u7EE7", relay, "cloud", "capabilities"),
+          flowNode("relay", "\u4E91\u7AEF\u4E2D\u7EE7", relay, "cloud", "capabilities"),
           el("span", { class: "lw-flow-connector", "aria-hidden": "true" }, [makeIcon("arrowRight")]),
-          flowNode("\u672C\u673A\u5BA1\u6279", pending == null ? unknown : pending + " \u9879\u5F85\u5904\u7406", "clipboardCheck", "approvals")
+          flowNode("approvals", "\u672C\u673A\u5BA1\u6279", pending == null ? unknown : pending + " \u9879\u5F85\u5904\u7406", "clipboardCheck", "approvals")
         ]),
         el("div", { class: "lw-flow-hub" }, [makeIcon("shield"), el("strong", { text: "LoomWard \u5BBF\u4E3B" })]),
         el("div", { class: "lw-flow-branches" }, [
-          flowNode("Docker \u6C99\u7BB1", mount, "terminal", "capabilities"),
-          flowNode("\u5185\u5BB9\u5BA1\u67E5", mod?.enabled === false ? "\u5DF2\u5173\u95ED" : reviewMode, "shieldCheck", "moderation"),
-          flowNode("\u8FDB\u7A0B\u5916\u6269\u5C55", units ? units.length + " \u4E2A\u5355\u5143" : unknown, "layers", "panels")
+          flowNode("sandbox", "Docker \u6C99\u7BB1", mount, "terminal", "capabilities"),
+          flowNode("moderation", "\u5185\u5BB9\u5BA1\u67E5", mod?.enabled === false ? "\u5DF2\u5173\u95ED" : reviewMode, "shieldCheck", "moderation"),
+          flowNode("extensions", "\u8FDB\u7A0B\u5916\u6269\u5C55", units ? units.length + " \u4E2A\u5355\u5143" : unknown, "layers", "panels")
         ])
       ])
     ]);
@@ -1482,7 +1482,7 @@
             iconName: "eye",
             className: "lw-btn lw-btn-trust lw-btn-sm",
             disabled: state.busy || leftSec <= 0,
-            attrs: { "data-countdown-disable-expires": item.expiresAt, "data-review-id": item.id },
+            attrs: { id: "lw-review-" + item.id, "data-countdown-disable-expires": item.expiresAt, "data-review-id": item.id },
             onClick: () => runMutation(async () => {
               const review = await client.api("/api/approvals/review", { method: "POST", body: { id: item.id } });
               state.reviewModal = { ...review, tool: item.tool, expiresAt: item.expiresAt };
@@ -5334,7 +5334,7 @@ ${sampleBodyStr}` : curlSnippet })
     const prevScrollTop = prevPre ? prevPre.scrollTop : 0;
     const prevScrollLeft = prevPre ? prevPre.scrollLeft : 0;
     const navFocus = document.activeElement?.closest(".lw-nav-item")?.dataset.navId;
-    const chromeFocus = document.activeElement?.closest(".lw-chrome-button")?.id;
+    const focusId = document.activeElement?.closest("button[id], #lw-page-title")?.id;
     const sidebarScroll = root.querySelector(".lw-sidebar")?.scrollTop;
     clearNode(root);
     const children = [];
@@ -5369,7 +5369,7 @@ ${sampleBodyStr}` : curlSnippet })
     const sidebar = root.querySelector(".lw-sidebar");
     if (sidebar && sidebarScroll) sidebar.scrollTop = sidebarScroll;
     if (navFocus) sidebar?.querySelector(`[data-nav-id="${CSS.escape(navFocus)}"]`)?.focus({ preventScroll: true });
-    if (chromeFocus) document.getElementById(chromeFocus)?.focus({ preventScroll: true });
+    if (!modal && focusId) document.getElementById(focusId)?.focus({ preventScroll: true });
     if (modal) {
       const target = reviewFocus && document.getElementById(reviewFocus);
       (target && !target.disabled ? target : document.getElementById("lw-review-cancel"))?.focus({ preventScroll: true });
