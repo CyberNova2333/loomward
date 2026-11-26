@@ -539,3 +539,11 @@ Synced through 925d952ea4ef9bd72abae5d3f3b605c45238eb2b
 模块来源检查读取 `Get-Acl` 的模块清单完整路径，并核对凭据和代理子进程实际使用的系统目录。命名空间路径测试在临时工作区中执行，拒绝写入后目录为空。真实 Docker 文件测试确认自定义 NTFS ACL 和原内容得到保留，继承 ACL 的文件可正常编辑。[PowerShell 管理回归](../test/management-safety.test.mjs) · [凭据回归](../test/secret-process.test.mjs) · [NTFS 回归](../test/windows-acl.test.mjs)
 
 Synced through 89dedbc9c68e5383e942a70b1d23f78de0c5a2fc
+
+## 2026-11-26 控制台工作台与本地预览
+
+系统概览集中展示待审批请求、云端中继、工作区挂载和进程外扩展，运行拓扑的节点可进入对应操作页。窄屏通过顶栏菜单导航，拓扑默认折叠。预览启动器在当前用户主目录创建临时状态，正常退出时清理。[控制台界面](../packages/console/web/console/main.mjs) · [预览入口](../scripts/preview-console.mjs)
+
+在本机回环预览中，使用 Chromium 检查了九个页面在 320、390、768、1024 和 1440 像素宽度下的导航与页面宽度。使用模拟待审请求检查了复核弹窗的完整摘要、键盘焦点和取消操作。
+
+Synced through 90dcda7c69c1e8a11b724172d4c27299414fe578

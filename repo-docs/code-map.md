@@ -81,7 +81,7 @@
 | [状态守护与进程管理](../scripts/Manage.ps1) | 检查完整祖先路径与所有者 ACL、生成防 PID 复用的托管进程并响应停机标记 | `Assert-PrivateState` / `Assert-PinnedNode` / `OwnedProcess` | 根目录与状态目录下的 `.cmd` 入口、`State-Safety.ps1`、`Approve.ps1` |
 | [凭据加密与轮换](../scripts/Secrets.ps1) | 通过 Windows DPAPI 生成、导出、弹窗展示、上传与双步安全轮换本地与云端密钥 | `Secrets.ps1` / `Rotate-Secrets.ps1` | Windows 连接器启动、`ShowPassword.cmd` 与运维轮换；[凭据子进程测试](../test/secret-process.test.mjs) |
 | [公网与生命周期验收](../scripts/acceptance-v2.mjs) | 验证 OAuth/容器/刷新/停止重启及录制部署元数据（仅显式命令行执行） | `acceptance-v2.mjs` / `verify-lifecycle.mjs` | 维护者发布与变更核验，历史结果见[修复与验证快照](../SECURITY-FIXES.md) |
-| [本地免初始化预览启动器](../scripts/preview-console.mjs) | 在孤立零初始化临时状态目录启动严格回环控制台（`pnpm run preview`，显式启用 `previewAutoSession: true`，保留同源/CSRF/标签页令牌保护且永不绕过已初始化正式凭据） | `parsePreviewArgs` / `previewAutoSession` | 开发者本地功能/视觉预览；[单源控制台测试](../packages/console/test/unified-console.test.mjs) |
+| [本地免初始化预览启动器](../scripts/preview-console.mjs) | 在当前用户主目录创建独立临时目录并启动回环控制台（`pnpm run preview`，显式启用 `previewAutoSession: true`，保留同源/CSRF/标签页令牌保护且永不绕过已初始化正式凭据） | `parsePreviewArgs` / `previewAutoSession` | 打开预览后，可从系统概览进入审批、审计与权限设置。窄屏使用顶栏菜单切换页面。[单源控制台测试](../packages/console/test/unified-console.test.mjs) |
 
 ## `test/`
 
