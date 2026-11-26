@@ -11,7 +11,8 @@ import { pathToFileURL } from 'node:url';
 
 const root = path.resolve(import.meta.dirname, '../..');
 const win = process.platform === 'win32';
-const report = { platform: process.platform, commit: process.argv[2], image: process.argv[3], checks: {} };
+const suite = process.argv[4] ?? 'host';
+const report = { platform: process.platform, suite, commit: process.argv[2], image: process.argv[3] === '-' ? null : process.argv[3], checks: {} };
 const profile = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.loomward-acceptance.json'), 'utf8'));
 const run = (bin, args, options = {}) => execFileSync(bin, args, {
   cwd: root, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 240000, windowsHide: true, ...options,
@@ -25,10 +26,15 @@ const check = async (name, fn) => {
 };
 
 async function verify() {
-  requireThat((win || process.platform === 'darwin') && /^[a-f0-9]{40}$/.test(report.commit) && /^sha256:[a-f0-9]{64}$/.test(report.image));
-  for (const key of ['node', 'docker', 'pnpm']) requireThat(path.isAbsolute(profile[key]));
-  requireThat(/^[a-zA-Z0-9_-]{1,64}$/.test(profile.context));
-  process.env.PATH = [path.dirname(profile.node), path.dirname(profile.docker), process.env.PATH].join(path.delimiter);
+  requireThat((win || process.platform === 'darwin') && /^[a-f0-9]{40}$/.test(report.commit));
+  requireThat(['keyboard', 'host', 'all'].includes(suite));
+  const withHost = suite !== 'keyboard';
+  const tools = withHost ? ['node', 'pnpm', 'docker'] : ['node', 'pnpm'];
+  for (const key of tools) requireThat(path.isAbsolute(profile[key]));
+  if (withHost) {
+    requireThat(/^sha256:[a-f0-9]{64}$/.test(report.image) && /^[a-zA-Z0-9_-]{1,64}$/.test(profile.context));
+  }
+  process.env.PATH = [...tools.map(key => path.dirname(profile[key])), process.env.PATH].join(path.delimiter);
   await check('dependencies', () => {
     requireThat('pnpm@' + run(profile.pnpm, ['--version']) === read(path.join(root, 'package.json')).packageManager);
     try { run(profile.pnpm, ['install', '--frozen-lockfile', '--ignore-scripts']); }
@@ -38,6 +44,17 @@ async function verify() {
       throw error;
     }
   });
+  if (suite !== 'host') {
+    report.keyboard = { phase: 'setup', assets: {}, viewports: [], approval: {} };
+    await check('keyboard', async () => {
+      const { verifyKeyboard } = await import('./keyboard.mjs');
+      await verifyKeyboard(root, report.keyboard);
+    });
+  }
+  if (withHost) await verifyHost();
+}
+
+async function verifyHost() {
   const cli = await import('../../scripts/host-cli.mjs');
   const { loadSecrets } = await import('../../local/connector.mjs');
   const { writeCapabilitiesSync } = await import('../../local/capabilities.mjs');
@@ -208,4 +225,6 @@ catch (err) {
   if (Number.isInteger(err.status)) report.childExit = err.status;
   process.exitCode = 1;
 }
-fs.writeFileSync(path.join(root, "acceptance-result.json"), JSON.stringify(report), { flag: "wx", mode: 0o600 });
+const resultPath = path.join(root, 'acceptance-result.json');
+fs.writeFileSync(resultPath + '.tmp', JSON.stringify(report), { flag: 'wx', mode: 0o600 });
+fs.renameSync(resultPath + '.tmp', resultPath);

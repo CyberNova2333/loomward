@@ -17,7 +17,8 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 SCOPE = ['local', 'scripts', 'packages', 'plugins', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml',
-         'tools/acceptance/guest.mjs', 'tools/acceptance/interrupt-upgrade.ps1']
+         'tools/acceptance/guest.mjs', 'tools/acceptance/interrupt-upgrade.ps1',
+         'tools/acceptance/keyboard.mjs', 'tools/acceptance/native-browser.mjs']
 REQUIRED = {'dependencies', 'nativeCredentials', 'install', 'protectedLifecycle', 'readonlyMount', 'zeroContainers',
             'upgradeInterruption', 'previousReleaseLifecycle', 'upgradeRetry', 'privatePluginState'}
 
@@ -61,7 +62,7 @@ cat > source.tar.gz
 echo 'DIGEST  source.tar.gz' | /usr/bin/shasum -a 256 -c - >/dev/null
 /usr/bin/tar -xzf source.tar.gz
 node=$(/usr/bin/plutil -extract node raw -o - "$HOME/.loomward-acceptance.json")
-"$node" -e 'const [Label,node,work,commit,image]=process.argv.slice(1);require("fs").writeFileSync("job.plist",JSON.stringify({Label,RunAtLoad:true,ProgramArguments:[node,work+"/tools/acceptance/guest.mjs",commit,image],WorkingDirectory:work}));' "$label" "$node" "$work" COMMIT IMAGE
+"$node" -e 'const [Label,node,work,commit,image,suite]=process.argv.slice(1);require("fs").writeFileSync("job.plist",JSON.stringify({Label,RunAtLoad:true,ProgramArguments:[node,work+"/tools/acceptance/guest.mjs",commit,image,suite],WorkingDirectory:work}));' "$label" "$node" "$work" COMMIT IMAGE SUITE
 /usr/bin/plutil -convert xml1 job.plist
 launchctl bootstrap "$domain" "$work/job.plist"
 n=0
@@ -72,7 +73,7 @@ while [ ! -f acceptance-result.json ]; do
   sleep 1
 done
 cat acceptance-result.json
-""".replace('DIGEST', digest).replace('COMMIT', commit).replace('IMAGE', options.image)
+""".replace('DIGEST', digest).replace('COMMIT', commit).replace('IMAGE', shlex.quote(options.image or '-')).replace('SUITE', options.suite)
     args = ['ssh', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes', '-oConnectTimeout=10']
     if options.ssh_config:
         args += ['-F', options.ssh_config]
@@ -159,7 +160,7 @@ try {
   if($LASTEXITCODE){throw 'Cannot extract acceptance source'}
   $cfg=Get-Content -Raw -LiteralPath (Join-Path $env:USERPROFILE '.loomward-acceptance.json')|ConvertFrom-Json
   $ErrorActionPreference='Continue'
-  & $cfg.node 'tools\acceptance\guest.mjs' 'COMMIT' 'IMAGE' *> $null
+  & $cfg.node 'tools\acceptance\guest.mjs' 'COMMIT' 'IMAGE' 'SUITE' *> $null
   $ErrorActionPreference='Stop'
   $report=[IO.File]::ReadAllText((Join-Path $work 'acceptance-result.json'))
 } finally {
@@ -168,7 +169,7 @@ try {
 }
 [IO.File]::WriteAllText('DROP\out\report.tmp',$report)
 [IO.File]::Move('DROP\out\report.tmp','DROP\out\report.json')
-""".replace('DROP', drop).replace('JOB', job).replace('DIGEST', digest).replace('COMMIT', commit).replace('IMAGE', options.image)
+""".replace('DROP', drop).replace('JOB', job).replace('DIGEST', digest).replace('COMMIT', commit).replace('IMAGE', options.image or '-').replace('SUITE', options.suite)
         agent.write(drop + '\\run.ps1', script.encode())
         agent.powershell(r"""
 $p=New-ScheduledTaskPrincipal -UserId ($env:COMPUTERNAME+'\USER') -LogonType Interactive -RunLevel Limited
@@ -203,33 +204,91 @@ if([IO.Directory]::Exists('DROP')){
             agent.conn.close()
 
 
+# Every viewport must exercise each interaction; a partially completed result cannot pass.
+KEYBOARD_STEPS = {
+    'menuEntry', 'drawerOpens', 'drawerClose', 'drawerReverseWrap', 'drawerForwardWrap', 'drawerEscape',
+    'drawerApprovals', 'drawerAudit', 'drawerNavigation', 'mapInitiallyClosed', 'mapSpace', 'mapToggleRefresh',
+    'mapFirstNode', 'mapNodeRefresh', 'mapCollapse', 'mapApprovalsNode', 'mapOpensQueue', 'queueReviewEntry',
+    'reviewOpens', 'reviewContents', 'reviewText', 'reviewReverseWrap', 'reviewForwardWrap', 'reviewCancel',
+    'reviewConfirm', 'reviewConfirmRefresh', 'reviewEscape', 'reviewEntryRefresh', 'reviewDefaultCancel',
+}
+
+
+def keyboard_summary(keyboard, platform, assets):
+    browser = keyboard.get('browser', '')
+    browser_pattern = r'Edg/[0-9.]+' if platform == 'win32' else r'Safari [0-9.]+'
+    summary = {'viewports': []}
+    if re.fullmatch(browser_pattern, browser):
+        summary['browser'] = browser
+    phase = keyboard.get('phase')
+    if phase in ('setup', 'browser', 'console', 'keyboard', 'approval', 'complete'):
+        summary['phase'] = phase
+    if keyboard.get('assets') == assets:
+        summary['assets'] = assets
+    rows = keyboard.get('viewports', [])
+    valid = [r.get('requestedWidth') for r in rows] == [650, 390, 320]
+    for row in rows:
+        requested, actual = row['requestedWidth'], row.get('width')
+        passed = set(row.get('passed', [])) & KEYBOARD_STEPS
+        width_ok = isinstance(actual, int) and (390 < actual <= 720 if requested == 650 else actual == requested)
+        info = {'requestedWidth': requested, 'width': actual, 'passedChecks': len(passed)}
+        if passed != KEYBOARD_STEPS:
+            info['missing'] = sorted(KEYBOARD_STEPS - passed)
+        if row.get('failedStep') in KEYBOARD_STEPS:
+            info['failedStep'] = row['failedStep']
+        summary['viewports'].append(info)
+        valid = valid and width_ok and passed == KEYBOARD_STEPS and not row.get('failedStep')
+    approval = keyboard.get('approval', {})
+    summary['approval'] = {key: approval.get(key) is True for key in ('digestMatched', 'queueFocusRestored')}
+    return summary, (valid and 'browser' in summary and 'assets' in summary and phase == 'complete'
+                     and all(summary['approval'].values()))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--image', required=True, help='Expected Docker image ID, sha256:…')
+    parser.add_argument('--suite', choices=['host', 'keyboard', 'all'], default='host', help='Guest checks to run (default: host)')
+    parser.add_argument('--image', help='Expected Docker image ID (required for host and all)')
     parser.add_argument('--mac-ssh', default='loomward-test-mac')
     parser.add_argument('--ssh-config')
     parser.add_argument('--windows-domain', default='loomward-test-windows')
     parser.add_argument('--windows-user', default='loomward-test')
     parser.add_argument('--only', choices=['darwin', 'win32'], help='Diagnostic run on just one guest')
     args = parser.parse_args()
-    if not re.fullmatch('sha256:[0-9a-f]{64}', args.image) or not re.fullmatch('[A-Za-z0-9_.-]{1,64}', args.windows_user):
-        parser.error('Invalid image or Windows account')
+    if args.suite != 'keyboard' and not args.image:
+        parser.error('--image is required for host and all')
+    if args.image is not None and not re.fullmatch('sha256:[0-9a-f]{64}', args.image):
+        parser.error('Invalid Docker image ID')
+    if not re.fullmatch('[A-Za-z0-9_.-]{1,64}', args.windows_user):
+        parser.error('Invalid Windows account')
     data = bundle()
     digest = hashlib.sha256(data).hexdigest()
     commit = git('rev-parse', 'HEAD').decode().strip()
     dirty = bool(git('status', '--porcelain', '--', *SCOPE))
+    assets = {}
+    if args.suite != 'host':
+        with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
+            for name in ('console.css', 'console.js'):
+                asset = archive.extractfile('packages/console/dist/' + name)
+                assets[name] = hashlib.sha256(asset.read()).hexdigest()
     results = {}
     for platform, run in [('darwin', macos), ('win32', windows)]:
         if args.only and args.only != platform:
             continue
         try:
             result = run(args, data, commit, digest)
-            required = REQUIRED
+            required = {'dependencies'} if args.suite == 'keyboard' else REQUIRED
+            if args.suite != 'host':
+                required = required | {'keyboard'}
             checks = result['checks']
             passed = (result.get('passed') is True and result.get('platform') == platform and
-                      result.get('commit') == commit and result.get('image') == args.image and
+                      result.get('commit') == commit and result.get('image') == args.image and result.get('suite') == args.suite and
                       required <= checks.keys() and all(v == 'passed' for v in checks.values()))
             results[platform] = {'passed': passed, 'checks': {k: checks.get(k, 'missing') for k in sorted(required)}}
+            if args.suite != 'host':
+                summary, complete = keyboard_summary(result.get('keyboard', {}), platform, assets)
+                results[platform]['keyboard'] = summary
+                passed = passed and complete
+                results[platform]['passed'] = passed
             if not passed:
                 for key in ('dependencyError', 'errorType'):
                     value = result.get(key)
@@ -241,7 +300,7 @@ def main():
             results[platform] = {'passed': False, 'error': type(error).__name__}
     accepted = set(results) == {'win32', 'darwin'} and all(row['passed'] for row in results.values())
     print(json.dumps({'commit': commit, 'dirty': dirty, 'sourceSha256': digest, 'image': args.image,
-                      'accepted': accepted, 'guests': results}, indent=2))
+                      'suite': args.suite, 'accepted': accepted, 'guests': results}, indent=2))
     return int(not all(row['passed'] for row in results.values())) if args.only else int(not accepted)
 
 
