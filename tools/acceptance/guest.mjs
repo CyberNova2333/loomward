@@ -4,9 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { once } from 'node:events';
+import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
-import { setTimeout as delay } from 'node:timers/promises';
 
 const root = path.resolve(import.meta.dirname, '../..');
 const win = process.platform === 'win32';
@@ -47,16 +48,26 @@ async function verify() {
   const docker = (...args) => run(profile.docker, ['--context', profile.context, ...args]);
   const powershell = win && path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe');
   const ps = (script, args) => run(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned', '-File', path.join(root, 'scripts', script), ...args]);
-  const wrapper = action => win
-    ? run(powershell, ['-NoProfile', '-NonInteractive', '-Command', '& $env:LW_CHECK_WRAPPER; exit $LASTEXITCODE'],
-      { env: { ...process.env, LW_CHECK_WRAPPER: path.join(state, action + '.cmd') } })
-    : run(path.join(state, action), []);
+  const runWrapper = promisify(execFile);
+  const wrapper = async action => {
+    const launcher = path.join(state, action + (win ? '.cmd' : ''));
+    const { stdout } = await runWrapper(win ? powershell : launcher,
+      win ? ['-NoProfile', '-NonInteractive', '-Command', '& $env:LW_CHECK_WRAPPER; exit $LASTEXITCODE'] : [],
+      { cwd: root, encoding: 'utf8', windowsHide: true, timeout: 120000, env: { ...process.env, LW_CHECK_WRAPPER: launcher } });
+    return stdout.trim();
+  };
   const install = async () => {
     if (win) return ps('Install-Hardened.ps1', ['-StateDir', state, '-Workspace', workspace, '-Image', report.image, '-Context', profile.context]);
     return cli.installHardened({ stateDir: state, workspace, image: report.image, docker: profile.docker, context: profile.context, allowOutbound: false });
   };
   let launched = false, keychain = false, gateway;
-  const origin = 'http://127.0.0.1:1';
+  const { WebSocketServer } = await import('ws');
+  const relay = new WebSocketServer({ host: '127.0.0.1', port: 0, path: '/bridge' });
+  await once(relay, 'listening');
+  const origin = `http://127.0.0.1:${relay.address().port}`;
+  relay.on('connection', socket => socket.on('message', data => {
+    if (JSON.parse(data).type === 'ping') socket.send(JSON.stringify({ type: 'pong' }));
+  }));
   try {
     await check('nativeCredentials', () => {
       if (win) ps('Setup.ps1', ['-StateDir', state, '-Roots', workspace, '-Origin', origin]);
@@ -77,16 +88,29 @@ async function verify() {
     });
     const lifecycle = async () => {
       launched = true;
-      wrapper('start');
-      const end = Date.now() + 60000;
-      while (true) {
-        const s = JSON.parse(wrapper('status'));
-        if (s.supervisorAlive && s.connectorAlive) break;
-        requireThat(Date.now() < end);
-        await delay(750);
-      }
-      wrapper('stop');
-      const stopped = JSON.parse(wrapper('status'));
+      const connected = once(relay, 'connection', { signal: AbortSignal.timeout(90000) });
+      const [[socket]] = await Promise.all([connected, wrapper('start')]);
+      const id = crypto.randomUUID();
+      const now = Date.now();
+      const signal = AbortSignal.timeout(30000);
+      const replies = (async () => {
+        while (true) {
+          const [data] = await once(socket, 'message', { signal });
+          const frame = JSON.parse(data);
+          if (frame.id !== id) continue;
+          requireThat(frame.type === 'stream_end' && frame.body?.id === id &&
+            frame.body.result?.structuredContent?.capabilities?.workspace_mount_mode === 'readonly');
+          return;
+        }
+      })();
+      socket.send(JSON.stringify({ type: 'request', stream: true, id, issuedAt: now, deadline: now + 30000,
+        authorization: { userId: 'owner', clientId: 'acceptance', scope: ['computer:read'] },
+        body: { jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'computer_context', arguments: {} } } }));
+      await replies;
+      const live = JSON.parse(await wrapper('status'));
+      requireThat(live.supervisorAlive && live.connectorAlive);
+      await wrapper('stop');
+      const stopped = JSON.parse(await wrapper('status'));
       requireThat(stopped.supervisorAlive === false && stopped.connectorAlive === false);
       launched = false;
     };
@@ -136,6 +160,17 @@ async function verify() {
       requireThat(read(configPath).sourceRoot !== previous && statePreserved());
     });
     await check('protectedLifecycle', lifecycle);
+    await check('privatePluginState', async () => {
+      const { createPluginSecretsStore } = await import('../../packages/host/src/plugin-secrets.mjs');
+      const { readModerationConfigSync, writeModerationConfigSync } = await import('../../local/moderation-config.mjs');
+      const opts = { workspaceRoots: [workspace] };
+      writeModerationConfigSync(state, { enabled: false }, opts);
+      requireThat(readModerationConfigSync(state, opts).enabled === false);
+      const store = () => createPluginSecretsStore({ stateDir: state, ...opts }).adminView;
+      store().setSecrets('acceptance-fixture', { FIXTURE_MARKER: 'local-acceptance' });
+      requireThat(store().getUnitSecretMeta('acceptance-fixture').keys.includes('FIXTURE_MARKER'));
+      requireThat(store().deleteSecret('acceptance-fixture', 'FIXTURE_MARKER').deleted);
+    });
     const cfg = read(configPath);
     await check('readonlyMount', async () => {
       fs.writeFileSync(path.join(workspace, 'note'), 'read-ok');
@@ -155,7 +190,9 @@ async function verify() {
     });
   } finally {
     await gateway?.close();
-    if (launched) wrapper('stop');
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise(resolve => relay.close(resolve));
+    if (launched) await wrapper('stop');
     if (keychain) {
       const service = 'cbnv.agentdock-bridge.' + crypto.createHash('sha256').update(fs.realpathSync(state)).digest('hex').slice(0, 16);
       run('/usr/bin/security', ['delete-generic-password', '-s', service, '-a', 'current']);

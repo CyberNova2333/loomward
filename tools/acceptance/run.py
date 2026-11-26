@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCOPE = ['local', 'scripts', 'packages', 'plugins', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml',
          'tools/acceptance/guest.mjs', 'tools/acceptance/interrupt-upgrade.ps1']
 REQUIRED = {'dependencies', 'nativeCredentials', 'install', 'protectedLifecycle', 'readonlyMount', 'zeroContainers',
-            'upgradeInterruption', 'previousReleaseLifecycle', 'upgradeRetry'}
+            'upgradeInterruption', 'previousReleaseLifecycle', 'upgradeRetry', 'privatePluginState'}
 
 
 def git(*args):
