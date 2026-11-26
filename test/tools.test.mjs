@@ -54,10 +54,12 @@ test('symlink/junction escape is denied for both existing and new files', async 
 });
 
 test('Windows alternate streams and device aliases cannot bypass file boundaries', { skip: process.platform !== 'win32' }, async (t) => {
-  const { call } = await fixture(t);
-  for (const file of ['sample.txt:hidden', 'CON', 'nul.txt', 'COM1', 'LPT1.txt', '\\\\?\\C:\\Windows\\win.ini', 'trailing.']) {
+  const { root, call } = await fixture(t);
+  const namespaced = path.toNamespacedPath(path.join(root, 'namespace-fixture.txt'));
+  for (const file of ['sample.txt:hidden', 'CON', 'nul.txt', 'COM1', 'LPT1.txt', namespaced, 'trailing.']) {
     rejects(await call('write_file', { path: file, content: 'bad' }), /not (?:allowed|exposed)/);
   }
+  assert.deepEqual(await fs.readdir(root), []);
 });
 
 test('read pagination and search limits are bounded', async (t) => {
