@@ -136,10 +136,10 @@ export async function createSandboxRuntime(config) {
 
   async function cleanup(job) {
     if (!job.cleanup) job.cleanup = (async () => {
-      // A failed create can leave nothing behind; a daemon transport failure
-      // cannot prove removal and must not be reported as a confirmed stop.
+      // An interrupted create can still complete on the daemon after rm reports absence.
+      // Only an acknowledged create makes that absence conclusive.
       try { await docker(['rm', '-f', job.name]); job.cleanupConfirmed = true; }
-      catch (error) { job.cleanupConfirmed = /No such (?:container|object)/i.test(error.stderr || ''); }
+      catch (error) { job.cleanupConfirmed = job.creationConfirmed && /No such (?:container|object)/i.test(error.stderr || ''); }
       if (!job.cleanupConfirmed) {
         closed = true;
         cleanupFailed = true;
@@ -170,9 +170,12 @@ export async function createSandboxRuntime(config) {
     };
     let lease;
     const timer = setTimeout(() => { job.timedOut = true; void stop(job); }, message.timeout + 10000);
-    // Creation itself never starts the command. Cancellation waits for creation
-    // to settle, then removes the exact name; a late create cannot execute work.
-    job.created = docker(flags);
+    // Creation itself never starts the command. Cancellation waits for the create
+    // client to exit, then removes the exact name without starting it.
+    job.creationConfirmed = false;
+    job.created = docker(flags, Math.min(30000, message.timeout + 10000)).then(() => {
+      job.creationConfirmed = true;
+    });
     job.done = (async () => {
       try {
         await job.created;

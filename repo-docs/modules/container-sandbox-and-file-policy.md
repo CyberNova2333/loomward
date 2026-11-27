@@ -32,7 +32,7 @@
 
 ## 清理失败停机与任务控制保留
 
-任务结束或收到取消信号后，`sandbox.mjs` 的 `cleanup` 会以本地生成的随机容器名执行 `docker rm -f`。若守护进程返回 `No such container/object` 以外的错误，系统判定清理未获确认：`job.cleanupConfirmed` 保持 `false`，同时把运行时标记为全局关闭（`closed` 置为 `true`），阻断后续所有新的文件操作和 `exec_command`。
+任务结束或收到取消信号后，`sandbox.mjs` 的 `cleanup` 会以本地生成的随机容器名执行 `docker rm -f`。删除成功即可确认清理。如果引擎先前已确认创建成功，返回 `No such container/object` 也能证明容器已移除。如果创建请求中断，引擎仍可能稍后创建容器，此时同一响应会被记为清理未确认。清理未确认时，`job.cleanupConfirmed` 保持 `false`，运行时关闭并拒绝后续新的文件操作和 `exec_command`。
 
 在 `closed` 为 `true` 期间，`command_status` 与 `stop_command` 仍位于关闭拦截之前执行，并继续校验 `job.ownerClient === authorization.clientId` 与取消信号：客户端仍可查询与停止自己发起的其余活跃任务，未确认清理的任务则在快照中持续上报 `cleanup_confirmed` 为 `false` 与 `running` 为 `null`，避免向调用方虚报安全退出。
 

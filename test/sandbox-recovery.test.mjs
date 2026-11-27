@@ -12,6 +12,7 @@ import { writeCapabilitiesSync } from '../local/capabilities.mjs';
 
 function fakeDocker(executable) {
   const containers = new Map(), calls = [];
+  let interruptCreate = false;
   const execFile = () => { throw new Error('Expected the promisified Docker adapter.'); };
   execFile[promisify.custom] = async (file, args) => {
     assert.equal(file, executable);
@@ -24,12 +25,16 @@ function fakeDocker(executable) {
       case 'ps': return { stdout: '' };
       case 'create': {
         const name = command[command.indexOf('--name') + 1];
+        if (interruptCreate) throw new Error('Synthetic create transport timeout.');
         containers.set(name, { name, removed: false, request: null, child: null });
         return { stdout: name };
       }
       case 'rm': {
         assert.equal(command[1], '-f');
         const container = containers.get(command[2]);
+        if (!container && interruptCreate) {
+          throw Object.assign(new Error('Container has not appeared'), { stderr: 'No such container' });
+        }
         assert.ok(container, 'Only a container created by this fixture may be removed.');
         if (container.request?.cmd === 'synthetic cleanup failure') throw new Error('Synthetic Docker transport failure.');
         container.removed = true;
@@ -70,7 +75,7 @@ function fakeDocker(executable) {
     container.child = child;
     return child;
   };
-  return { execFile, spawn, calls, containers };
+  return { execFile, spawn, calls, containers, interruptCreates() { interruptCreate = true; } };
 }
 
 test('cleanup failure preserves owned job controls while rejecting new work and cancelled requests', { timeout: 15000 }, async t => {
@@ -167,6 +172,11 @@ test('cleanup failure preserves owned job controls while rejecting new work and 
   assert.equal(read.result.structuredContent.content, 'synthetic-read-payload');
   const createArgs = docker.calls.filter(args => args[0] === 'create').at(-1);
   assert.ok(createArgs.includes(`type=bind,src=${await fs.realpath(workspace)},dst=/workspace,readonly`));
+  docker.interruptCreates();
+  const interrupted = await audited.handleRpc({ jsonrpc: '2.0', id: 101, method: 'tools/call',
+    params: { name: 'exec_command', arguments: { cmd: 'synthetic interrupted create' } } });
+  assert.equal(interrupted.result.structuredContent.cleanup_confirmed, false);
+  assert.equal(audited.isLockedDown(), true);
   await audited.close();
   const auditLines = (await fs.readFile(auditFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   assert.equal(auditLines[0].tool, 'computer_context');

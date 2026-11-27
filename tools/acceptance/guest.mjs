@@ -207,7 +207,10 @@ async function verifyHost() {
       const rpc = await gateway.handleRpc({ jsonrpc: '2.0', id: 1, method: 'tools/call',
         params: { name: 'exec_command', arguments: { cmd: 'cat /workspace/note && touch /workspace/readonly-check', timeout_ms: 30000 } } });
       const result = rpc.result?.structuredContent;
-      requireThat(result?.stdout === 'read-ok' && Number.isInteger(result.exit_code) && result.exit_code !== 0 &&
+      if (result?.cleanup_confirmed === false) {
+        throw Object.assign(new Error('Sandbox cleanup was not confirmed'), { code: 'SANDBOX_CLEANUP_UNCONFIRMED' });
+      }
+      requireThat(result?.cleanup_confirmed === true && result.stdout === 'read-ok' && Number.isInteger(result.exit_code) && result.exit_code !== 0 &&
         /read-only file system/i.test(result.stderr) && !fs.existsSync(path.join(workspace, 'readonly-check')));
       await gateway.close();
       gateway = undefined;
