@@ -193,6 +193,7 @@ export async function verifyKeyboard(root, report) {
     await refreshFocusedElement(browser, server);
     await waitFor(() => browser.evaluate(queueHeading));
     report.approval.queueFocusRestored = true;
+    report.phase = 'cleanup';
   } finally {
     try { await browser?.close(); }
     finally {

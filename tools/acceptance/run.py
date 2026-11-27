@@ -227,7 +227,7 @@ def keyboard_summary(keyboard, platform, assets):
     if re.fullmatch(browser_pattern, browser):
         summary['browser'] = browser
     phase = keyboard.get('phase')
-    if phase in ('setup', 'browser', 'console', 'keyboard', 'approval', 'complete'):
+    if phase in ('setup', 'browser', 'console', 'keyboard', 'approval', 'cleanup', 'complete'):
         summary['phase'] = phase
     if keyboard.get('assets') == assets:
         summary['assets'] = assets

@@ -7,14 +7,14 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-export async function waitFor(read, timeout = 10000) {
+export async function waitFor(read, timeout = 10000, timeoutCode = 'BROWSER_STATE_TIMEOUT') {
   const deadline = Date.now() + timeout;
   do {
     const result = await read();
     if (result) return result;
     await sleep(80);
   } while (Date.now() < deadline);
-  throw new Error('Timed out waiting for browser state');
+  throw Object.assign(new Error('Timed out waiting for browser state'), { code: timeoutCode });
 }
 
 async function launch(executable, args) {
@@ -23,11 +23,24 @@ async function launch(executable, args) {
   return child;
 }
 
-async function stop(child) {
+async function waitForExit(child, timeout) {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  try {
+    await once(child, 'exit', { signal: AbortSignal.timeout(timeout) });
+    return true;
+  } catch (error) {
+    if (error.code !== 'ABORT_ERR') throw error;
+    return child.exitCode !== null || child.signalCode !== null;
+  }
+}
+
+async function stop(child, graceMs = 0) {
+  if (graceMs && await waitForExit(child, graceMs)) return;
   if (child.exitCode !== null || child.signalCode !== null) return;
-  const exited = once(child, 'exit', { signal: AbortSignal.timeout(10000) });
   child.kill();
-  await exited;
+  if (!await waitForExit(child, 30000)) {
+    throw Object.assign(new Error('Browser process did not exit'), { code: 'BROWSER_EXIT_TIMEOUT' });
+  }
 }
 
 async function loopbackPort() {
@@ -128,20 +141,32 @@ async function openEdge(profileDir) {
     const port = await waitFor(async () => {
       const data = await fs.readFile(path.join(profileDir, 'DevToolsActivePort'), 'utf8').catch(() => '');
       return Number(data.split(/\r?\n/)[0]);
-    }, 45000);
-    const read = async route => (await fetch('http://127.0.0.1:' + port + route, { signal: AbortSignal.timeout(5000) })).json();
-    const version = (await read('/json/version')).Browser;
+    }, 45000, 'EDGE_PORT_TIMEOUT');
+    // Edge publishes DevToolsActivePort before its HTTP endpoint and initial tab are ready.
+    const read = async route => {
+      try {
+        const response = await fetch('http://127.0.0.1:' + port + route, { signal: AbortSignal.timeout(5000) });
+        return response.ok ? await response.json() : null;
+      } catch (error) {
+        if (error.name === 'TimeoutError' || error instanceof TypeError) return null;
+        throw error;
+      }
+    };
+    const version = await waitFor(async () => (await read('/json/version'))?.Browser, 30000, 'EDGE_VERSION_TIMEOUT');
     if (!/^Edg\/[\d.]+$/.test(version)) throw new Error('Expected Microsoft Edge');
-    const targets = await read('/json/list');
-    const page = targets.find(target => target.type === 'page' && target.url === 'about:blank');
-    if (!page) throw new Error('Edge test tab missing');
+    const page = await waitFor(async () => (await read('/json/list'))?.find(
+      target => target.type === 'page' && target.url === 'about:blank',
+    ), 30000, 'EDGE_TAB_TIMEOUT');
     socket = new WebSocket(page.webSocketDebuggerUrl);
     await once(socket, 'open', { signal: AbortSignal.timeout(10000) });
     const send = devToolsConnection(socket);
     const keys = { Enter: ['Enter', 13, '\r'], Escape: ['Escape', 27, ''], Space: [' ', 32, ' '], Tab: ['Tab', 9, ''], ShiftTab: ['Tab', 9, ''] };
     return {
       version,
-      navigate: url => send('Page.navigate', { url }),
+      async navigate(url) {
+        await send('Page.bringToFront');
+        await send('Page.navigate', { url });
+      },
       async resize(width) {
         if (width < 650) {
           await send('Emulation.setDeviceMetricsOverride', { width, height: 800, deviceScaleFactor: 1, mobile: false });
@@ -166,7 +191,7 @@ async function openEdge(profileDir) {
       async close() {
         // Edge may close the socket before acknowledging Browser.close.
         try { await send('Browser.close').catch(() => {}); }
-        finally { socket.close(); await stop(child); }
+        finally { socket.close(); await stop(child, 15000); }
       },
     };
   } catch (err) {
