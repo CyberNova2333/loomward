@@ -578,3 +578,13 @@ Edge 158.0.4370.45 和 Safari 18.6 各通过 89 项键盘检查，包括取消�
 两轮使用源码包 SHA-256 `aa6a7b738cc32a6c0586dc80a749cb66f4161b9108c8c5238bc4b3eee5ed86ab` 和镜像 ID `sha256:ef51fede32df12c340844bf36798c61f0d3220e0a7aab156e3d6e204d31c641e`。
 
 Synced through d779f3cfc11bed49af3f5daec890b5cd9c082e2c
+
+## 2026-11-27 Docker 冷启动、容器清理与原生浏览器验收
+
+宿主验收现在会先确认 Docker 上下文使用本地端点，在 180 秒内等待上下文和引擎就绪，随后核对固定镜像。键盘套件可在容器引擎关闭时运行。Edge 验收分别报告调试端口、版本和初始标签的等待超时。Windows 凭据导出超时可通过 `CREDENTIAL_EXPORT_TIMEOUT` 定位。[运行方法与报告字段](walkthroughs/one-real-run.md#在-edge-和-safari-复验键盘操作)
+
+macOS 测试副本冷启动后通过全部 12 个检查组，Safari 通过 89 项键盘检查。只读工作区可以读取测试文件，写入被拒绝，验收容器无残留。Windows 冷启动时记录到 17 次引擎探测，约 156 秒后就绪。该轮 Edge 键盘检查通过，后续 DPAPI 凭据读回失败。系统更新并重启后的 Windows 全套结果仍待确认。[容器清理确认规则](modules/container-sandbox-and-file-policy.md)
+
+本次提交前，Linux 上的 `pnpm run check` 通过，`pnpm run test:ci` 共 215 项通过、16 项跳过、0 项失败。
+
+Synced through 77e5384ff6a83ea6e20740b819f197be4f74117a

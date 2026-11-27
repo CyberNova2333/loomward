@@ -92,7 +92,9 @@ python3 tools/acceptance/run.py --suite keyboard \
 
 可用 `--ssh-config` 指定专用 SSH 配置。省略 `--suite` 时沿用原有的宿主验收。`--only darwin` 和 `--only win32` 可定位单端失败，单端结果见 `guests.<平台>.passed`。
 
-要在同一次运行中复验宿主和浏览器，使用 `--suite all --image "$LOOMWARD_TEST_IMAGE"`。冷启动后，在两台副本的专用账户中用配置的 Docker CLI 运行 `docker --context CONTEXT image inspect IMAGE_ID`。将 `CONTEXT` 换成客体配置的上下文，`IMAGE_ID` 换成传给 `--image` 的完整镜像 ID。两端输出中的 `Id` 字段均与该值一致后，即可启动联合验收。Windows 若提示找不到 `docker_engine` 命名管道，等待本地引擎就绪再复查。
+要在同一次运行中复验宿主和浏览器，使用 `--suite all --image "$LOOMWARD_TEST_IMAGE"`。冷启动副本后，在专用桌面账户启动本地容器引擎即可运行验收。`host` 和 `all` 会在安装依赖前，使用客体配置的 Docker CLI 和上下文确认本地端点、等待引擎响应，再核对完整镜像 ID。等待上下文出现和引擎响应共用 180 秒上限，重试间隔为 2 秒。镜像只在本地查询。`keyboard` 可在 Docker 关闭时独立运行。
+
+在 `guests.<平台>.dockerReadiness` 中，`contextAttempts` 和 `engineAttempts` 分别记录两种探测的次数，`waitMs` 记录这两个阶段合计用时（毫秒）。失败可查看同一客体的 `errorType`。上下文缺失、无效或指向远端时报告 `DOCKER_CONTEXT_INVALID`，引擎等待超时为 `DOCKER_ENGINE_TIMEOUT`，找不到固定镜像和实测 ID 不符分别为 `DOCKER_IMAGE_MISSING`、`DOCKER_IMAGE_MISMATCH`。[Docker 就绪检查](../../tools/acceptance/docker-readiness.mjs)
 
 每个浏览器先调整桌面窗口至 650 像素，再检查 390 和 320 像素的 CSS 视口。Edge 的最窄两档通过 DevTools 设置视口，Safari 三档都调整原生窗口。各档均用键盘打开、遍历和退出导航，展开拓扑并从节点转入审批队列。用例还在状态推送前后检查焦点，验证 Esc 和默认取消返回同一请求。最后显式确认一次，核对临时批准记录的请求摘要，并检查队列标题在下一次刷新后仍有焦点。[键盘用例](../../tools/acceptance/keyboard.mjs) · [原生浏览器驱动](../../tools/acceptance/native-browser.mjs)
 
