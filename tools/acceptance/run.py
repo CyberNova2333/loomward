@@ -18,9 +18,9 @@ import uuid
 ROOT = Path(__file__).resolve().parents[2]
 SCOPE = ['local', 'scripts', 'packages', 'plugins', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml',
          'tools/acceptance/guest.mjs', 'tools/acceptance/interrupt-upgrade.ps1',
-         'tools/acceptance/keyboard.mjs', 'tools/acceptance/native-browser.mjs']
-REQUIRED = {'dependencies', 'nativeCredentials', 'install', 'protectedLifecycle', 'readonlyMount', 'zeroContainers',
-            'upgradeInterruption', 'previousReleaseLifecycle', 'upgradeRetry', 'privatePluginState'}
+         'tools/acceptance/keyboard.mjs', 'tools/acceptance/native-browser.mjs', 'tools/acceptance/docker-readiness.mjs']
+REQUIRED = {'dockerReadiness', 'dependencies', 'nativeCredentials', 'install', 'protectedLifecycle', 'readonlyMount',
+            'zeroContainers', 'upgradeInterruption', 'previousReleaseLifecycle', 'upgradeRetry', 'privatePluginState'}
 
 
 def git(*args):
@@ -48,6 +48,11 @@ def bundle():
     return output.getvalue()
 
 
+def readiness_allowance(options):
+    # Keep the original test budget available after the guest's three-minute readiness check.
+    return 0 if options.suite == 'keyboard' else 180
+
+
 def macos(options, archive, commit, digest):
     # SSH configuration supplies the dedicated account, private key and pinned host key.
     cmd = """
@@ -68,17 +73,18 @@ launchctl bootstrap "$domain" "$work/job.plist"
 n=0
 while [ ! -f acceptance-result.json ]; do
   n=$((n+1))
-  [ "$n" -lt 800 ] || exit 1
+  [ "$n" -lt GUEST_POLLS ] || exit 1
   if launchctl print "$domain/$label" | grep -q 'last exit code = [0-9]'; then [ -f acceptance-result.json ] || exit 1; fi
   sleep 1
 done
 cat acceptance-result.json
 """.replace('DIGEST', digest).replace('COMMIT', commit).replace('IMAGE', shlex.quote(options.image or '-')).replace('SUITE', options.suite)
+    cmd = cmd.replace('GUEST_POLLS', str(800 + readiness_allowance(options)))
     args = ['ssh', '-oBatchMode=yes', '-oStrictHostKeyChecking=yes', '-oConnectTimeout=10']
     if options.ssh_config:
         args += ['-F', options.ssh_config]
     args.extend(['--', options.mac_ssh, '/bin/sh -c ' + shlex.quote(cmd)])
-    result = subprocess.run(args, input=archive, capture_output=True, timeout=900, check=True)
+    result = subprocess.run(args, input=archive, capture_output=True, timeout=900 + readiness_allowance(options), check=True)
     return json.loads(result.stdout)
 
 
@@ -177,7 +183,7 @@ $a=New-ScheduledTaskAction -Execute "$env:WINDIR\System32\WindowsPowerShell\v1.0
 Register-ScheduledTask -TaskName 'JOB' -Action $a -Principal $p | Out-Null
 Start-ScheduledTask -TaskName 'JOB'
 """.replace('JOB', job).replace('DROP', drop).replace('\\USER\'', '\\' + user + "'"))
-        end = time.monotonic() + 900
+        end = time.monotonic() + 900 + readiness_allowance(options)
         while time.monotonic() < end:
             raw = agent.powershell("if(Test-Path -LiteralPath 'REPORT'){[IO.File]::ReadAllText('REPORT')}elseif((Get-ScheduledTask -TaskName 'JOB').State -eq 'Ready'){throw 'Guest task ended without report'}".replace('REPORT', result).replace('JOB', job))
             if raw:
@@ -283,12 +289,20 @@ def main():
             passed = (result.get('passed') is True and result.get('platform') == platform and
                       result.get('commit') == commit and result.get('image') == args.image and result.get('suite') == args.suite and
                       required <= checks.keys() and all(v == 'passed' for v in checks.values()))
-            results[platform] = {'passed': passed, 'checks': {k: checks.get(k, 'missing') for k in sorted(required)}}
+            results[platform] = {'checks': {k: checks.get(k, 'missing') for k in sorted(required)}}
+            if args.suite != 'keyboard':
+                metrics = result.get('dockerReadiness', {})
+                fields = ('contextAttempts', 'engineAttempts', 'waitMs')
+                if isinstance(metrics, dict) and all(type(metrics.get(k)) is int and metrics[k] >= 0 for k in fields):
+                    results[platform]['dockerReadiness'] = {k: metrics[k] for k in fields}
+                    passed = passed and metrics['contextAttempts'] > 0 and metrics['engineAttempts'] > 0
+                else:
+                    passed = False
             if args.suite != 'host':
                 summary, complete = keyboard_summary(result.get('keyboard', {}), platform, assets)
                 results[platform]['keyboard'] = summary
                 passed = passed and complete
-                results[platform]['passed'] = passed
+            results[platform]['passed'] = passed
             if not passed:
                 for key in ('dependencyError', 'errorType'):
                     value = result.get(key)

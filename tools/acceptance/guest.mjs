@@ -8,6 +8,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
+import { verifyDockerReadiness } from './docker-readiness.mjs';
 
 const root = path.resolve(import.meta.dirname, '../..');
 const win = process.platform === 'win32';
@@ -29,12 +30,23 @@ async function verify() {
   requireThat((win || process.platform === 'darwin') && /^[a-f0-9]{40}$/.test(report.commit));
   requireThat(['keyboard', 'host', 'all'].includes(suite));
   const withHost = suite !== 'keyboard';
-  const tools = withHost ? ['node', 'pnpm', 'docker'] : ['node', 'pnpm'];
-  for (const key of tools) requireThat(path.isAbsolute(profile[key]));
+  const toolPaths = [profile.node, profile.pnpm];
+  requireThat(toolPaths.every(tool => typeof tool === 'string' && path.isAbsolute(tool)));
   if (withHost) {
-    requireThat(/^sha256:[a-f0-9]{64}$/.test(report.image) && /^[a-zA-Z0-9_-]{1,64}$/.test(profile.context));
+    requireThat(/^sha256:[a-f0-9]{64}$/.test(report.image));
+    report.dockerReadiness = { contextAttempts: 0, engineAttempts: 0, waitMs: 0 };
+    await check('dockerReadiness', async () => {
+      if (typeof profile.docker !== 'string' || !path.isAbsolute(profile.docker)) {
+        throw Object.assign(new Error('Expected an absolute Docker CLI path'), { code: 'DOCKER_CLI_UNAVAILABLE' });
+      }
+      await verifyDockerReadiness({
+        context: profile.context, image: report.image, metrics: report.dockerReadiness,
+        query: (args, timeout) => run(profile.docker, ['--context', profile.context, ...args], { timeout, killSignal: 'SIGKILL' }),
+      });
+    });
+    toolPaths.push(profile.docker);
   }
-  process.env.PATH = [...tools.map(key => path.dirname(profile[key])), process.env.PATH].join(path.delimiter);
+  process.env.PATH = [...toolPaths.map(tool => path.dirname(tool)), process.env.PATH].join(path.delimiter);
   await check('dependencies', () => {
     requireThat('pnpm@' + run(profile.pnpm, ['--version']) === read(path.join(root, 'package.json')).packageManager);
     try { run(profile.pnpm, ['install', '--frozen-lockfile', '--ignore-scripts']); }
@@ -98,7 +110,6 @@ async function verifyHost() {
       requireThat(typeof one === 'string' && one.length >= 32 && token() === one);
     });
     await check('install', async () => {
-      requireThat(docker('image', 'inspect', '--format', '{{.Id}}', report.image) === report.image);
       await install();
       const cfg = read(configPath);
       requireThat(cfg.sandbox.image === report.image && cfg.requireLocalApproval && path.dirname(cfg.sourceRoot) === state);
