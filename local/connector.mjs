@@ -46,10 +46,11 @@ export function loadSecrets(stateDir, { fields } = {}) {
       return subset;
     }
     return data;
-  } catch {
-    // execFileSync errors can contain captured credential output and shell diagnostics.
-    // Never attach the original error or relay either stream to callers or logs.
-    throw new Error('Protected credential loading failed. Check the trusted local installation.');
+  } catch (error) {
+    // Never attach the child error, command, or captured credential streams.
+    const failure = new Error('Protected credential loading failed. Check the trusted local installation.');
+    if (error.code === 'ETIMEDOUT') failure.code = 'CREDENTIAL_EXPORT_TIMEOUT';
+    throw failure;
   }
 }
 
