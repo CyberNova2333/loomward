@@ -1753,3 +1753,6 @@ html[data-theme="dark"] { --rail: #101f30; --rail-active: #274c77; }
     margin: 16px auto;
   }
 }
+
+.lw-alert-samples { padding-inline-start: 1.4rem; overflow-wrap: anywhere; }
+.lw-alert-samples li + li { margin-block-start: .6rem; }

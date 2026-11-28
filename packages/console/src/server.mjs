@@ -15,6 +15,7 @@ import { moderationConfigFilePath } from '../../../local/moderation-config.mjs';
 import { createOllamaController } from '../../../local/ollama.mjs';
 import { detectHostPasskeySupport, readWebUiAuthSync } from '../../../local/webui-auth.mjs';
 import { collectStatusSnapshot, isLoopbackHost } from '../../../local/webui.mjs';
+import { createInjectionAlertStore } from '../../../local/injection-alerts.mjs';
 import { readTrustedJsonFile, validateStateDir } from './http-security.mjs';
 import { createConsoleSessionBroker } from './session-broker.mjs';
 import { createControlChannel } from './control-channel.mjs';
@@ -97,6 +98,8 @@ export async function startUnifiedConsole({
   const panelCollector = createConsolePanelCollector({ panelSlot, staticPanels });
 
   let consoleServer = null;
+  const alertStore = createInjectionAlertStore({ stateDir: resolvedState, workspaceRoots: startupRoots, readOnly: true });
+  let injectionAlerts = { activeCount: 0, items: [] };
   let lastSnapshot = null;
   let lastPanels = null;
   let lastDigest = '';
@@ -177,7 +180,9 @@ export async function startUnifiedConsole({
         lastSnapshot = snap;
         if (Array.isArray(panels)) lastPanels = panels;
         const effectivePanels = panels ?? lastPanels ?? [];
-        const digestHash = sha256OfSnapshot(snap, effectivePanels);
+        try { injectionAlerts = alertStore.snapshot(); }
+        catch { injectionAlerts = { unavailable: true, activeCount: 0, items: [] }; }
+        const digestHash = sha256OfSnapshot({ ...snap, injectionAlerts }, effectivePanels);
         const anySse = Boolean(consoleServer?.hasSseClients());
         if (broadcast && (force || digestHash !== lastDigest)) {
           lastDigest = digestHash;
@@ -247,6 +252,7 @@ export async function startUnifiedConsole({
       mcpProber,
       serviceController,
       getKernelSummary,
+      getInjectionAlerts: () => injectionAlerts,
       getRecentChannelEvents: () => controlChannel.recent(),
       trustDecider,
       getPluginSecretsAdmin: () => (
@@ -287,6 +293,7 @@ export async function startUnifiedConsole({
       ollama.close?.();
       broker.clearAll();
       await consoleServer.close();
+      alertStore.close();
       if (ownsChannel) await controlChannel.close();
     },
   });

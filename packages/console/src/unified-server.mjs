@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { injectionToolRef } from '../../../local/injection-alerts.mjs';
 import { TOOL_DEFINITIONS } from '../../../local/tools.mjs';
 import { isValidExternalToolName, digest as policyDigest } from '../../../local/request-policy.mjs';
 import { APPROVAL_ID, MAX_RECORD_BYTES, readJson, validRequest } from '../../../local/approval-store.mjs';
@@ -115,6 +116,7 @@ export async function createUnifiedConsoleServer({
   mcpProber = probeMcpServer,
   serviceController,
   getKernelSummary = () => ({ roots: [], units: [], pendingTrustDecisions: [] }),
+  getInjectionAlerts = () => ({ activeCount: 0, items: [] }),
   getRecentChannelEvents = () => [],
   trustDecider = null,
   getPluginSecretsAdmin = () => null,
@@ -210,6 +212,14 @@ export async function createUnifiedConsoleServer({
           requirePasskey: Boolean(snap.security.passkeyRequired ?? snap.security.requirePasskey),
         }
       : undefined;
+    const alerts = getInjectionAlerts();
+    // Resolve aliases only against tool names already visible in this authenticated catalog.
+    const catalog = new Map();
+    if (alerts.items.length) {
+      for (const tool of snap?.capabilities?.effectiveTools || []) {
+        if (tool.external && isValidExternalToolName(tool.name)) catalog.set(injectionToolRef(tool.name), tool.name);
+      }
+    }
     return {
       ...snap,
       ...(normalizedSecurity ? { security: normalizedSecurity } : {}),
@@ -220,6 +230,9 @@ export async function createUnifiedConsoleServer({
         units: Array.isArray(rawKernel.units) ? rawKernel.units : [],
         pendingTrustDecisions: Array.isArray(rawKernel.pendingTrustDecisions) ? rawKernel.pendingTrustDecisions : [],
       },
+      injectionAlerts: { ...alerts, items: alerts.items.map(item => ({
+        ...item, samples: item.samples.map(sample => ({ ...sample, tool: catalog.get(sample.tool) || sample.tool })),
+      })) },
       channelEvents: getRecentChannelEvents(),
       panels: Array.isArray(panels) ? panels : [],
     };

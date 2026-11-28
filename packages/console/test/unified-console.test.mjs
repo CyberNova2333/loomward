@@ -1080,6 +1080,8 @@ test('Unified Console /api/mcp-servers/save and /import enforce bounded probing,
 
 test('Unified Console manages write-only plugin secrets and moderation policy config without exposing plaintext secrets', async t => {
   const { createPluginSecretsStore } = await import('../../host/src/plugin-secrets.mjs');
+  let consoleSrv;
+  t.after(async () => { await consoleSrv?.close(); });
   const { stateDir, workspace } = await makeTempState(t);
   const ticket = issueSetupTicketSync(stateDir, {
     workspaceRoots: [workspace],
@@ -1087,7 +1089,7 @@ test('Unified Console manages write-only plugin secrets and moderation policy co
   });
   const secretsStore = createPluginSecretsStore({ stateDir, workspaceRoots: [workspace] });
   const events = [];
-  const consoleSrv = await startUnifiedConsole({
+  consoleSrv = await startUnifiedConsole({
     stateDir,
     host: '127.0.0.1',
     consolePort: 0,
@@ -1095,7 +1097,6 @@ test('Unified Console manages write-only plugin secrets and moderation policy co
     passkeyDetector: () => ({ supported: false, reason: 'none' }),
     getPluginSecretsAdmin: () => secretsStore.adminView,
   });
-  t.after(async () => { await consoleSrv.close(); });
   consoleSrv.controlChannel.subscribe(ev => events.push(ev));
 
   const home = await httpCall(consoleSrv.url, '/');
@@ -1134,6 +1135,11 @@ test('Unified Console manages write-only plugin secrets and moderation policy co
   });
   assert.equal(badModCfg.status, 400);
 
+  const invalidAlerts = await httpCall(consoleSrv.url, '/api/moderation/config', {
+    method: 'POST', headers: authHeaders, body: JSON.stringify({ injectionAlerts: { globalThreshold: -1 } }),
+  });
+  assert.equal(invalidAlerts.status, 400);
+
   const goodModCfg = await httpCall(consoleSrv.url, '/api/moderation/config', {
     method: 'POST',
     headers: authHeaders,
@@ -1142,6 +1148,7 @@ test('Unified Console manages write-only plugin secrets and moderation policy co
       policyProfile: 'balanced',
       cloudOptIn: true,
       cloudProvider: 'baidu-aip',
+      injectionAlerts: { clientThreshold: 1, globalThreshold: 6 },
       localGuard: { endpoint: 'http://127.0.0.1:11434', model: 'qwen3-guard' },
       canary: { enabled: true, endpoint: 'http://127.0.0.1:11434', model: 'qwen2.5-0.5b' },
     }),
@@ -1152,10 +1159,25 @@ test('Unified Console manages write-only plugin secrets and moderation policy co
   assert.ok(events.some(e => e.type === 'plugin.secrets_updated' && e.meta?.unitId === 'llm-moderation'));
   assert.ok(events.some(e => e.type === 'moderation.config_updated' && e.meta?.mode === 'guard-plus-canary'));
 
+  const limits = goodModCfg.json().config.injectionAlerts;
+  assert.deepEqual(limits, { clientThreshold: 1, globalThreshold: 6 });
+  const { createInjectionAlertStore } = await import('../../../local/injection-alerts.mjs');
+  const writer = createInjectionAlertStore({ stateDir, workspaceRoots: [workspace] });
+  try {
+    writer.record({ clientRef: 'a'.repeat(64), requestId: 'private-test-request', toolName: 'read_file',
+      stage: 'input', source: 'input', rule: 'prompt.injection', action: 'block' }, limits);
+  } finally { writer.close(); }
+  const unauthStatus = await httpCall(consoleSrv.url, '/api/status');
+  assert.equal(unauthStatus.status, 401);
+  assert.equal(unauthStatus.json().injectionAlerts, undefined);
   const statusAfter = await httpCall(consoleSrv.url, '/api/status', {
     headers: { cookie, 'x-loomward-tab-auth': tab },
   });
   assert.equal(statusAfter.status, 200);
+  const alerts = statusAfter.json().injectionAlerts;
+  assert.equal(alerts.activeCount, 1);
+  assert.equal(alerts.items[0].samples[0].tool, 'read_file');
+  assert.doesNotMatch(JSON.stringify(alerts), /private-test-request/);
   const auditEvents = statusAfter.json().events || [];
   const secEv = auditEvents.find(ev => ev.name === 'plugin_secret_saved');
   const modEv = auditEvents.find(ev => ev.name === 'moderation_config_saved');

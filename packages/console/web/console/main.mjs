@@ -12,6 +12,8 @@ import {
   svgEl,
 } from '../shared/client.mjs';
 
+import { renderInjectionAlerts } from './injection-alerts.mjs';
+
 const client = createOriginClient({ storageKey: 'loomward_console_tab_token' });
 const theme = initThemeToggle();
 const root = document.getElementById('app');
@@ -47,6 +49,7 @@ const state = {
   auth: null,
   snapshot: null,
   moderationConfig: null,
+  selectedInjectionAlert: null,
   draftMod: null,
   ollama: null,
   ollamaLoading: false,
@@ -917,6 +920,8 @@ function renderSidebar() {
           onClick: () => navigate(item.id),
         }, [
           makeIcon(item.icon), el('span', { text: item.label }),
+          item.id === 'moderation' && state.snapshot?.injectionAlerts?.activeCount > 0
+            ? el('span', { class: 'lw-nav-badge', 'aria-label': '活动注入告警', text: String(state.snapshot.injectionAlerts.activeCount) }) : null,
           item.id === 'approvals' && pending > 0 ? el('span', { class: 'lw-nav-badge', text: String(pending) }) : null,
           item.id === 'fencing' && cacheStatus && cacheStatus !== 'fresh'
             ? el('span', { class: 'lw-nav-badge', 'aria-label': '围栏缓存需要检查', title: '围栏缓存需要检查', text: '!' }) : null,
@@ -2133,6 +2138,8 @@ function normalizeComparableMod(raw) {
   const cnEnabled = Boolean(src.canary?.enabled || src.mode === 'guard-plus-canary');
   const cnKind = src.canary?.kind || 'http';
   return {
+    clientThreshold: src.injectionAlerts?.clientThreshold ?? 3,
+    globalThreshold: src.injectionAlerts?.globalThreshold ?? 10,
     mode: src.mode || 'local-only',
     policyProfile: src.policyProfile || 'experimental-resilient',
     defaultScope: src.defaultScope || 'combined',
@@ -2159,6 +2166,8 @@ function computeModerationDelta(savedRaw, draftRaw) {
   const changed = new Set();
   const diffs = [];
   const specs = [
+    ['clientThreshold', '单客户端告警阈值'],
+    ['globalThreshold', '全局告警阈值'],
     ['mode', '审查模式'],
     ['policyProfile', '回退策略'],
     ['defaultScope', '校验范围'],
@@ -2451,6 +2460,9 @@ function renderModerationPage() {
 
   const commitSaveConfig = () => runMutation(async () => {
     const draft = getDraftModConfig();
+    if (draft.injectionAlerts && Object.values(draft.injectionAlerts).some(n => !Number.isInteger(n) || n < 1 || n > 1000)) {
+      throw new Error('告警阈值必须是 1 至 1000 之间的整数。');
+    }
     const nextLocalKind = draft.localGuard?.kind || 'http';
     const nextLocalEp = (draft.localGuard?.endpoint || '').trim() || (nextLocalKind === 'ollama' ? 'http://127.0.0.1:11434' : null);
     const nextCanaryKind = draft.canary?.kind || 'http';
@@ -2836,6 +2848,20 @@ function renderModerationPage() {
             isDelta: changed.has('cnPrivate'),
           }),
         ]),
+        el('h3', { text: '注入告警阈值' }),
+        el('p', { class: 'lw-muted', text: '按最近 10 分钟内命中的独立请求数触发。两个阈值可分别设置为 1 至 1000。' }),
+        el('div', { class: 'lw-field-grid' }, [
+          ['clientThreshold', '单客户端告警阈值', 3], ['globalThreshold', '全局告警阈值', 10],
+        ].map(([field, label, fallback]) => el('label', { class: 'lw-field' }, [
+          el('span', { class: 'lw-field-label', text: label }),
+          el('input', { id: 'lw-' + field, type: 'number', class: 'lw-input', min: '1', max: '1000', step: '1',
+            value: String(cfg.injectionAlerts?.[field] ?? fallback),
+            onInput: event => {
+              cfg.injectionAlerts = { ...cfg.injectionAlerts, [field]: event.target.valueAsNumber };
+              syncModerationLiveRegions(savedCfg, commitSaveConfig);
+            },
+          }),
+        ]))),
         el('div', { 'data-mod-savebar-slot': '1' }, [renderModSaveBar(savedCfg, diffs, commitSaveConfig)]),
       ]),
     ]),
@@ -2847,6 +2873,11 @@ function renderModerationPage() {
   return el('div', { class: 'lw-stack-md' }, [
     makePageHeader('内容审查', '配置本地与云端模型的审查顺序和异常处理方式。'),
     el('datalist', { id: datalistId }, [...modelChoices].map(name => el('option', { value: name }))),
+    renderInjectionAlerts(state.snapshot?.injectionAlerts, state.selectedInjectionAlert, id => {
+      state.selectedInjectionAlert = id;
+      render();
+      document.getElementById('injection-alert-picker')?.focus();
+    }),
     tabBar,
     state.modTab === 'ollama' ? renderOllamaManagerCard() : routingSplit,
   ]);
@@ -5131,7 +5162,7 @@ function render() {
   const prevScrollLeft = prevPre ? prevPre.scrollLeft : 0;
 
   const navFocus = document.activeElement?.closest('.lw-nav-item')?.dataset.navId;
-  const focusId = document.activeElement?.closest('button[id], #lw-page-title')?.id;
+  const focusId = document.activeElement?.closest('button[id], #lw-page-title, #lw-clientThreshold, #lw-globalThreshold, #injection-alert-picker')?.id;
   const sidebarScroll = root.querySelector('.lw-sidebar')?.scrollTop;
   clearNode(root);
   const children = [];
@@ -5147,6 +5178,13 @@ function render() {
     const contentInner = el('div', { class: 'lw-content-inner' });
     if (state.error) contentInner.append(el('div', { class: 'lw-banner lw-banner-err', role: 'alert', text: state.error }));
     if (state.notice) contentInner.append(el('div', { class: 'lw-banner lw-banner-ok', role: 'status', text: state.notice }));
+    const activeAlerts = state.snapshot?.injectionAlerts?.activeCount;
+    if (activeAlerts > 0 && state.page !== 'moderation') {
+      contentInner.append(el('div', { class: 'lw-banner lw-row lw-between' }, [
+        el('span', { text: `有 ${activeAlerts} 条提示词注入告警达到阈值` }),
+        makeIconButton({ text: '查看告警', onClick: () => navigate('moderation') }),
+      ]));
+    }
     contentInner.append(renderActivePage());
 
     const backdrop = el('div', {

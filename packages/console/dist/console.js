@@ -221,6 +221,47 @@
     };
   }
 
+  // web/console/injection-alerts.mjs
+  var stageLabels = { input: "\u8F93\u5165\u68C0\u67E5", output: "\u8F93\u51FA\u68C0\u67E5", combined: "\u8054\u5408\u68C0\u67E5", stream_chunk: "\u6D41\u5F0F\u5206\u7247", stream_end: "\u6D41\u5F0F\u7ED3\u675F" };
+  var sourceLabels = { input: "\u7528\u6237\u8F93\u5165", output: "\u5DE5\u5177\u8FD4\u56DE", combined: "\u8F93\u5165\u4E0E\u8FD4\u56DE\u8054\u5408\u547D\u4E2D" };
+  var actionLabels = { allow: "\u653E\u884C", escalate: "\u8F6C\u4EBA\u5DE5\u5BA1\u6279", redact: "\u8131\u654F", block: "\u963B\u65AD" };
+  var formatTime = (time) => new Date(time).toLocaleTimeString("zh-CN", { hour12: false });
+  var scopeLabel = (item) => item.scope === "global" ? "\u5168\u5C40" : "\u5BA2\u6237\u7AEF " + item.client;
+  function renderInjectionAlerts(snapshot, selectedId, select) {
+    const section = el("section", { class: "lw-section", "aria-labelledby": "injection-alert-title" }, [
+      el("h3", { id: "injection-alert-title", text: "\u63D0\u793A\u8BCD\u6CE8\u5165\u544A\u8B66" })
+    ]);
+    const items = snapshot?.items || [];
+    if (!items.length) {
+      section.append(el("p", { class: "lw-muted", text: snapshot?.unavailable ? "\u6682\u65F6\u65E0\u6CD5\u8BFB\u53D6\u672C\u673A\u544A\u8B66\u8BB0\u5F55\u3002" : "\u6700\u8FD1 24 \u5C0F\u65F6\u6CA1\u6709\u8FBE\u5230\u9608\u503C\u7684\u544A\u8B66\u3002" }));
+      return section;
+    }
+    const current = items.find((item) => item.id === selectedId) || items[0];
+    const picker = el("select", {
+      class: "lw-select",
+      id: "injection-alert-picker",
+      "aria-label": "\u9009\u62E9\u544A\u8B66",
+      onChange: (event) => select(Number(event.target.value))
+    }, items.map((item) => el("option", {
+      value: String(item.id),
+      text: `#${item.id} \xB7 ${scopeLabel(item)} \xB7 ${item.active ? "\u89E6\u53D1\u4E2D" : "\u5DF2\u56DE\u843D"} \xB7 ${formatTime(item.openedAt)}`
+    })));
+    picker.value = String(current.id);
+    section.append(
+      picker,
+      el("p", { text: `\u6700\u8FD1\u4E00\u6B21\u547D\u4E2D\u65F6\uFF0C10 \u5206\u949F\u5185\u6709 ${current.count} \u4E2A\u72EC\u7ACB\u8BF7\u6C42\uFF0C\u9608\u503C ${current.threshold}\uFF0C\u6D89\u53CA ${current.clients} \u4E2A\u5BA2\u6237\u7AEF\u3002` }),
+      el("p", { text: `\u7528\u6237\u8F93\u5165 ${current.inputs} \xB7 \u5DE5\u5177\u8FD4\u56DE ${current.outputs} \xB7 \u8054\u5408\u6765\u6E90 ${current.combined}\u3002\u540C\u4E00\u8BF7\u6C42\u53EF\u547D\u4E2D\u591A\u4E2A\u6765\u6E90\u3002` }),
+      el("p", { class: "lw-muted", text: `\u9996\u6B21\u89E6\u53D1 ${new Date(current.openedAt).toLocaleString("zh-CN")} \xB7 \u6700\u8FD1\u66F4\u65B0 ${formatTime(current.updatedAt)}` }),
+      el("h4", { text: "\u6700\u8FD1\u547D\u4E2D\u8BF7\u6C42\uFF08\u6700\u591A 5 \u4E2A\uFF09" }),
+      el("ul", { class: "lw-alert-samples" }, current.samples.map((sample) => el("li", {}, [
+        el("strong", { text: `${sourceLabels[sample.source]} \xB7 ${stageLabels[sample.stage]} \xB7 ${actionLabels[sample.action]}` }),
+        el("div", { text: `\u5DE5\u5177 ${sample.tool} \xB7 \u89C4\u5219 ${sample.rule} \xB7 \u5BA2\u6237\u7AEF ${sample.client}` }),
+        el("code", { text: "\u8BF7\u6C42\u6458\u8981 " + sample.request })
+      ])))
+    );
+    return section;
+  }
+
   // web/console/main.mjs
   var client = createOriginClient({ storageKey: "loomward_console_tab_token" });
   var theme = initThemeToggle();
@@ -255,6 +296,7 @@
     auth: null,
     snapshot: null,
     moderationConfig: null,
+    selectedInjectionAlert: null,
     draftMod: null,
     ollama: null,
     ollamaLoading: false,
@@ -1103,6 +1145,7 @@
           }, [
             makeIcon(item.icon),
             el("span", { text: item.label }),
+            item.id === "moderation" && state.snapshot?.injectionAlerts?.activeCount > 0 ? el("span", { class: "lw-nav-badge", "aria-label": "\u6D3B\u52A8\u6CE8\u5165\u544A\u8B66", text: String(state.snapshot.injectionAlerts.activeCount) }) : null,
             item.id === "approvals" && pending > 0 ? el("span", { class: "lw-nav-badge", text: String(pending) }) : null,
             item.id === "fencing" && cacheStatus && cacheStatus !== "fresh" ? el("span", { class: "lw-nav-badge", "aria-label": "\u56F4\u680F\u7F13\u5B58\u9700\u8981\u68C0\u67E5", title: "\u56F4\u680F\u7F13\u5B58\u9700\u8981\u68C0\u67E5", text: "!" }) : null
           ]))
@@ -2308,6 +2351,8 @@
     const cnEnabled = Boolean(src.canary?.enabled || src.mode === "guard-plus-canary");
     const cnKind = src.canary?.kind || "http";
     return {
+      clientThreshold: src.injectionAlerts?.clientThreshold ?? 3,
+      globalThreshold: src.injectionAlerts?.globalThreshold ?? 10,
       mode: src.mode || "local-only",
       policyProfile: src.policyProfile || "experimental-resilient",
       defaultScope: src.defaultScope || "combined",
@@ -2333,6 +2378,8 @@
     const changed = /* @__PURE__ */ new Set();
     const diffs = [];
     const specs = [
+      ["clientThreshold", "\u5355\u5BA2\u6237\u7AEF\u544A\u8B66\u9608\u503C"],
+      ["globalThreshold", "\u5168\u5C40\u544A\u8B66\u9608\u503C"],
       ["mode", "\u5BA1\u67E5\u6A21\u5F0F"],
       ["policyProfile", "\u56DE\u9000\u7B56\u7565"],
       ["defaultScope", "\u6821\u9A8C\u8303\u56F4"],
@@ -2625,6 +2672,9 @@
     const canaryActive = Boolean(cfg.canary?.enabled || cfg.mode === "guard-plus-canary");
     const commitSaveConfig = () => runMutation(async () => {
       const draft = getDraftModConfig();
+      if (draft.injectionAlerts && Object.values(draft.injectionAlerts).some((n) => !Number.isInteger(n) || n < 1 || n > 1e3)) {
+        throw new Error("\u544A\u8B66\u9608\u503C\u5FC5\u987B\u662F 1 \u81F3 1000 \u4E4B\u95F4\u7684\u6574\u6570\u3002");
+      }
       const nextLocalKind = draft.localGuard?.kind || "http";
       const nextLocalEp = (draft.localGuard?.endpoint || "").trim() || (nextLocalKind === "ollama" ? "http://127.0.0.1:11434" : null);
       const nextCanaryKind = draft.canary?.kind || "http";
@@ -3036,6 +3086,27 @@
               isDelta: changed.has("cnPrivate")
             })
           ]),
+          el("h3", { text: "\u6CE8\u5165\u544A\u8B66\u9608\u503C" }),
+          el("p", { class: "lw-muted", text: "\u6309\u6700\u8FD1 10 \u5206\u949F\u5185\u547D\u4E2D\u7684\u72EC\u7ACB\u8BF7\u6C42\u6570\u89E6\u53D1\u3002\u4E24\u4E2A\u9608\u503C\u53EF\u5206\u522B\u8BBE\u7F6E\u4E3A 1 \u81F3 1000\u3002" }),
+          el("div", { class: "lw-field-grid" }, [
+            ["clientThreshold", "\u5355\u5BA2\u6237\u7AEF\u544A\u8B66\u9608\u503C", 3],
+            ["globalThreshold", "\u5168\u5C40\u544A\u8B66\u9608\u503C", 10]
+          ].map(([field, label, fallback]) => el("label", { class: "lw-field" }, [
+            el("span", { class: "lw-field-label", text: label }),
+            el("input", {
+              id: "lw-" + field,
+              type: "number",
+              class: "lw-input",
+              min: "1",
+              max: "1000",
+              step: "1",
+              value: String(cfg.injectionAlerts?.[field] ?? fallback),
+              onInput: (event) => {
+                cfg.injectionAlerts = { ...cfg.injectionAlerts, [field]: event.target.valueAsNumber };
+                syncModerationLiveRegions(savedCfg, commitSaveConfig);
+              }
+            })
+          ]))),
           el("div", { "data-mod-savebar-slot": "1" }, [renderModSaveBar(savedCfg, diffs, commitSaveConfig)])
         ])
       ]),
@@ -3046,6 +3117,11 @@
     return el("div", { class: "lw-stack-md" }, [
       makePageHeader("\u5185\u5BB9\u5BA1\u67E5", "\u914D\u7F6E\u672C\u5730\u4E0E\u4E91\u7AEF\u6A21\u578B\u7684\u5BA1\u67E5\u987A\u5E8F\u548C\u5F02\u5E38\u5904\u7406\u65B9\u5F0F\u3002"),
       el("datalist", { id: datalistId }, [...modelChoices].map((name) => el("option", { value: name }))),
+      renderInjectionAlerts(state.snapshot?.injectionAlerts, state.selectedInjectionAlert, (id) => {
+        state.selectedInjectionAlert = id;
+        render();
+        document.getElementById("injection-alert-picker")?.focus();
+      }),
       tabBar,
       state.modTab === "ollama" ? renderOllamaManagerCard() : routingSplit
     ]);
@@ -5340,7 +5416,7 @@ ${sampleBodyStr}` : curlSnippet })
     const prevScrollTop = prevPre ? prevPre.scrollTop : 0;
     const prevScrollLeft = prevPre ? prevPre.scrollLeft : 0;
     const navFocus = document.activeElement?.closest(".lw-nav-item")?.dataset.navId;
-    const focusId = document.activeElement?.closest("button[id], #lw-page-title")?.id;
+    const focusId = document.activeElement?.closest("button[id], #lw-page-title, #lw-clientThreshold, #lw-globalThreshold, #injection-alert-picker")?.id;
     const sidebarScroll = root.querySelector(".lw-sidebar")?.scrollTop;
     clearNode(root);
     const children = [];
@@ -5355,6 +5431,13 @@ ${sampleBodyStr}` : curlSnippet })
       const contentInner = el("div", { class: "lw-content-inner" });
       if (state.error) contentInner.append(el("div", { class: "lw-banner lw-banner-err", role: "alert", text: state.error }));
       if (state.notice) contentInner.append(el("div", { class: "lw-banner lw-banner-ok", role: "status", text: state.notice }));
+      const activeAlerts = state.snapshot?.injectionAlerts?.activeCount;
+      if (activeAlerts > 0 && state.page !== "moderation") {
+        contentInner.append(el("div", { class: "lw-banner lw-row lw-between" }, [
+          el("span", { text: `\u6709 ${activeAlerts} \u6761\u63D0\u793A\u8BCD\u6CE8\u5165\u544A\u8B66\u8FBE\u5230\u9608\u503C` }),
+          makeIconButton({ text: "\u67E5\u770B\u544A\u8B66", onClick: () => navigate("moderation") })
+        ]));
+      }
       contentInner.append(renderActivePage());
       const backdrop = el("div", {
         class: `lw-sidebar-backdrop ${state.mobileNavOpen ? "open" : ""}`,
