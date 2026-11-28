@@ -588,3 +588,11 @@ macOS 测试副本冷启动后通过全部 12 个检查组，Safari 通过 89 �
 本次提交前，Linux 上的 `pnpm run check` 通过，`pnpm run test:ci` 共 215 项通过、16 项跳过、0 项失败。
 
 Synced through 77e5384ff6a83ea6e20740b819f197be4f74117a
+
+## 2026-11-28 管理员控制台提示单客户端和全局注入告警
+
+在「内容审查」可分别设置单客户端和全局阈值，默认在 10 分钟内达到 3 个和 10 个独立请求时触发。同一已认证客户端的请求在 24 小时内去重，审查阶段和重试可共享同一条记录。管理员可从跨页提示查看涉及的客户端数、用户输入与工具返回的命中数、处置及请求摘要。[计数口径与脱敏范围](../plugins/llm-moderation/README.md#管理员注入告警)
+
+Linux 上的控制台构建、源码检查和分层检查通过。完整测试共 237 项，221 项通过、16 项跳过、0 项失败。宿主入口测试覆盖流式去重和多客户端共同触发全局告警，控制台接口测试覆盖未登录访问及脱敏字段。在隔离的本机预览中用 Edge 保存两个阈值，核对状态推送后出现的两种告警、详情切换，以及 390 像素宽度下的显示。[宿主入口验收](../plugins/llm-moderation/test/llm-moderation.test.mjs) · [聚合与持久化测试](../test/injection-alerts.test.mjs) · [控制台接口测试](../packages/console/test/unified-console.test.mjs)
+
+Synced through 02dffcd3f629cf14eb6f0f49ea17328f075d781c

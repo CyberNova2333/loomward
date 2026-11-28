@@ -44,12 +44,12 @@
   "highlights": {
     "zh": [
       "以 Cordis 4 + 冻结根插件清单（RPM）+ KernelGuard + PolicyTree 为安全微内核，机械守卫包间分层，锁定 tool:invoke@1 与 tool:stream@1 单调阻断不变量及按 caller 隔离的 plugin:secrets@1 密钥绑定",
-      "提供单源统一回环安全控制台（默认 127.0.0.1:18797：PassKey/强密码、逐参两步审批、能力总熔断、只写插件密钥托管、Ollama 本地运行时管理与安全策略配置、SSE 实时审计与零 JS 注入声明式 console:panel@1），承载 ContentInspect v2 独立/合并/原生流式审查协议",
+      "提供单源统一回环安全控制台（默认 127.0.0.1:18797：PassKey/强密码、逐参两步审批、能力总熔断、只写插件密钥托管、Ollama 本地运行时管理与安全策略配置、按客户端及全局阈值提示脱敏注入告警、SSE 实时审计与零 JS 注入声明式 console:panel@1），承载 ContentInspect v2 独立/合并/原生流式审查协议",
       "整合远程桥接、R1–R7 离线防泄漏护栏（@loomward/plugin-antileak）、多模态 LLM 内容审查（@loomward/plugin-llm-moderation：原生 Ollama Guard + 防诱导金丝雀探针 + 四大云端审核 API + 分块暂留流控）与人机决策台账（@loomward/plugin-decisions），并通过 @loomward/plugin-adapters 对接 CloudForge 与 ModelBridge"
     ],
     "en": [
       "Powered by a Cordis 4 microkernel with frozen Root Plugin Manifests (RPM), KernelGuard, PolicyTree, mechanical layering checks, monotonic tool:invoke@1 / tool:stream@1 safety latches, and caller-bound plugin:secrets@1 namespaces",
-      "Delivers a single-origin unified loopback console (127.0.0.1:18797: PassKey/password auth, two-step exact approval, kill switches, write-only plugin secret vault, moderation policy controls, live SSE telemetry, and zero-JS declarative console:panel@1) alongside ContentInspect v2",
+      "Delivers a single-origin unified loopback console (127.0.0.1:18797: PassKey/password auth, two-step exact approval, kill switches, write-only plugin secret vault, moderation policy controls, redacted prompt injection alerts with per-client and global thresholds, live SSE telemetry, and zero-JS declarative console:panel@1) alongside ContentInspect v2",
       "Unifies remote bridge, offline R1–R7 anti-leak guardrails (@loomward/plugin-antileak), multimodal LLM content moderation (@loomward/plugin-llm-moderation with Local Guard, Canary Inducement Probe, 4 cloud safety APIs, and holdback streaming), decision ledger (@loomward/plugin-decisions), and CloudForge/ModelBridge adapters"
     ]
   },
@@ -69,5 +69,5 @@
   "additionalTermsConsent": {
     "CyberNova": true
   },
-  "updatedAt": "2026-11-25"
+  "updatedAt": "2026-11-28"
 }
