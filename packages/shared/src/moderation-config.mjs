@@ -87,6 +87,7 @@ export const DEFAULT_MODERATION_CONFIG = Object.freeze({
     think: false,
     allowPrivateNetwork: false,
   }),
+  injectionAlerts: Object.freeze({ clientThreshold: 3, globalThreshold: 10 }),
   thresholds: Object.freeze({
     grayZoneLow: 0.25,
     grayZoneHigh: 0.8,
@@ -243,6 +244,20 @@ export function validateModerationConfig(raw = {}, { blockedOrigins = [] } = {})
     throw new Error(`Invalid streaming.redactPolicy: ${String(redactPolicy)}`);
   }
 
+  const alertConfig = raw.injectionAlerts === undefined ? {} : raw.injectionAlerts;
+  if (!alertConfig || typeof alertConfig !== 'object' || Array.isArray(alertConfig)) {
+    throw new TypeError('injectionAlerts must be an object.');
+  }
+  const injectionAlerts = { ...DEFAULT_MODERATION_CONFIG.injectionAlerts };
+  for (const field of Object.keys(injectionAlerts)) {
+    if (!Object.hasOwn(alertConfig, field)) continue;
+    const value = alertConfig[field];
+    if (!Number.isInteger(value) || value < 1 || value > 1000) {
+      throw new RangeError(`injectionAlerts.${field} must be an integer between 1 and 1000.`);
+    }
+    injectionAlerts[field] = value;
+  }
+
   const rawMedia = raw.media && typeof raw.media === 'object' ? raw.media : {};
   const overrides = {};
   if (raw.perToolOverrides !== undefined) {
@@ -285,6 +300,7 @@ export function validateModerationConfig(raw = {}, { blockedOrigins = [] } = {})
     enabled: raw.enabled !== false,
     mode,
     policyProfile,
+    injectionAlerts: Object.freeze(injectionAlerts),
     defaultScope,
     cloudOptIn: raw.cloudOptIn === true,
     cloudProvider,

@@ -2,6 +2,7 @@
 // This file is part of LoomWard (织盾) and is licensed under GNU AGPLv3 with Additional Terms (see LICENSE and LICENSE-ADDITIONAL_TERMS-zh-CN.md; ref: LICENSE-ADDITIONAL_TERMS-en.md).
 import fs from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { createInjectionAlertStore } from '../../../local/injection-alerts.mjs';
 import { readModerationConfigSync } from '../../../local/moderation-config.mjs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -78,6 +79,7 @@ export async function startLoomWardDaemon({
   const resolvedRoot = path.resolve(rootDir);
   const frozenRpm = await loadOrBuildFrozenRpm(resolvedRoot, rpm, requireFrozenRpm);
 
+  const injectionAlerts = createInjectionAlertStore({ stateDir, workspaceRoots });
   let kernelControl = null;
   const effectiveConsoleConfig = consoleConfig
     ? {
@@ -177,6 +179,10 @@ export async function startLoomWardDaemon({
           workspaceRoots,
           blockedOrigins: effectiveBlockedOrigins,
           ...(llmModeration && typeof llmModeration === 'object' ? llmModeration : {}),
+          recordInjection: (event, limits) => {
+            try { injectionAlerts.record(event, limits); }
+            catch { void record('injection_alert_store_failed', { outcome: 'write_failed' }); }
+          },
           readStoredConfig: () => readModerationConfigSync(stateDir, {
             workspaceRoots, blockedOrigins: effectiveBlockedOrigins, fallback: null,
           }),
@@ -198,6 +204,7 @@ export async function startLoomWardDaemon({
     if (localIngress) await localIngress.start();
     if (relayIngress && relay?.autoStart !== false) await relayIngress.start();
   } catch (error) {
+    injectionAlerts.close();
     await control.stop().catch(() => {});
     throw error;
   }
@@ -212,7 +219,7 @@ export async function startLoomWardDaemon({
         localIngress ? localIngress.stop() : Promise.resolve(),
         relayIngress ? relayIngress.stop() : Promise.resolve(),
       ]);
-      await control.stop();
+      try { await control.stop(); } finally { injectionAlerts.close(); }
     },
   });
 }

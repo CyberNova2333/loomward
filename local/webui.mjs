@@ -491,6 +491,7 @@ function collectTelemetryAndEvents(stateDir, pendingApprovals) {
         mcp_server_deleted: { tone: 'info', label: 'MCP 移除' },
         plugin_secret_saved: { tone: 'ok', label: '写入插件密钥' },
         plugin_secret_deleted: { tone: 'warn', label: '删除插件密钥' },
+        injection_alert_store_failed: { tone: 'err', label: '注入告警记录写入失败' },
         moderation_config_saved: { tone: 'ok', label: '更新审查策略' },
         moderation_ollama_install: { tone: 'info', label: '安装 Ollama' },
         moderation_ollama_start: { tone: 'ok', label: '启动 Ollama' },

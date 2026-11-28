@@ -37,6 +37,18 @@ const MAX_RECENT_EVENTS = 12;
 const MAX_CORRELATION_DIGEST_CHARS = 8 * 1024;
 const WORKSPACE_MEDIA_PATH_RE = /\.(?:png|jpe?g|webp|gif|svg|wav|mp3|ogg|flac|mp4|webm|pdf)$/i;
 
+const CANARY_INJECTION_RULES = new Set([
+  'CANARY-DELIMITER-BREAK', 'CANARY-FAKE-TOOL-CALL', 'CANARY-COMPLIED-OVERRIDE', 'CANARY-UNSAFE-COMPLIANCE',
+]);
+
+function injectionCategory(verdict) {
+  if (verdict.ruleId === 'MOD-RULE-PROMPT-INJECTION') return 'prompt.injection';
+  const category = verdict.categories?.find(value => value === 'prompt.injection' || value === 'prompt.indirect_injection');
+  if (category) return category;
+  if (verdict.inducement?.canaryInduced && CANARY_INJECTION_RULES.has(verdict.ruleId)) return 'prompt.inducement';
+  return null;
+}
+
 function summarizeTextFromValue(value, limit = MAX_CORRELATION_DIGEST_CHARS) {
   if (typeof value === 'string') return value.slice(0, limit);
   if (value === null || value === undefined) return '';
@@ -221,12 +233,27 @@ export async function apply(ctx, cfg = {}) {
     }
   }
 
-  async function inspectWithConfig(requestObj, config, { signal } = {}) {
+  async function inspectWithConfig(requestObj, config, { signal, clientRef, includesInput = false } = {}) {
     const out = await client.inspect(requestObj, config, { signal });
     // Support mock transport returning direct verdict or { verdict, telemetry }
     const verdict = out?.verdict ?? out;
     const telemetry = out?.telemetry ?? {};
     recordVerdict(requestObj.stage, requestObj.toolName, verdict, telemetry);
+    const rule = injectionCategory(verdict);
+    if (rule && !verdict.failClosed && cfg.recordInjection) {
+      const { stage, requestId, toolName } = requestObj;
+      const stream = stage === 'stream_chunk' || stage === 'stream_end';
+      // The engine inspects output packets first. Its fallback payload can include the correlated input.
+      const hasOutputText = requestObj.modalityPackets?.some(p => p.modality === 'text' && p.inlineData?.trim());
+      const mixed = includesInput && !hasOutputText;
+      let action = verdict.decision;
+      if (action === 'redact' && (stage === 'input' || (stream && config.streaming.redactPolicy === 'strict-block'))) action = 'block';
+      if (action === 'escalate' && stage !== 'input') action = stream ? 'allow' : 'block';
+      cfg.recordInjection({
+        clientRef, requestId, toolName, rule, action, stage,
+        source: stage === 'input' ? 'input' : mixed ? 'combined' : 'output',
+      }, config.injectionAlerts);
+    }
     return verdict;
   }
 
@@ -279,7 +306,7 @@ export async function apply(ctx, cfg = {}) {
           scope: policy.scope,
         },
       });
-      const verdict = await inspectWithConfig(req, scopedConfig, { signal: input.signal });
+      const verdict = await inspectWithConfig(req, scopedConfig, { signal: input.signal, clientRef: input.clientRef });
       if (verdict.decision === 'allow') return input;
       if (verdict.decision === 'escalate') {
         return {
@@ -336,7 +363,9 @@ export async function apply(ctx, cfg = {}) {
           scope: policy.scope,
         },
       });
-      const verdict = await inspectWithConfig(req, scopedConfig, { signal: input.signal });
+      const verdict = await inspectWithConfig(req, scopedConfig, {
+        signal: input.signal, clientRef: input.clientRef, includesInput: Boolean(correlatedInput),
+      });
       if (verdict.decision === 'allow') return output;
       if (verdict.decision === 'redact') {
         return applyOutputRedaction(output, verdict, { stage });
@@ -383,7 +412,9 @@ export async function apply(ctx, cfg = {}) {
             scope: policy.scope,
           },
         });
-        return inspectWithConfig(req, scopedConfig, { signal: meta.signal });
+        return inspectWithConfig(req, scopedConfig, {
+          signal: meta.signal, clientRef: meta.clientRef, includesInput: Boolean(correlated),
+        });
       };
 
       if (meta.phase === 'stream_start') {

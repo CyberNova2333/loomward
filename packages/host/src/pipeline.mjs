@@ -4,7 +4,7 @@ import { ToolBlockedError } from '@loomward/shared';
 import { ApprovalRecordTooLargeError } from '../../../local/approval-store.mjs';
 import { LocalApprovals } from '../../../local/approvals.mjs';
 import { RequestReceipts, TransientReceipts, StopReceipts } from '../../../local/receipts.mjs';
-import { validateRequestEnvelope, requiresApproval } from '../../../local/request-policy.mjs';
+import { digest, validateRequestEnvelope, requiresApproval } from '../../../local/request-policy.mjs';
 
 export { ToolBlockedError };
 
@@ -385,7 +385,9 @@ function normalizeErrorRpcId(raw) {
       }
 
       const calledName = authorized.body.params.name;
+      const clientRef = digest(frozenAuth.clientId);
       const invocation = Object.freeze({
+        clientRef,
         requestId: message.id,
         toolName: calledName,
         providerName: ownerEntry.name,
@@ -471,6 +473,7 @@ function normalizeErrorRpcId(raw) {
         if (streaming && typeof onChunk === 'function') {
           const startGate = await runStreamSlot({
             phase: 'stream_start',
+            clientRef,
             requestId: message.id,
             streamId: message.id,
             toolName: calledName,
@@ -507,6 +510,7 @@ function normalizeErrorRpcId(raw) {
             const seq = inSeq++;
             const gated = await runStreamSlot({
               phase: 'stream_chunk',
+              clientRef,
               requestId: message.id,
               streamId: message.id,
               toolName: calledName,
@@ -568,6 +572,7 @@ function normalizeErrorRpcId(raw) {
 
           const endGate = await runStreamSlot({
             phase: 'stream_end',
+            clientRef,
             requestId: message.id,
             streamId: message.id,
             toolName: calledName,

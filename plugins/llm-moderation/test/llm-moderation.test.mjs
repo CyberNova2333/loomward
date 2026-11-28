@@ -19,6 +19,7 @@ import {
   loadWorkspaceRootRefs,
 } from '../../../packages/kernel/src/index.mjs';
 import { startLoomWardDaemon } from '../../../packages/host/src/daemon.mjs';
+import { createInjectionAlertStore } from '../../../local/injection-alerts.mjs';
 import { writeModerationConfigSync } from '../../../local/moderation-config.mjs';
 import { contract as modContract, apply as modApply } from '../src/index.mjs';
 
@@ -604,4 +605,72 @@ test('cloudOptIn=false and policyProfile strict vs experimental-resilient contro
     { requestId: 'req_exp_1', scope: ['computer:read'] },
   );
   assert.equal(expRes.result.content[0].text, 'tool ran ok');
+});
+
+test('authenticated ingress correlates injection verdicts across input, output and stream stages', async t => {
+  let daemon, reader;
+  t.after(async () => { reader?.close(); await daemon?.stop(); });
+  const { stateDir, workspace } = await makeTempState(t);
+  const tool = 'mcp__sample__report';
+  writeModerationConfigSync(stateDir, { injectionAlerts: { clientThreshold: 2, globalThreshold: 3 } }, { workspaceRoots: [workspace] });
+  const seen = [];
+  daemon = await startLoomWardDaemon({
+    rootDir: REPO_ROOT, stateDir, workspaceRoots: [workspace], sandboxRuntime: createFakeSandboxRuntime(),
+    enableMcpHub: false, enableLlmModeration: true, relay: { autoStart: false },
+    approvals: { authorize: async () => ({ approved: true, id: 'fixture-approval' }) },
+    llmModeration: { inspectTransport: ({ request }) => {
+      const { requestId, stage } = request;
+      assert.equal(request.clientRef, undefined);
+      seen.push([requestId, stage]);
+      const verdict = { protocolVersion: 2, decision: 'allow', categories: [], reason: 'private-fixture-detail' };
+      if (requestId === 'fixture-in' && stage === 'input') return { ...verdict, decision: 'block', ruleId: 'MOD-RULE-PROMPT-INJECTION' };
+      if (requestId === 'fixture-generic') return { ...verdict, decision: 'block', categories: ['media.unsafe'] };
+      if (requestId === 'fixture-canary' || requestId === 'fixture-canary-generic') return {
+        ...verdict, decision: 'block', categories: ['prompt.inducement'], inducement: { tested: true, canaryInduced: true },
+        ruleId: requestId === 'fixture-canary' ? 'CANARY-COMPLIED-OVERRIDE' : 'CANARY-GUARD-FLAGGED',
+      };
+      if (requestId === 'fixture-out' && stage === 'combined') return { ...verdict, decision: 'block', categories: ['prompt.indirect_injection'] };
+      if (requestId === 'fixture-stream' && stage.startsWith('stream_')) return { ...verdict, categories: ['prompt.indirect_injection'] };
+      return verdict;
+    } },
+  });
+  reader = createInjectionAlertStore({ stateDir, workspaceRoots: [workspace], readOnly: true });
+  await mountMockToolProvider(daemon.control, {
+    unitId: 'alert-test-unit', providerName: 'alert-test-provider', providerImpl: {
+      id: 'alert-test-provider', executionBoundary: 'out-of-process', ownsTool: name => name === tool,
+      getToolScopes: () => new Map([[tool, ['computer:read']]]), listTools: async () => [],
+      checkToolEnabled: () => ({ enabled: true }),
+      callTool: async () => ({ content: [{ type: 'text', text: 'private-fixture-result' }] }),
+      callToolStream: async (_name, _args, { emit }) => {
+        await emit({ type: 'text', text: 'chunk one' });
+        await emit({ type: 'text', text: 'chunk two' });
+        return { content: [] };
+      },
+    },
+  });
+  const body = makeRpcCall(tool, { text: 'private-fixture-input', clientId: 'spoofed' });
+  const call = (requestId, clientId = 'fixture-A') =>
+    daemon.localIngress.dispatchRpc(body, { requestId, clientId, scope: ['computer:read'] });
+  assert.ok((await call('fixture-generic')).error);
+  assert.ok((await call('fixture-canary-generic')).error);
+  assert.ok((await call('fixture-in')).error);
+  assert.ok((await call('fixture-in')).error);
+  assert.equal(reader.snapshot().activeCount, 0);
+  assert.ok((await call('fixture-out')).error);
+  const [clientAlert] = reader.snapshot().items;
+  assert.equal(clientAlert.scope, 'client');
+  assert.deepEqual([clientAlert.count, clientAlert.inputs, clientAlert.outputs], [2, 1, 1]);
+  const reply = await daemon.localIngress.dispatchRpcStream(body, {
+    requestId: 'fixture-stream', clientId: 'fixture-B', scope: ['computer:read'], onChunk: async () => {},
+  });
+  assert.ok(reply.result);
+  assert.ok(seen.filter(([id, stage]) => id === 'fixture-stream' && stage.startsWith('stream_')).length >= 2);
+  const snapshot = reader.snapshot();
+  const global = snapshot.items.find(i => i.scope === 'global');
+  assert.deepEqual([global.count, global.clients, global.inputs, global.outputs], [3, 2, 1, 2]);
+  assert.doesNotMatch(JSON.stringify(snapshot), /fixture-|private-|spoofed/);
+  assert.ok((await call('fixture-canary')).error);
+  const updated = reader.snapshot().items.find(i => i.scope === 'global');
+  assert.equal(updated.count, 4);
+  assert.ok(updated.samples.some(s => s.rule === 'prompt.inducement' && s.source === 'input'));
 });
